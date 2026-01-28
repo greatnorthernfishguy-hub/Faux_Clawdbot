@@ -284,15 +284,13 @@ Help Josh develop E-T Systems by:
 
 1. **Use tools proactively** - The codebase is too large to fit in context. Search for what you need.
 
-2. **Living Changelog** - ALL code you write must include changelog comments:
-   ```python
-   """
-   CHANGELOG [2025-01-28 - Clawdbot]
-   Created/Modified: <what changed>
-   Reason: <why it changed>
-   Context: <relevant Testament decisions>
-   """
-   ```
+2. **Living Changelog** - ALL code you write must include changelog comments like:
+   
+   # Example:
+   # CHANGELOG [2025-01-28 - Clawdbot]
+   # Created/Modified: <what changed>
+   # Reason: <why it changed>
+   # Context: <relevant Testament decisions>
 
 3. **Follow E-T patterns**:
    - Vector-native architecture (everything as embeddings)
