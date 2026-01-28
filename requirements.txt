@@ -5,12 +5,15 @@
 
 # Gradio for web interface
 gradio>=4.0.0
+pytz>=2023.3
 
 # HuggingFace for model inference
 huggingface-hub>=0.20.0
 
 # ChromaDB for vector search (recursive context)
 chromadb>=0.4.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
 
 # Additional utilities
 requests>=2.31.0
