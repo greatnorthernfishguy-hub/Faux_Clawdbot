@@ -1,0 +1,20 @@
+# Python Dependencies for Clawdbot Dev Assistant
+#
+# CHANGELOG [2025-01-28 - Josh]
+# Core dependencies for recursive context + HF inference
+
+# Gradio for web interface
+gradio>=4.0.0
+
+# HuggingFace for model inference
+huggingface-hub>=0.20.0
+
+# ChromaDB for vector search (recursive context)
+chromadb>=0.4.0
+
+# Additional utilities
+requests>=2.31.0
+gitpython>=3.1.0
+
+# Performance
+numpy>=1.24.0
