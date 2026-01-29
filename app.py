@@ -28,7 +28,8 @@ from pathlib import Path
 # Note: Using text_generation instead of chat for better compatibility
 from huggingface_hub import InferenceClient
 
-client = InferenceClient(token=os.getenv("HF_TOKEN"))
+# HuggingFace client will be initialized in chat function
+# (Spaces sets HF_TOKEN as environment variable)
 
 # Initialize context manager
 REPO_PATH = os.getenv("REPO_PATH", "/workspace/e-t-systems")
@@ -180,6 +181,13 @@ def chat(message: str, history: list) -> str:
     History is in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
     """
     
+    # Initialize client here to ensure HF_TOKEN is loaded from environment
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        return "🔒 Error: HF_TOKEN not found in environment. Please add it to Space secrets."
+    
+    client = InferenceClient(token=token)
+    
     # Build messages array in OpenAI format (HF supports this)
     messages = [{"role": "system", "content": "You are Clawdbot, a helpful coding assistant for the E-T Systems project."}]
     
@@ -212,8 +220,8 @@ def chat(message: str, history: list) -> str:
             return "⚠️ Rate limit hit. Please wait a moment and try again.\n\nTip: HuggingFace free tier has rate limits. Consider upgrading to Pro for unlimited access."
         elif "Model is currently loading" in error_msg or "loading" in error_msg.lower():
             return "⏳ Model is starting up (cold start). Please wait 30-60 seconds and try again."
-        elif "Authorization" in error_msg or "401" in error_msg:
-            return "🔒 Authentication error. Check that HF_TOKEN is set correctly in Space secrets."
+        elif "Authorization" in error_msg or "401" in error_msg or "api_key" in error_msg.lower():
+            return f"🔒 Authentication error: {error_msg}\n\nCheck that HF_TOKEN is set correctly in Space secrets."
         else:
             return f"Error: {error_msg}\n\nTry asking a simpler question or check the Space logs for details."
 
