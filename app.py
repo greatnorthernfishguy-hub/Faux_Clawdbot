@@ -354,10 +354,23 @@ with gr.Blocks(
             - `list_files()` - Browse structure
             """)
     
-    # Event handlers
-    submit.click(chat, [msg, chatbot], chatbot)
-    msg.submit(chat, [msg, chatbot], chatbot)
-    clear.click(lambda: None, None, chatbot, queue=False)
+    # Event handlers - properly handle chatbot state
+    def handle_submit(message, history):
+        """Handle message submission and update chat history."""
+        if not message.strip():
+            return history, ""
+        
+        # Get response
+        response = chat(message, history)
+        
+        # Append to history
+        history.append((message, response))
+        
+        return history, ""  # Return empty string to clear textbox
+    
+    submit.click(handle_submit, [msg, chatbot], [chatbot, msg])
+    msg.submit(handle_submit, [msg, chatbot], [chatbot, msg])
+    clear.click(lambda: ([], ""), None, [chatbot, msg], queue=False)
     refresh_stats.click(get_stats, None, stats)
 
 # Launch when run directly
