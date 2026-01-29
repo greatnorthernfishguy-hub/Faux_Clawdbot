@@ -178,16 +178,21 @@ def chat(message: str, history: list) -> str:
     Main chat function.
     
     Uses HuggingFace Inference API text generation.
+    History is now in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
     """
     
     # Build conversation as a single prompt
     conversation = "You are Clawdbot, a helpful coding assistant for the E-T Systems project.\n\n"
     
-    # Add history
-    for user_msg, assistant_msg in history:
-        conversation += f"User: {user_msg}\n"
-        if assistant_msg:
-            conversation += f"Assistant: {assistant_msg}\n"
+    # Add history (Gradio 6.0 format)
+    for msg_dict in history:
+        role = msg_dict.get("role", "user")
+        content = msg_dict.get("content", "")
+        
+        if role == "user":
+            conversation += f"User: {content}\n"
+        elif role == "assistant":
+            conversation += f"Assistant: {content}\n"
     
     # Add current message
     conversation += f"User: {message}\n"
@@ -284,10 +289,7 @@ Remember: You're not just a coding assistant - you're helping build conditions f
 """
 
 # Create Gradio interface
-with gr.Blocks(
-    title="Clawdbot - E-T Systems Dev Assistant",
-    theme=gr.themes.Soft()
-) as demo:
+with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
     
     gr.Markdown("""
     # 🦞 Clawdbot: E-T Systems Development Assistant
@@ -354,7 +356,7 @@ with gr.Blocks(
             - `list_files()` - Browse structure
             """)
     
-    # Event handlers - properly handle chatbot state
+    # Event handlers - Gradio 6.0 message format
     def handle_submit(message, history):
         """Handle message submission and update chat history."""
         if not message.strip():
@@ -363,8 +365,9 @@ with gr.Blocks(
         # Get response
         response = chat(message, history)
         
-        # Append to history
-        history.append((message, response))
+        # Gradio 6.0 format: list of dicts with 'role' and 'content'
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": response})
         
         return history, ""  # Return empty string to clear textbox
     
