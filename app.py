@@ -175,18 +175,14 @@ def execute_tool(tool_name: str, arguments: dict) -> str:
 
 def chat(message: str, history: list) -> str:
     """
-    Main chat function with recursive context.
+    Main chat function.
     
-    Implements the MIT recursive language model approach:
-    1. Model gets user query
-    2. Model decides what context it needs
-    3. Model uses tools to retrieve context
-    4. Model synthesizes answer
-    5. Repeat if needed (up to max iterations)
+    Simplified version - direct chat without tool calling.
+    Tool functionality will be added once basic chat works.
     """
     
-    # Build conversation with system prompt
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # Build conversation messages
+    messages = []
     
     # Add conversation history
     for user_msg, assistant_msg in history:
@@ -197,67 +193,28 @@ def chat(message: str, history: list) -> str:
     # Add current message
     messages.append({"role": "user", "content": message})
     
-    # Recursive loop (like MIT paper - model queries context as needed)
-    max_iterations = 10
-    iteration_count = 0
-    
-    for iteration in range(max_iterations):
-        iteration_count += 1
+    try:
+        # Call model - simplified without tools for now
+        response = client.chat_completion(
+            messages=messages,
+            max_tokens=2000,
+            temperature=0.3,
+            stream=False
+        )
         
-        try:
-            # Call model with tools available
-            response = client.chat_completion(
-                messages=messages,
-                tools=TOOLS,
-                max_tokens=2000,
-                temperature=0.3  # Lower temp for more consistent code generation
-            )
-            
+        # Extract response
+        if hasattr(response, 'choices') and len(response.choices) > 0:
             choice = response.choices[0]
-            assistant_message = choice.message
-            
-            # Check if model wants to use tools (recursive retrieval)
-            if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
-                # Model is recursively querying context!
-                tool_results = []
-                
-                for tool_call in assistant_message.tool_calls:
-                    tool_name = tool_call.function.name
-                    arguments = json.loads(tool_call.function.arguments)
-                    
-                    # Execute tool and get result
-                    result = execute_tool(tool_name, arguments)
-                    tool_results.append(f"[Tool: {tool_name}]\n{result}\n")
-                    
-                    # Add to conversation for next iteration
-                    messages.append({
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [tool_call.dict()]
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result
-                    })
-                
-                # Continue loop - model will process tool results
-                continue
-            
-            else:
-                # Model has final answer
-                final_response = assistant_message.content or "I encountered an issue generating a response."
-                
-                # Add iteration info if more than 1 (shows recursive process)
-                if iteration_count > 1:
-                    final_response += f"\n\n*Used {iteration_count} context retrievals to answer*"
-                
-                return final_response
+            if hasattr(choice, 'message'):
+                return choice.message.content or "I couldn't generate a response."
+            elif hasattr(choice, 'text'):
+                return choice.text
         
-        except Exception as e:
-            return f"Error during conversation: {str(e)}\n\nPlease try rephrasing your question."
-    
-    return "Reached maximum context retrieval iterations. Please try a more specific question."
+        return "Unexpected response format from model."
+        
+    except Exception as e:
+        error_msg = str(e)
+        return f"Error: {error_msg}\n\nThis might be a model configuration issue. Check the logs for details."
 
 SYSTEM_PROMPT = """You are Clawdbot, a development assistant for the E-T Systems project.
 
