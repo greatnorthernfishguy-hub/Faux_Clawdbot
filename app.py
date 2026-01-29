@@ -181,16 +181,21 @@ def chat(message: str, history: list) -> str:
     History is in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
     """
     
-    # Debug: Check what environment variables are available
-    env_vars = {k: v[:10] + "..." if v and len(v) > 10 else v for k, v in os.environ.items() if "HF" in k or "TOKEN" in k}
-    print(f"DEBUG - Environment variables with HF/TOKEN: {env_vars}")
+    # Try multiple possible token names that HF might use
+    token = (
+        os.getenv("HF_TOKEN") or 
+        os.getenv("HUGGING_FACE_HUB_TOKEN") or 
+        os.getenv("HUGGINGFACE_TOKEN") or
+        os.getenv("HF_API_TOKEN")
+    )
     
-    # Initialize client here to ensure HF_TOKEN is loaded from environment
-    token = os.getenv("HF_TOKEN")
-    print(f"DEBUG - HF_TOKEN value: {token[:10] + '...' if token else 'None'}")
+    # Debug: Check what environment variables are available
+    env_vars = {k: v[:10] + "..." if v and len(v) > 10 else v for k, v in os.environ.items() if "HF" in k or "TOKEN" in k or "HUGGING" in k}
+    print(f"DEBUG - Environment variables with HF/TOKEN/HUGGING: {env_vars}")
+    print(f"DEBUG - Token found: {token[:10] + '...' if token else 'None'}")
     
     if not token:
-        return f"🔒 Error: HF_TOKEN not found in environment.\n\nAvailable HF/TOKEN vars: {list(env_vars.keys())}\n\nPlease add HF_TOKEN to Space secrets."
+        return f"🔒 Error: No HF token found in environment.\n\nAvailable vars: {list(env_vars.keys())}\n\nTried: HF_TOKEN, HUGGING_FACE_HUB_TOKEN, HUGGINGFACE_TOKEN, HF_API_TOKEN\n\nPlease add HF_TOKEN to Space secrets and restart the Space."
     
     client = InferenceClient(token=token)
     
