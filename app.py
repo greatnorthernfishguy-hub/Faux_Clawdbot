@@ -175,50 +175,34 @@ def execute_tool(tool_name: str, arguments: dict) -> str:
 
 def chat(message: str, history: list) -> str:
     """
-    Main chat function.
+    Main chat function using HuggingFace Inference API.
     
-    Uses HuggingFace Inference API text generation.
-    History is now in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
+    History is in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
     """
     
-    # Build conversation as a single prompt
-    conversation = "You are Clawdbot, a helpful coding assistant for the E-T Systems project.\n\n"
+    # Build messages array in OpenAI format (HF supports this)
+    messages = [{"role": "system", "content": "You are Clawdbot, a helpful coding assistant for the E-T Systems project."}]
     
-    # Add history (Gradio 6.0 format)
-    for msg_dict in history:
-        role = msg_dict.get("role", "user")
-        content = msg_dict.get("content", "")
-        
-        if role == "user":
-            conversation += f"User: {content}\n"
-        elif role == "assistant":
-            conversation += f"Assistant: {content}\n"
+    # Add history (already in correct format from Gradio 6.0)
+    messages.extend(history)
     
     # Add current message
-    conversation += f"User: {message}\n"
-    conversation += "Assistant: "
+    messages.append({"role": "user", "content": message})
     
     try:
-        # Use post() method directly with the model endpoint
-        response = client.post(
-            json={
-                "inputs": conversation,
-                "parameters": {
-                    "max_new_tokens": 2000,
-                    "temperature": 0.3,
-                    "return_full_text": False
-                }
-            },
-            model="Qwen/Qwen2.5-Coder-32B-Instruct"
+        # Use chat_completion which is the correct method
+        response = client.chat_completion(
+            messages=messages,
+            model="Qwen/Qwen2.5-Coder-32B-Instruct",
+            max_tokens=2000,
+            temperature=0.3
         )
         
-        # Parse response
-        if isinstance(response, list) and len(response) > 0:
-            return response[0].get("generated_text", "No response generated")
-        elif isinstance(response, dict):
-            return response.get("generated_text", str(response))
+        # Extract the response text
+        if hasattr(response, 'choices') and len(response.choices) > 0:
+            return response.choices[0].message.content
         else:
-            return str(response)
+            return "Unexpected response format from model."
         
     except Exception as e:
         error_msg = str(e)
