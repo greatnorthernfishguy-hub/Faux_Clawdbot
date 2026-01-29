@@ -25,10 +25,10 @@ import os
 from pathlib import Path
 
 # Initialize HuggingFace client with best free coding model
-client = InferenceClient(
-    model="Qwen/Qwen2.5-Coder-32B-Instruct",
-    token=os.getenv("HF_TOKEN")
-)
+# Note: Using text_generation instead of chat for better compatibility
+from huggingface_hub import InferenceClient
+
+client = InferenceClient(token=os.getenv("HF_TOKEN"))
 
 # Initialize context manager
 REPO_PATH = os.getenv("REPO_PATH", "/workspace/e-t-systems")
@@ -177,44 +177,46 @@ def chat(message: str, history: list) -> str:
     """
     Main chat function.
     
-    Simplified version - direct chat without tool calling.
-    Tool functionality will be added once basic chat works.
+    Uses HuggingFace Inference API text generation.
     """
     
-    # Build conversation messages
-    messages = []
+    # Build conversation as a single prompt
+    conversation = "You are Clawdbot, a helpful coding assistant for the E-T Systems project.\n\n"
     
-    # Add conversation history
+    # Add history
     for user_msg, assistant_msg in history:
-        messages.append({"role": "user", "content": user_msg})
+        conversation += f"User: {user_msg}\n"
         if assistant_msg:
-            messages.append({"role": "assistant", "content": assistant_msg})
+            conversation += f"Assistant: {assistant_msg}\n"
     
     # Add current message
-    messages.append({"role": "user", "content": message})
+    conversation += f"User: {message}\n"
+    conversation += "Assistant: "
     
     try:
-        # Call model - simplified without tools for now
-        response = client.chat_completion(
-            messages=messages,
-            max_tokens=2000,
+        # Use text_generation which is more widely supported
+        response = client.text_generation(
+            prompt=conversation,
+            model="Qwen/Qwen2.5-Coder-32B-Instruct",
+            max_new_tokens=2000,
             temperature=0.3,
-            stream=False
+            return_full_text=False
         )
         
-        # Extract response
-        if hasattr(response, 'choices') and len(response.choices) > 0:
-            choice = response.choices[0]
-            if hasattr(choice, 'message'):
-                return choice.message.content or "I couldn't generate a response."
-            elif hasattr(choice, 'text'):
-                return choice.text
-        
-        return "Unexpected response format from model."
+        return response
         
     except Exception as e:
         error_msg = str(e)
-        return f"Error: {error_msg}\n\nThis might be a model configuration issue. Check the logs for details."
+        
+        # Provide helpful error messages
+        if "Rate limit" in error_msg or "429" in error_msg:
+            return "⚠️ Rate limit hit. Please wait a moment and try again.\n\nTip: HuggingFace free tier has rate limits. Consider upgrading to Pro for unlimited access."
+        elif "Model is currently loading" in error_msg:
+            return "⏳ Model is starting up (cold start). Please wait 30 seconds and try again."
+        elif "Authorization" in error_msg or "401" in error_msg:
+            return "🔒 Authentication error. Check that HF_TOKEN is set correctly in Space secrets."
+        else:
+            return f"Error: {error_msg}\n\nTry asking a simpler question or check the Space logs for details."
 
 SYSTEM_PROMPT = """You are Clawdbot, a development assistant for the E-T Systems project.
 
