@@ -199,16 +199,26 @@ def chat(message: str, history: list) -> str:
     conversation += "Assistant: "
     
     try:
-        # Use text_generation which is more widely supported
-        response = client.text_generation(
-            prompt=conversation,
-            model="Qwen/Qwen2.5-Coder-32B-Instruct",
-            max_new_tokens=2000,
-            temperature=0.3,
-            return_full_text=False
+        # Use post() method directly with the model endpoint
+        response = client.post(
+            json={
+                "inputs": conversation,
+                "parameters": {
+                    "max_new_tokens": 2000,
+                    "temperature": 0.3,
+                    "return_full_text": False
+                }
+            },
+            model="Qwen/Qwen2.5-Coder-32B-Instruct"
         )
         
-        return response
+        # Parse response
+        if isinstance(response, list) and len(response) > 0:
+            return response[0].get("generated_text", "No response generated")
+        elif isinstance(response, dict):
+            return response.get("generated_text", str(response))
+        else:
+            return str(response)
         
     except Exception as e:
         error_msg = str(e)
@@ -216,8 +226,8 @@ def chat(message: str, history: list) -> str:
         # Provide helpful error messages
         if "Rate limit" in error_msg or "429" in error_msg:
             return "⚠️ Rate limit hit. Please wait a moment and try again.\n\nTip: HuggingFace free tier has rate limits. Consider upgrading to Pro for unlimited access."
-        elif "Model is currently loading" in error_msg:
-            return "⏳ Model is starting up (cold start). Please wait 30 seconds and try again."
+        elif "Model is currently loading" in error_msg or "loading" in error_msg.lower():
+            return "⏳ Model is starting up (cold start). Please wait 30-60 seconds and try again."
         elif "Authorization" in error_msg or "401" in error_msg:
             return "🔒 Authentication error. Check that HF_TOKEN is set correctly in Space secrets."
         else:
