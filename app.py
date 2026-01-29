@@ -181,10 +181,16 @@ def chat(message: str, history: list) -> str:
     History is in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
     """
     
+    # Debug: Check what environment variables are available
+    env_vars = {k: v[:10] + "..." if v and len(v) > 10 else v for k, v in os.environ.items() if "HF" in k or "TOKEN" in k}
+    print(f"DEBUG - Environment variables with HF/TOKEN: {env_vars}")
+    
     # Initialize client here to ensure HF_TOKEN is loaded from environment
     token = os.getenv("HF_TOKEN")
+    print(f"DEBUG - HF_TOKEN value: {token[:10] + '...' if token else 'None'}")
+    
     if not token:
-        return "🔒 Error: HF_TOKEN not found in environment. Please add it to Space secrets."
+        return f"🔒 Error: HF_TOKEN not found in environment.\n\nAvailable HF/TOKEN vars: {list(env_vars.keys())}\n\nPlease add HF_TOKEN to Space secrets."
     
     client = InferenceClient(token=token)
     
