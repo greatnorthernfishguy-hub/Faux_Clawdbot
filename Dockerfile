@@ -14,11 +14,12 @@
 
 FROM python:3.11-slim
 
-# CACHE BUSTER: Force rebuild for Gradio 5.0+ [2025-01-30]
-ENV REBUILD_DATE=2025-01-30
-
 # Set working directory
 WORKDIR /app
+
+# CACHE BUSTER: Force rebuild for Gradio 5.0+ [2025-01-30]
+# This MUST be before COPY requirements.txt to invalidate cache
+ENV REBUILD_DATE=2025-01-30-v2
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
