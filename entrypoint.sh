@@ -12,7 +12,16 @@
 
 set -e
 
+echo "===== Application Startup at $(date -u +"%Y-%m-%d %H:%M:%S") ====="
+echo ""
 echo "🦞 Clawdbot Entrypoint Starting..."
+
+# DEBUG: Check installed Gradio version
+echo ""
+echo "🔍 DEBUG: Checking Gradio installation..."
+python -c "import gradio; print(f'✓ Gradio version: {gradio.__version__}')" || echo "✗ Gradio import failed"
+python -c "import gradio, inspect; print(f'✓ Gradio path: {inspect.getfile(gradio)}')" || true
+echo ""
 
 # Clone repository if URL provided
 if [ -n "$REPO_URL" ]; then
