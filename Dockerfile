@@ -1,15 +1,21 @@
 # Dockerfile for Clawdbot Dev Assistant on HuggingFace Spaces
 #
-# CHANGELOG [2025-01-28 - Josh]
-# Created containerized deployment for HF Spaces
+# CHANGELOG [2025-01-30 - Josh]
+# REBUILD: Updated to Gradio 5.0+ for type="messages" support
+# Added translation layer for Kimi K2.5 tool calling
+# Added multimodal file upload support
 # 
 # FEATURES:
 # - Python 3.11 for Gradio
+# - Gradio 5.0+ for modern chat interface
 # - ChromaDB for vector search
 # - Git for repo cloning
 # - Optimized layer caching
 
 FROM python:3.11-slim
+
+# CACHE BUSTER: Force rebuild for Gradio 5.0+ [2025-01-30]
+ENV REBUILD_DATE=2025-01-30
 
 # Set working directory
 WORKDIR /app
@@ -40,9 +46,13 @@ RUN if [ -n "$REPO_URL" ]; then \
         echo "Repository will be cloned on first run or mounted via Space secrets."; \
     fi
 
-# Copy application code
+# Copy application code and entrypoint
 COPY recursive_context.py .
 COPY app.py .
+COPY entrypoint.sh .
+
+# Make entrypoint executable
+RUN chmod +x entrypoint.sh
 
 # Create directory for ChromaDB persistence
 RUN mkdir -p /workspace/chroma_db
@@ -58,5 +68,5 @@ ENV REPO_PATH=/workspace/e-t-systems
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:7860/ || exit 1
 
-# Run the application
-CMD ["python", "app.py"]
+# Run via entrypoint script (handles repo cloning at runtime)
+CMD ["./entrypoint.sh"]
