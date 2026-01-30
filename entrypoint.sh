@@ -1,0 +1,40 @@
+#!/bin/bash
+#
+# Entrypoint script for Clawdbot
+# 
+# CHANGELOG [2025-01-29 - Josh]
+# Created to handle runtime repo cloning with authentication
+#
+# This script:
+# 1. Clones E-T Systems repo if REPO_URL is provided
+# 2. Uses GITHUB_TOKEN for authentication
+# 3. Starts the Gradio app
+
+set -e
+
+echo "🦞 Clawdbot Entrypoint Starting..."
+
+# Clone repository if URL provided
+if [ -n "$REPO_URL" ]; then
+    echo "📦 Repository URL detected: $REPO_URL"
+    
+    if [ -n "$GITHUB_TOKEN" ]; then
+        echo "🔑 GitHub token found, cloning with authentication..."
+        # Insert token into URL for authentication
+        AUTH_URL=$(echo "$REPO_URL" | sed "s|https://|https://${GITHUB_TOKEN}@|")
+        git clone "$AUTH_URL" /workspace/e-t-systems 2>&1 || echo "⚠️ Clone failed or repo already exists"
+    else
+        echo "⚠️ No GITHUB_TOKEN found, attempting public clone..."
+        git clone "$REPO_URL" /workspace/e-t-systems 2>&1 || echo "⚠️ Clone failed or repo already exists"
+    fi
+else
+    echo "ℹ️ No REPO_URL provided, using demo repository"
+fi
+
+# Check what got cloned
+echo "📂 Repository contents:"
+ls -la /workspace/e-t-systems/ || echo "⚠️ Repository directory doesn't exist yet"
+
+# Start the application
+echo "🚀 Starting Gradio application..."
+exec python app.py
