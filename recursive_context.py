@@ -66,7 +66,7 @@ class RecursiveContextManager:
             )
         )
         
-        # Create or get collection
+        # Create or get CODEBASE collection
         collection_name = self._get_collection_name()
         try:
             self.collection = self.chroma_client.get_collection(collection_name)
@@ -78,6 +78,20 @@ class RecursiveContextManager:
             )
             print(f"🆕 Created new collection: {collection_name}")
             self._index_codebase()
+        
+        # Create or get CONVERSATION collection for persistence
+        # CHANGELOG [2025-01-30 - Josh]: Added conversation persistence
+        # Implements full MIT recursive technique - chat history is searchable context
+        conversations_name = f"conversations_{self._get_collection_name().split('_')[1]}"
+        try:
+            self.conversations = self.chroma_client.get_collection(conversations_name)
+            print(f"💬 Loaded conversation history: {self.conversations.count()} exchanges")
+        except:
+            self.conversations = self.chroma_client.create_collection(
+                name=conversations_name,
+                metadata={"description": "Clawdbot conversation history"}
+            )
+            print(f"🆕 Created conversation collection: {conversations_name}")
     
     def _get_collection_name(self) -> str:
         """Generate unique collection name based on repo path."""
@@ -311,6 +325,76 @@ class RecursiveContextManager:
             
         except Exception as e:
             return [f"Error listing directory: {str(e)}"]
+    
+    def save_conversation_turn(self, user_message: str, assistant_message: str, turn_id: int):
+        """
+        Save a conversation turn to persistent storage.
+        
+        CHANGELOG [2025-01-30 - Josh]
+        Implements MIT recursive technique for conversations.
+        Chat history becomes searchable context that persists across sessions.
+        
+        Args:
+            user_message: What the user said
+            assistant_message: What Clawdbot responded
+            turn_id: Unique ID for this turn (timestamp-based)
+        """
+        import time
+        
+        # Create a combined document for semantic search
+        combined = f"USER: {user_message}\n\nASSISTANT: {assistant_message}"
+        
+        # Save with metadata
+        self.conversations.add(
+            documents=[combined],
+            metadatas=[{
+                "user": user_message[:500],  # Truncate for metadata
+                "assistant": assistant_message[:500],
+                "timestamp": int(time.time()),
+                "turn": turn_id
+            }],
+            ids=[f"turn_{turn_id}"]
+        )
+        
+        print(f"💾 Saved conversation turn {turn_id}")
+    
+    def search_conversations(self, query: str, n_results: int = 5) -> List[Dict]:
+        """
+        Search past conversations for relevant context.
+        
+        This enables TRUE unlimited context - Clawdbot can remember
+        everything ever discussed by searching its own conversation history.
+        
+        Args:
+            query: What to search for in past conversations
+            n_results: How many results to return
+            
+        Returns:
+            List of past conversation turns with user/assistant messages
+        """
+        if self.conversations.count() == 0:
+            return []
+        
+        results = self.conversations.query(
+            query_texts=[query],
+            n_results=min(n_results, self.conversations.count())
+        )
+        
+        formatted = []
+        for i, (doc, metadata) in enumerate(zip(results['documents'][0], results['metadatas'][0])):
+            formatted.append({
+                "turn": metadata.get("turn", "unknown"),
+                "user": metadata.get("user", ""),
+                "assistant": metadata.get("assistant", ""),
+                "full_text": doc,
+                "relevance": i + 1  # Lower is more relevant
+            })
+        
+        return formatted
+    
+    def get_conversation_count(self) -> int:
+        """Get total number of saved conversation turns."""
+        return self.conversations.count()
     
     def get_stats(self) -> Dict:
         """
