@@ -254,7 +254,8 @@ def chat(message: str, history: list) -> str:
     Main chat function using HuggingFace Inference API.
     
     Now using Kimi K2.5 - open source model with agent swarm capabilities!
-    History is in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
+    History is in Gradio 4.x format: list of tuples [(user_msg, bot_msg), ...]
+    Converted to OpenAI format internally for API: [{"role": "user/assistant", "content": "..."}]
     """
     
     # Try multiple possible token names that HF might use
@@ -327,8 +328,11 @@ When helping with code:
 You are Kimi K2.5 running as Clawdbot with automatic tool translation and persistent memory."""
     }]
     
-    # Add history (already in correct format from Gradio 6.0)
-    messages.extend(history)
+    # Convert Gradio 4.x tuple format to OpenAI dict format for API
+    # Gradio 4.x: [(user_msg, bot_msg), ...] → OpenAI: [{"role": "user", "content": "..."}, ...]
+    for user_msg, bot_msg in history:
+        messages.append({"role": "user", "content": user_msg})
+        messages.append({"role": "assistant", "content": bot_msg})
     
     # Add current message
     messages.append({"role": "user", "content": message})
@@ -441,10 +445,8 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
     with gr.Row():
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
-                type="messages",  # Gradio 6.0 format
                 height=600,
-                show_label=False,
-                show_copy_button=True
+                show_label=False
             )
             
             with gr.Row():
@@ -612,18 +614,19 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
         RATIONALE:
         Always giving Kimi recent context reduces need for tool calls
         and provides continuity across exchanges.
+        
+        Gradio 4.x format: [(user_msg, bot_msg), ...]
         """
-        if not history or len(history) < 2:
+        if not history or len(history) < 1:
             return ""
         
-        # Get last N*2 messages (each turn = user + assistant)
-        recent = history[-(n*2):]
+        # Get last N turns (each turn is a tuple)
+        recent = history[-n:]
         
         context_parts = []
-        for msg in recent:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            context_parts.append(f"{role}: {content[:200]}...")  # Truncate long messages
+        for user_msg, bot_msg in recent:
+            context_parts.append(f"user: {user_msg[:200]}...")  # Truncate long messages
+            context_parts.append(f"assistant: {bot_msg[:200]}...")
         
         return "Recent context:\n" + "\n".join(context_parts)
     
@@ -716,20 +719,17 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
             followup_message = f"{context}\n\nTool Results:\n{tool_context}\n\nBased on these results, please provide your response to the user."
             
             # Get final response with tool results
-            final_response = chat(followup_message, history + [
-                {"role": "user", "content": full_message},
-                {"role": "assistant", "content": response}
-            ])
+            # Add the initial exchange to history for context
+            final_response = chat(followup_message, history + [(full_message, response)])
             
             response = final_response
         
-        # Gradio 6.0 format: list of dicts with 'role' and 'content'
-        history.append({"role": "user", "content": full_message})
-        history.append({"role": "assistant", "content": response})
+        # Gradio 4.x format: list of tuples [(user_msg, bot_msg), ...]
+        history.append((full_message, response))
         
         # PERSISTENCE: Save this conversation turn
-        # Turn ID = current history length (monotonic, unique)
-        turn_id = len(history) // 2  # Divide by 2 since each turn has user + assistant
+        # Turn ID = current history length
+        turn_id = len(history)
         try:
             ctx.save_conversation_turn(full_message, response, turn_id)
         except Exception as e:
