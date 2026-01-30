@@ -327,7 +327,7 @@ When helping with code:
 You are Kimi K2.5 running as Clawdbot with automatic tool translation and persistent memory."""
     }]
     
-    # Add history (Gradio 6.0 dict format works directly with OpenAI API)
+    # Add history (Gradio 6.0+ dict format works directly with API)
     messages.extend(history)
     
     # Add current message
@@ -441,7 +441,7 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
     with gr.Row():
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
-                type="messages",  # Gradio 6.0 format
+                type="messages",  # Gradio 6.0+ format
                 height=600,
                 show_label=False,
                 show_copy_button=True
@@ -609,11 +609,7 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
         """
         Get last N conversation turns for auto-context injection.
         
-        RATIONALE:
-        Always giving Kimi recent context reduces need for tool calls
-        and provides continuity across exchanges.
-        
-        Gradio 6.0 format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+        Gradio 6.0+ format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
         """
         if not history or len(history) < 2:
             return ""
@@ -625,7 +621,7 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
         for msg in recent:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
-            context_parts.append(f"{role}: {content[:200]}...")  # Truncate long messages
+            context_parts.append(f"{role}: {content[:200]}...")
         
         return "Recent context:\n" + "\n".join(context_parts)
     
@@ -725,13 +721,12 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
             
             response = final_response
         
-        # Gradio 6.0 format: list of dicts with 'role' and 'content'
+        # Gradio 6.0+ format: list of dicts with 'role' and 'content'
         history.append({"role": "user", "content": full_message})
         history.append({"role": "assistant", "content": response})
         
         # PERSISTENCE: Save this conversation turn
-        # Turn ID = current history length (monotonic, unique)
-        turn_id = len(history) // 2  # Divide by 2 since each turn has user + assistant
+        turn_id = len(history) // 2
         try:
             ctx.save_conversation_turn(full_message, response, turn_id)
         except Exception as e:
