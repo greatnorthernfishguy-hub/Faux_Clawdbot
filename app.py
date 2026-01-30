@@ -178,6 +178,7 @@ def chat(message: str, history: list) -> str:
     """
     Main chat function using HuggingFace Inference API.
     
+    Now using Kimi K2.5 - open source model with agent swarm capabilities!
     History is in Gradio 6.0 format: list of {"role": "user/assistant", "content": "..."}
     """
     
@@ -189,18 +190,13 @@ def chat(message: str, history: list) -> str:
         os.getenv("HF_API_TOKEN")
     )
     
-    # Debug: Check what environment variables are available
-    env_vars = {k: v[:10] + "..." if v and len(v) > 10 else v for k, v in os.environ.items() if "HF" in k or "TOKEN" in k or "HUGGING" in k}
-    print(f"DEBUG - Environment variables with HF/TOKEN/HUGGING: {env_vars}")
-    print(f"DEBUG - Token found: {token[:10] + '...' if token else 'None'}")
-    
     if not token:
-        return f"🔒 Error: No HF token found in environment.\n\nAvailable vars: {list(env_vars.keys())}\n\nTried: HF_TOKEN, HUGGING_FACE_HUB_TOKEN, HUGGINGFACE_TOKEN, HF_API_TOKEN\n\nPlease add HF_TOKEN to Space secrets and restart the Space."
+        return "🔒 Error: No HF token found. Please add HF_TOKEN to Space secrets and restart."
     
     client = InferenceClient(token=token)
     
     # Build messages array in OpenAI format (HF supports this)
-    messages = [{"role": "system", "content": "You are Clawdbot, a helpful coding assistant for the E-T Systems project."}]
+    messages = [{"role": "system", "content": "You are Clawdbot, a helpful coding assistant for the E-T Systems AI consciousness project. You have access to agent swarm capabilities for complex tasks."}]
     
     # Add history (already in correct format from Gradio 6.0)
     messages.extend(history)
@@ -209,12 +205,12 @@ def chat(message: str, history: list) -> str:
     messages.append({"role": "user", "content": message})
     
     try:
-        # Use chat_completion which is the correct method
+        # Use Kimi K2.5 - native multimodal agentic model with swarm capabilities
         response = client.chat_completion(
             messages=messages,
-            model="Qwen/Qwen2.5-Coder-32B-Instruct",
+            model="moonshotai/Kimi-K2.5",
             max_tokens=2000,
-            temperature=0.3
+            temperature=0.6,  # Kimi recommends 0.6 for Instant mode
         )
         
         # Extract the response text
@@ -228,13 +224,13 @@ def chat(message: str, history: list) -> str:
         
         # Provide helpful error messages
         if "Rate limit" in error_msg or "429" in error_msg:
-            return "⚠️ Rate limit hit. Please wait a moment and try again.\n\nTip: HuggingFace free tier has rate limits. Consider upgrading to Pro for unlimited access."
+            return "⚠️ Rate limit hit. Please wait a moment and try again.\n\nTip: HuggingFace free tier has rate limits."
         elif "Model is currently loading" in error_msg or "loading" in error_msg.lower():
-            return "⏳ Model is starting up (cold start). Please wait 30-60 seconds and try again."
+            return "⏳ Kimi K2.5 is starting up (cold start). Please wait 30-60 seconds and try again.\n\nFirst request to a model always takes longer!"
         elif "Authorization" in error_msg or "401" in error_msg or "api_key" in error_msg.lower():
-            return f"🔒 Authentication error: {error_msg}\n\nCheck that HF_TOKEN is set correctly in Space secrets."
+            return f"🔒 Authentication error: {error_msg}"
         else:
-            return f"Error: {error_msg}\n\nTry asking a simpler question or check the Space logs for details."
+            return f"Error: {error_msg}\n\nNote: Kimi K2.5 is a large model (1T params) and may have longer cold starts."
 
 SYSTEM_PROMPT = """You are Clawdbot, a development assistant for the E-T Systems project.
 
@@ -342,11 +338,17 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
                 
                 **Files Indexed:** {ctx.collection.count() if hasattr(ctx, 'collection') else 'Initializing...'}
                 
-                **Model:** Qwen2.5-Coder-32B-Instruct
+                **Model:** Kimi K2.5
+                
+                **Capabilities:**
+                - 🐝 Agent Swarm (up to 100 sub-agents)
+                - 👁️ Multimodal (vision + text)
+                - 🧠 256K context window
+                - 💻 Visual coding
                 
                 **Context Mode:** Recursive Retrieval
                 
-                *No context window limits - I retrieve what I need on-demand!*
+                *No limits - retrieves what's needed on-demand!*
                 """
             
             stats = gr.Markdown(get_stats())
