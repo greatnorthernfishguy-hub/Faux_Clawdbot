@@ -14,12 +14,12 @@
 
 FROM python:3.11-slim
 
-# Set working directory
-WORKDIR /app
-
 # CACHE BUSTER: Force rebuild for Gradio 5.0+ [2025-01-30]
 # This MUST be before COPY requirements.txt to invalidate cache
-ENV REBUILD_DATE=2025-01-30-v2
+ENV REBUILD_DATE=2025-01-30-v3
+
+# Set working directory
+WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -31,8 +31,9 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements first (for layer caching)
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# FORCE CLEAN INSTALL: Uninstall any cached Gradio, then install fresh
+RUN pip uninstall -y gradio gradio-client && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Create workspace directory for repository
 RUN mkdir -p /workspace
