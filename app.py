@@ -18,7 +18,7 @@ Deploy to HuggingFace Spaces, access via browser on iPhone.
 """
 
 import gradio as gr
-from huggingface_hub import InferenceClient
+from huggingface_hub import InferenceClient, HfFileSystem, HfApi
 from recursive_context import RecursiveContextManager
 import json
 import os
@@ -33,6 +33,7 @@ from huggingface_hub import InferenceClient
 
 # Initialize context manager
 REPO_PATH = os.getenv("REPO_PATH", "/workspace/e-t-systems")
+ET_SYSTEMS_SPACE = os.getenv("ET_SYSTEMS_SPACE", "")  # Format: "username/space-name"
 context_manager = None
 
 def initialize_context():
@@ -40,6 +41,11 @@ def initialize_context():
     global context_manager
     if context_manager is None:
         repo_path = Path(REPO_PATH)
+        
+        # If ET_SYSTEMS_SPACE is set, sync from remote Space
+        if ET_SYSTEMS_SPACE:
+            sync_from_space(ET_SYSTEMS_SPACE, repo_path)
+        
         if not repo_path.exists():
             # If repo doesn't exist, create minimal structure for demo
             repo_path.mkdir(parents=True, exist_ok=True)
@@ -48,6 +54,92 @@ def initialize_context():
         
         context_manager = RecursiveContextManager(str(repo_path))
     return context_manager
+
+def sync_from_space(space_id: str, local_path: Path):
+    """
+    Sync files from E-T Systems Space to local workspace.
+    
+    CHANGELOG [2025-01-29 - Josh]
+    Created to enable Clawdbot to read E-T Systems code from its Space.
+    """
+    token = (
+        os.getenv("HF_TOKEN") or 
+        os.getenv("HUGGING_FACE_HUB_TOKEN") or 
+        os.getenv("HUGGINGFACE_TOKEN")
+    )
+    
+    if not token:
+        print("⚠️ No HF_TOKEN found - cannot sync from Space")
+        return
+    
+    try:
+        fs = HfFileSystem(token=token)
+        space_path = f"spaces/{space_id}"
+        
+        print(f"📥 Syncing from Space: {space_id}")
+        
+        # List all files in the Space
+        files = fs.ls(space_path, detail=False)
+        
+        # Download each file
+        local_path.mkdir(parents=True, exist_ok=True)
+        for file_path in files:
+            # Skip .git and hidden files
+            filename = file_path.split("/")[-1]
+            if filename.startswith("."):
+                continue
+            
+            print(f"  📄 Downloading: {filename}")
+            with fs.open(file_path, "rb") as f:
+                content = f.read()
+            
+            (local_path / filename).write_bytes(content)
+        
+        print(f"✅ Synced {len(files)} files from Space")
+        
+    except Exception as e:
+        print(f"⚠️ Failed to sync from Space: {e}")
+
+def sync_to_space(space_id: str, file_path: str, content: str):
+    """
+    Write a file back to E-T Systems Space.
+    
+    CHANGELOG [2025-01-29 - Josh]
+    Created to enable Clawdbot to write code to E-T Systems Space.
+    """
+    token = (
+        os.getenv("HF_TOKEN") or 
+        os.getenv("HUGGING_FACE_HUB_TOKEN") or 
+        os.getenv("HUGGINGFACE_TOKEN")
+    )
+    
+    if not token:
+        return "⚠️ No HF_TOKEN found - cannot write to Space"
+    
+    try:
+        api = HfApi(token=token)
+        
+        # Write to temporary file first
+        temp_path = Path("/tmp") / file_path
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_text(content)
+        
+        # Upload to Space
+        api.upload_file(
+            path_or_fileobj=str(temp_path),
+            path_in_repo=file_path,
+            repo_id=space_id,
+            repo_type="space",
+            commit_message=f"Update {file_path} via Clawdbot"
+        )
+        
+        print(f"✅ Uploaded {file_path} to Space")
+        return f"✅ Successfully wrote {file_path} to E-T Systems Space"
+        
+    except Exception as e:
+        error_msg = f"⚠️ Failed to write to Space: {e}"
+        print(error_msg)
+        return error_msg
 
 # Define tools available to the model
 TOOLS = [
