@@ -203,6 +203,11 @@ class HFDatasetPersistence:
         if self.repo_id and self.token:
             self._ensure_repo_exists()
             print(f"CLOUD BACKUP: Configured -> {self.repo_id}")
+            # Verify token has write permissions
+            # CHANGELOG [2025-01-31 - Claude]
+            # Gemini caught this: a read-only token will let the app start
+            # but all upload_file calls will fail with 403. Check early.
+            self._verify_write_permissions()
         elif not self.repo_id:
             print("=" * 60)
             print("CLOUD BACKUP: NOT CONFIGURED")
@@ -258,6 +263,30 @@ class HFDatasetPersistence:
         """
         return bool(self.repo_id and self.token)
 
+    def _verify_write_permissions(self):
+        """
+        Check that the HF_TOKEN has write permissions.
+
+        CHANGELOG [2025-01-31 - Claude]
+        Added per Gemini's feedback: a read-only token lets the app start
+        but causes all cloud saves to fail with 403. Better to catch this
+        at startup and warn loudly than discover it after losing data.
+
+        NOTE: We don't fail hard here because the app can still function
+        without cloud backup (using /data persistent storage). Just warn.
+        """
+        try:
+            # whoami returns token info including permissions
+            user_info = self.api.whoami(token=self.token)
+            # The token type tells us about permissions
+            # "write" or "fineGrained" tokens with repo write access work
+            # "read" tokens will fail on upload
+            token_name = user_info.get("auth", {}).get("accessToken", {}).get("displayName", "unknown")
+            print(f"CLOUD BACKUP: Token verified (name: {token_name})")
+        except Exception as e:
+            print(f"CLOUD BACKUP WARNING: Could not verify token permissions: {e}")
+            print("CLOUD BACKUP WARNING: If saves fail, check that HF_TOKEN has WRITE access")
+
     def save_conversations(self, conversations_data: List[Dict], force: bool = False):
         """
         Save conversations to HF Dataset.
@@ -267,6 +296,9 @@ class HFDatasetPersistence:
 
         CHANGELOG [2025-01-31 - Claude]
         Now logs when save is skipped due to missing config (was silent before).
+        Added _repo_ready guard per Gemini's race condition catch: if the repo
+        hasn't finished initializing (or failed to initialize), skip the save
+        rather than letting it throw an opaque HfApi error.
 
         Args:
             conversations_data: List of conversation dicts to save
@@ -277,6 +309,17 @@ class HFDatasetPersistence:
             # Was completely silent before. Now logs so you can see in Space logs.
             print("Cloud save skipped: MEMORY_REPO not configured")
             return False
+
+        # CHANGELOG [2025-01-31 - Claude]
+        # Race condition guard: _ensure_repo_exists() runs in __init__ but
+        # could fail (network issue, bad token, etc). If repo isn't ready,
+        # don't try to upload - it'll just throw a confusing 404 or 403.
+        if not self._repo_ready:
+            print("Cloud save skipped: memory repo not ready (init may have failed)")
+            # Retry initialization in case it was a transient network issue
+            self._ensure_repo_exists()
+            if not self._repo_ready:
+                return False
 
         current_time = time.time()
 
