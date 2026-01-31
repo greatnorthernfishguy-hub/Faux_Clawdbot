@@ -588,7 +588,17 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
         """
         Extract tool calls from Kimi's native format.
         
-        Format: <|tool_call_begin|> functions.search_conversations:0 {"query": "...", ...}
+        CHANGELOG [2025-01-30 - Claude]
+        Fixed regex to match Kimi's ACTUAL format (XML-style tags, not pipe tokens):
+        
+        <tool_call_begin>
+        functions.search_conversations:1
+        <tool_call_argument_begin>
+        {"query": "..."}
+        <tool_call_end>
+        
+        OLD (wrong): <|tool_call_begin|> functions.name:0 <|tool_call_argument_begin|> {...}
+        NEW (correct): <tool_call_begin>\nfunctions.name:0\n<tool_call_argument_begin>\n{...}\n<tool_call_end>
         
         Returns: list of (tool_name, args) tuples
         """
@@ -596,16 +606,47 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
         import json
         
         tool_calls = []
-        # Pattern: functions.TOOLNAME:ID {JSON_ARGS}
-        pattern = r'functions\.(\w+):\d+\s*<\|tool_call_argument_begin\|>\s*(\{[^}]+\})'
         
-        matches = re.findall(pattern, text)
+        # Pattern for Kimi's actual XML-style format
+        # Matches: <tool_call_begin> ... functions.NAME:ID ... <tool_call_argument_begin> ... {JSON} ... <tool_call_end>
+        pattern = r'<tool_call_begin>\s*functions\.(\w+):\d+\s*<tool_call_argument_begin>\s*(\{[^}]+\})\s*<tool_call_end>'
+        
+        matches = re.findall(pattern, text, re.DOTALL)
+        
+        if matches:
+            print(f"🔍 Found {len(matches)} tool call(s) via primary pattern")
+        
         for tool_name, args_json in matches:
             try:
                 args = json.loads(args_json)
                 tool_calls.append((tool_name, args))
-            except json.JSONDecodeError:
-                print(f"⚠️ Failed to parse tool args: {args_json}")
+                print(f"✅ Parsed tool call: {tool_name}({args})")
+            except json.JSONDecodeError as e:
+                print(f"⚠️ Failed to parse tool args: {args_json} - {e}")
+        
+        # Fallback: Try without <tool_call_end> in case it's missing
+        if not tool_calls:
+            fallback_pattern = r'<tool_call_begin>\s*functions\.(\w+):\d+\s*<tool_call_argument_begin>\s*(\{[^}]+\})'
+            matches = re.findall(fallback_pattern, text, re.DOTALL)
+            
+            if matches:
+                print(f"🔍 Found {len(matches)} tool call(s) via fallback pattern")
+            
+            for tool_name, args_json in matches:
+                try:
+                    args = json.loads(args_json)
+                    tool_calls.append((tool_name, args))
+                    print(f"✅ Parsed tool call (fallback): {tool_name}({args})")
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Failed to parse tool args: {args_json} - {e}")
+        
+        # Debug: Show what we're trying to parse if nothing matched
+        if not tool_calls and '<tool_call' in text:
+            print(f"⚠️ Tool call tags detected but parsing failed. Raw text snippet:")
+            # Find the tool call section for debugging
+            start = text.find('<tool_call')
+            end = text.find('<tool_call_end>') + 20 if '<tool_call_end>' in text else start + 200
+            print(f"   {text[start:end]}")
         
         return tool_calls
     
