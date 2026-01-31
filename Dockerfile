@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 # Force rebuild
-ENV REBUILD_DATE=2025-01-31-v2
+ENV REBUILD_DATE=2025-01-31-v3
 WORKDIR /app
 
 # Install system dependencies
