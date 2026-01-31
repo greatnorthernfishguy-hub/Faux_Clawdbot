@@ -682,20 +682,38 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
             
             def get_stats():
                 """
-                Get current stats including cloud backup status.
+                Get current stats including storage and cloud backup diagnostics.
                 
                 CHANGELOG [2025-01-30 - Claude]
                 Added cloud backup status indicator.
+                
+                CHANGELOG [2025-01-31 - Claude]
+                Added storage path display and persistent vs ephemeral indicator.
+                Now shows exactly where ChromaDB lives and whether it will survive
+                a restart, so Josh can diagnose persistence issues at a glance.
                 """
                 ctx = initialize_context()
                 conv_count = ctx.get_conversation_count() if hasattr(ctx, 'get_conversation_count') else 0
                 
-                # Check cloud backup status
-                memory_repo = os.getenv("MEMORY_REPO", "")
-                if memory_repo:
-                    cloud_status = f"Cloud Backup: {memory_repo}"
+                # Get detailed stats from context manager
+                # CHANGELOG [2025-01-31 - Claude]
+                # Pull storage diagnostics from the context manager itself
+                # rather than guessing from env vars
+                stats_dict = ctx.get_stats() if hasattr(ctx, 'get_stats') else {}
+                storage_path = stats_dict.get("storage_path", "unknown")
+                cloud_configured = stats_dict.get("cloud_backup_configured", False)
+                cloud_repo = stats_dict.get("cloud_backup_repo", "Not set")
+                
+                # Determine storage status with clear visual indicators
+                if "/data/" in storage_path:
+                    storage_status = f"Storage: {storage_path} (PERSISTENT)"
                 else:
-                    cloud_status = "Cloud Backup: Not configured - Add MEMORY_REPO to Space secrets"
+                    storage_status = f"Storage: {storage_path} (EPHEMERAL - enable persistent storage in Settings!)"
+                
+                if cloud_configured:
+                    cloud_status = f"Cloud Backup: {cloud_repo}"
+                else:
+                    cloud_status = "Cloud Backup: NOT SET - Add MEMORY_REPO to Space secrets"
                 
                 return f"""
 **Repository:** {ctx.repo_path}
@@ -704,16 +722,11 @@ with gr.Blocks(title="Clawdbot - E-T Systems Dev Assistant") as demo:
 
 **Conversations Saved:** {conv_count}
 
+**{storage_status}**
+
 **{cloud_status}**
 
 **Model:** Kimi K2.5 Agent Swarm
-
-**Capabilities:**
-- Agent Swarm (up to 100 sub-agents)
-- Multimodal (vision + text)
-- 256K context window
-- Visual coding
-- Persistent memory (cloud backed!)
 
 **Context Mode:** Recursive Retrieval
 
