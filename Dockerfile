@@ -86,7 +86,7 @@ RUN chmod +x entrypoint.sh
 # /tmp - needed for temporary files during cloud backup
 # /app - the application directory itself (for any runtime-generated files)
 # =============================================================================
-RUN mkdir -p /workspace/chroma_db /data/chroma_db /tmp && \
+RUN mkdir -p /workspace/chroma_db /data/chroma_db /data/.cache/huggingface /data/.cache/chroma /tmp && \
     chown -R 1000:1000 /workspace /data /tmp /app
 
 # Expose port for Gradio (HF Spaces uses 7860)
@@ -95,6 +95,27 @@ EXPOSE 7860
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV REPO_PATH=/workspace/e-t-systems
+
+# =============================================================================
+# CACHE DIRECTORY CONFIGURATION
+# =============================================================================
+# CHANGELOG [2025-01-31 - Claude]
+# ChromaDB downloads its ONNX MiniLM-L6-V2 embedding model on first use.
+# By default it writes to /.cache which is owned by root.
+# Since we run as USER 1000, this causes:
+#   PermissionError: [Errno 13] Permission denied: '/.cache'
+#
+# FIX: Redirect ALL cache directories to /data/.cache (persistent!)
+# This has a bonus effect: the embedding model download persists across
+# restarts too, so subsequent startups are faster (no re-download).
+#
+# If /data isn't available (persistent storage not enabled), these dirs
+# will be created at runtime under /tmp/.cache as a fallback.
+# =============================================================================
+ENV HF_HOME=/data/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/data/.cache/huggingface
+ENV XDG_CACHE_HOME=/data/.cache
+ENV CHROMA_CACHE_DIR=/data/.cache/chroma
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
