@@ -1,6 +1,6 @@
 """
 Recursive Context Manager for Clawdbot
-[Corrected version to fix /.cache PermissionError]
+[Corrected version to fix SyntaxError and /.cache PermissionError]
 """
 
 from pathlib import Path
@@ -117,7 +117,7 @@ class RecursiveContextManager:
         )
 
         collection_name = self._get_collection_name()
-        # FIX: Pass embedding_function here
+        # Ensure the collection uses the custom embedding function
         self.collection = self.chroma_client.get_or_create_collection(
             name=collection_name,
             embedding_function=self.embedding_function,
@@ -125,7 +125,6 @@ class RecursiveContextManager:
         )
 
         conversations_name = f"conversations_{collection_name.split('_')[1]}"
-        # FIX: Pass embedding_function here as well
         self.conversations = self.chroma_client.get_or_create_collection(
             name=conversations_name,
             embedding_function=self.embedding_function,
@@ -136,7 +135,7 @@ class RecursiveContextManager:
             self._restore_from_cloud()
 
         self._saves_since_backup = 0
-        self.BACKUP_EVERY_N_SAVES = 1 # Immediate cloud sync for PRO storage reliability
+        self.BACKUP_EVERY_N_SAVES = 1 # Sync frequently for reliability
         self._is_first_save = True
 
     def _restore_from_cloud(self):
@@ -210,6 +209,36 @@ class RecursiveContextManager:
         except Exception as e: return [str(e)]
 
     def save_conversation_turn(self, user_message: str, assistant_message: str, turn_id: int):
+        # FIX: Ensure all brackets and quotes are closed correctly
         combined = f"USER: {user_message}\n\nASSISTANT: {assistant_message}"
         u_id = f"turn_{int(time.time())}_{turn_id}"
-        self.conversations.add(documents=[combined], metadatas=[{"user": user_message[:500], "assistant": assistant_message[:
+        self.conversations.add(
+            documents=[combined], 
+            metadatas=[{"user": user_message[:500], "assistant": assistant_message[:500], "turn": turn_id}], 
+            ids=[u_id]
+        )
+        if self._is_first_save:
+            self._backup_to_cloud(force=True)
+            self._is_first_save = False
+        else:
+            self._saves_since_backup += 1
+            if self._saves_since_backup >= self.BACKUP_EVERY_N_SAVES:
+                self._backup_to_cloud()
+                self._saves_since_backup = 0
+
+    def search_conversations(self, query: str, n_results: int = 5) -> List[Dict]:
+        if self.conversations.count() == 0: return []
+        res = self.conversations.query(query_texts=[query], n_results=min(n_results, self.conversations.count()))
+        return [{"turn": m.get("turn"), "full_text": d} for d, m in zip(res['documents'][0], res['metadatas'][0])]
+
+    def get_conversation_count(self) -> int:
+        return self.conversations.count()
+
+    def get_stats(self) -> Dict:
+        return {"total_files": self.collection.count(), "conversations": self.conversations.count(), "storage_path": CHROMA_DB_PATH, "cloud_backup_configured": self.persistence.is_configured, "cloud_backup_repo": self.persistence.repo_id}
+
+    def force_backup(self):
+        self._backup_to_cloud(force=True)
+
+    def shutdown(self):
+        self.force_backup()
