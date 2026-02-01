@@ -14,7 +14,7 @@ import os, json, re
 # --- INITIALIZATION ---
 client = InferenceClient("https://router.huggingface.co/v1", token=os.getenv("HF_TOKEN"))
 ctx = RecursiveContextManager(os.getenv("REPO_PATH", "/workspace/e-t-systems"))
-MODEL_ID = "moonshotai/Kimi-k2.5" # Or your preferred Kimi endpoint
+MODEL_ID = "moonshotai/Kimi-K2.5" # Or your preferred Kimi endpoint
 
 # --- AGENTIC LOOP ---
 def agent_loop(message, history):
