@@ -722,7 +722,7 @@ class RecursiveContextManager:
         return testament_results[:n]
 
     def get_stats(self) -> dict:
-        """WHY: Provides the metrics for the sidebar to prevent 'blind' coding."""
+        """WHY: Provides the 'Face Documentation' for the sidebar metrics."""
         try:
             return {
                 "total_files": self.collection.count(),
@@ -734,6 +734,28 @@ class RecursiveContextManager:
             }
         except Exception as e:
             return {"index_error": str(e)}
+
+    def save_conversation_turn(self, u, a, t_id):
+        """WHY: Prevents amnesia by pulling FULL history before cloud push."""
+        combined = f"USER: {u}\n\nASSISTANT: {a}"
+        u_id = f"turn_{int(time.time())}"
+        
+        # 1. Save locally to ChromaDB
+        self.conversations.add(documents=[combined], metadatas=[{"turn": t_id}], ids=[u_id])
+        
+        # 2. Retrieve the complete record to avoid overwriting history with one turn
+        all_convs = self.conversations.get()
+        full_data = []
+        for i in range(len(all_convs['ids'])):
+            full_data.append({
+                "document": all_convs['documents'][i],
+                "metadata": all_convs['metadatas'][i],
+                "id": all_convs['ids'][i]
+            })
+            
+        # 3. Push complete manifest back to your PRO storage
+        self.persistence.save_conversations(full_data)
+
 
     def save_conversation_turn(self, u, a, t_id):
         """WHY: Pulls the FULL history before pushing to cloud to prevent memory loss."""
