@@ -989,8 +989,17 @@ def auto_continue_after_approval(history: list, pending_proposals: list) -> tupl
             _stats_label_files(), _stats_label_convos()
         )
 
-    last_msg = history[-1].get("content", "")
-    if not last_msg.startswith("✅ **Approved"):
+    last_msg_content = history[-1].get("content", "")
+
+    # Handle Gradio 6 list-of-dicts format
+    if isinstance(last_msg_content, list):
+        # Extract text from the first content block
+        last_msg_text = last_msg_content[0].get("text", "") if last_msg_content else ""
+    else:
+        last_msg_text = last_msg_content
+
+    if not last_msg_text.startswith("✅ **Approved"):
+
         return (
             history, "", pending_proposals,
             _format_gate_choices(pending_proposals),
@@ -1199,11 +1208,11 @@ with gr.Blocks(
         fn=execute_approved_proposals,
         inputs=[gate_list, pending_proposals_state, chatbot],
         outputs=[gate_results, pending_proposals_state, gate_list, chatbot]
-    ).then(
+        ).then(
         fn=auto_continue_after_approval,
         inputs=[chatbot, pending_proposals_state],
-        outputs=[chatbot, msg_input, pending_proposals_state,
-                 gate_list, stat_files, stat_convos]
+        outputs=[chatbot, msg, pending_proposals_state,
+                 gate_list, stats_files, stats_convos]
     )
     btn_clear.click(
         fn=clear_all_proposals,
