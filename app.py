@@ -1,3 +1,5 @@
+import zipfile
+import shutil
 """
 Clawdbot Unified Command Center
 
@@ -652,140 +654,156 @@ def execute_staged_tool(tool_name: str, args: dict) -> str:
 # placeholder message since they can't be meaningfully injected as text.
 # =============================================================================
 
+# CHANGELOG [2026-02-01 - Clawdbot]
+# WHY: Expanded to cover the full spectrum of E-T Systems and modern dev environments.
+
 TEXT_EXTENSIONS = {
-    '.py', '.js', '.ts', '.jsx', '.tsx', '.json', '.yaml', '.yml',
-    '.md', '.txt', '.rst', '.html', '.css', '.scss', '.sh', '.bash',
-    '.sql', '.toml', '.cfg', '.ini', '.conf', '.xml', '.csv',
-    '.env', '.gitignore', '.dockerignore', '.mjs', '.cjs',
+    # Core Logic & Scripts
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.c', '.cpp', '.h', '.hpp', '.java', '.php', '.rb',
+    # Config & Data
+    '.json', '.yaml', '.yml', '.toml', '.xml', '.sql', '.csv', '.env', '.ini', '.conf', '.cfg',
+    # Infrastructure & Web
+    '.dockerfile', '.Dockerfile', '.sh', '.bash', '.html', '.css', '.scss', '.less',
+    # Documentation & Workspace
+    '.md', '.txt', '.rst', '.gitignore', '.dockerignore', '.mjs', '.cjs', '.lock'
 }
 
 
+
+import zipfile
+import shutil
+
+# =============================================================================
+# ROBUST FILE & API HANDLERS (The "Box Cutter" & "Persistent Dialer")
+# =============================================================================
+
 def process_uploaded_file(file) -> str:
-    """Read an uploaded file and format it for conversation context.
-
-    Args:
-        file: Gradio file object with .name attribute (temp path)
-
-    Returns:
-        Formatted string with filename and content, ready to inject
-        into the conversation as context
+    """
+    Read an uploaded file. 
+    1. Handles Gradio list inputs (fixes the crash).
+    2. Unzips archives so the agent can see inside (fixes the blindness).
+    3. Reads text files into context.
     """
     if file is None:
         return ""
+
+    # FIX 1: Gradio often passes a list, even for single files. Unwrap it.
+    if isinstance(file, list):
+        if len(file) == 0: return ""
+        file = file[0]
 
     file_path = file.name if hasattr(file, 'name') else str(file)
     file_name = os.path.basename(file_path)
     suffix = os.path.splitext(file_name)[1].lower()
 
+    # FIX 2: Handle ZIP files (The "Unpacking Protocol")
+    if suffix == '.zip':
+        try:
+            extract_to = Path(REPO_PATH) / "uploaded_assets" / file_name.replace(".zip", "")
+            if extract_to.exists():
+                shutil.rmtree(extract_to)
+            extract_to.mkdir(parents=True, exist_ok=True)
+            
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_to)
+                
+            file_list = [f.name for f in extract_to.glob('*')]
+            preview = ", ".join(file_list[:10])
+            if len(file_list) > 10: preview += f", ... (+{len(file_list)-10} more)"
+                
+            return (f"📦 **Unzipped: {file_name}**\n"
+                    f"Location: `{extract_to}`\n"
+                    f"Contents: {preview}\n"
+                    f"SYSTEM NOTE: The files are extracted. Use list_files('{extract_to}') to explore them.")
+        except Exception as e:
+            return f"⚠️ Failed to unzip {file_name}: {e}"
+
+    # Handle Text files
     if suffix in TEXT_EXTENSIONS or suffix == '':
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
-            # Cap at 50KB to avoid overwhelming context
             if len(content) > 50000:
                 content = content[:50000] + f"\n\n... (truncated, {len(content)} total chars)"
             return f"📎 **Uploaded: {file_name}**\n```\n{content}\n```"
         except Exception as e:
             return f"📎 **Uploaded: {file_name}** (error reading: {e})"
+    
+    # Fallback for binary
     else:
-        return f"📎 **Uploaded: {file_name}** (binary file, {os.path.getsize(file_path):,} bytes)"
+        try:
+            size = os.path.getsize(file_path)
+            return f"📎 **Uploaded: {file_name}** (binary file, {size:,} bytes)"
+        except Exception as e:
+            return f"📎 **Uploaded: {file_name}** (error getting size: {e})"
+
+
+def call_model_with_retry(messages, model_id, max_retries=4):
+    """Tries to call the API. If it hits a 504/503 (Busy), it waits and retries."""
+    for attempt in range(max_retries):
+        try:
+            return client.chat_completion(
+                model=model_id, messages=messages, max_tokens=2048, temperature=0.7
+            )
+        except Exception as e:
+            error_str = str(e)
+            if "504" in error_str or "503" in error_str or "timeout" in error_str.lower():
+                if attempt == max_retries - 1: raise e
+                wait_time = 2 * (2 ** attempt)
+                print(f"⚠️ API Busy (Attempt {attempt+1}/{max_retries}). Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise e
 
 
 # =============================================================================
 # AGENTIC LOOP
 # =============================================================================
-# CHANGELOG [2026-02-01 - Claude/Opus]
-# The core conversation loop. For each user message:
-# 1. Build messages array with system prompt + history + new message
-# 2. Send to Kimi K2.5 via HF Inference API
-# 3. Parse response for tool calls
-# 4. If READ tool calls: execute immediately, inject results, loop back to Kimi
-# 5. If WRITE tool calls: stage in approval queue, notify user
-# 6. If no tool calls: return conversational response
-# 7. Save the turn to ChromaDB for persistent memory
-#
-# The loop runs up to MAX_ITERATIONS times to handle multi-step tool use.
-# Each iteration either executes tools and loops, or returns the final text.
-#
-# IMPORTANT: Gradio 5.0+ chatbot with type="messages" expects history as a
-# list of {"role": str, "content": str} dicts. We maintain that format
-# throughout.
-# =============================================================================
 
 MAX_ITERATIONS = 5
 
-
 def agent_loop(message: str, history: list, pending_proposals: list, uploaded_file) -> tuple:
-    """Main agentic conversation loop.
-
-    Args:
-        message: User's text input
-        history: Chat history as list of {"role": ..., "content": ...} dicts
-        pending_proposals: Current list of staged write proposals (gr.State)
-        uploaded_file: Optional uploaded file from the file input widget
-
-    Returns:
-        Tuple of (updated_history, cleared_textbox, updated_proposals,
-                  updated_gate_choices, updated_stats_files, updated_stats_convos)
-    """
+    # 1. Handle empty inputs
     if not message.strip() and uploaded_file is None:
-        # Nothing to do
-        return (
-            history, "", pending_proposals,
-            _format_gate_choices(pending_proposals),
-            _stats_label_files(), _stats_label_convos()
-        )
+        return (history, "", pending_proposals, _format_gate_choices(pending_proposals), _stats_label_files(), _stats_label_convos())
 
-    # Inject uploaded file content if present
+    # 2. Inject File Content
     full_message = message.strip()
     if uploaded_file is not None:
-        file_context = process_uploaded_file(uploaded_file)
-        if file_context:
-            full_message = f"{file_context}\n\n{full_message}" if full_message else file_context
+        try:
+            file_context = process_uploaded_file(uploaded_file)
+            if file_context:
+                full_message = f"{file_context}\n\n{full_message}" if full_message else file_context
+        except Exception as e:
+             full_message += f"\n[System Error processing file: {e}]"
 
     if not full_message:
-        return (
-            history, "", pending_proposals,
-            _format_gate_choices(pending_proposals),
-            _stats_label_files(), _stats_label_convos()
-        )
+        return (history, "", pending_proposals, _format_gate_choices(pending_proposals), _stats_label_files(), _stats_label_convos())
 
-    # Add user message to history
+    # 3. Update History
     history = history + [{"role": "user", "content": full_message}]
 
-    # Build messages for the API
+    # 4. Prepare Context
     system_prompt = build_system_prompt()
     api_messages = [{"role": "system", "content": system_prompt}]
-
-    # Include recent history (cap to avoid token overflow)
-    # Keep last 20 turns to stay within Kimi's context window
-    recent_history = history[-40:]  # 40 entries = ~20 turns (user+assistant pairs)
+    recent_history = history[-40:]
     for h in recent_history:
         api_messages.append({"role": h["role"], "content": h["content"]})
 
-    # Agentic loop: tool calls → execution → re-prompt → repeat
     accumulated_text = ""
     staged_this_turn = []
 
+    # 5. The Thinking Loop
     for iteration in range(MAX_ITERATIONS):
         try:
-            response = client.chat_completion(
-                model=MODEL_ID,
-                messages=api_messages,
-                max_tokens=2048,
-                temperature=0.7
-            )
+            # USE RETRY LOGIC HERE
+            response = call_model_with_retry(api_messages, MODEL_ID)
             content = response.choices[0].message.content or ""
         except Exception as e:
             error_msg = f"⚠️ API Error: {e}"
             history = history + [{"role": "assistant", "content": error_msg}]
-            return (
-                history, "", pending_proposals,
-                _format_gate_choices(pending_proposals),
-                _stats_label_files(), _stats_label_convos()
-            )
+            return (history, "", pending_proposals, _format_gate_choices(pending_proposals), _stats_label_files(), _stats_label_convos())
 
-        # Parse for tool calls
         tool_calls = parse_tool_calls(content)
         conversational_text = extract_conversational_text(content)
 
@@ -793,72 +811,52 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
             accumulated_text += ("\n\n" if accumulated_text else "") + conversational_text
 
         if not tool_calls:
-            # No tools — this is the final response
             break
 
-        # Process each tool call
         tool_results_for_context = []
         for tool_name, args in tool_calls:
             result = execute_tool(tool_name, args)
-
             if result["status"] == "executed":
-                # READ tool — executed, feed result back to model
-                tool_results_for_context.append(
-                    f"[Tool Result: {tool_name}]\n{result['result']}"
-                )
+                tool_results_for_context.append(f"[Tool Result: {tool_name}]\n{result['result']}")
             elif result["status"] == "staged":
-                # WRITE tool — staged for approval
                 proposal = {
                     "id": f"proposal_{int(time.time())}_{tool_name}",
-                    "tool": tool_name,
-                    "args": result["args"],
-                    "description": result["description"],
-                    "timestamp": time.strftime("%H:%M:%S")
+                    "tool": tool_name, "args": result["args"],
+                    "description": result["description"], "timestamp": time.strftime("%H:%M:%S")
                 }
                 staged_this_turn.append(proposal)
-                tool_results_for_context.append(
-                    f"[Tool {tool_name}: STAGED for human approval. "
-                    f"Josh will review this in the Build Approval Gate.]"
-                )
+                tool_results_for_context.append(f"[Tool {tool_name}: STAGED for human approval.]")
             elif result["status"] == "error":
-                tool_results_for_context.append(
-                    f"[Tool Error: {tool_name}]\n{result['result']}"
-                )
+                tool_results_for_context.append(f"[Tool Error: {tool_name}]\n{result['result']}")
 
-        # If we only had staged tools and no reads, break the loop
         if tool_results_for_context:
-            # Feed tool results back as a system message for the next iteration
             combined_results = "\n\n".join(tool_results_for_context)
             api_messages.append({"role": "assistant", "content": content})
             api_messages.append({"role": "user", "content": f"[Tool Results]\n{combined_results}"})
         else:
             break
 
-    # Build final response
+    # 6. Finalize Response
     final_response = accumulated_text
-
-    # Append staging notifications if any writes were staged
     if staged_this_turn:
         staging_notice = "\n\n---\n🛡️ **Staged for your approval** (see Build Approval Gate tab):\n"
         for proposal in staged_this_turn:
             staging_notice += f"- {proposal['description']}\n"
         final_response += staging_notice
-        # Add to persistent queue
         pending_proposals = pending_proposals + staged_this_turn
 
     if not final_response:
-        final_response = "🤔 I processed your request but didn't generate a text response. Check the Build Approval Gate if I staged any operations."
+        final_response = "🤔 I processed your request but didn't generate a text response."
 
-    # Add assistant response to history
     history = history + [{"role": "assistant", "content": final_response}]
 
-    # Save conversation turn for persistent memory
     try:
         turn_count = len([h for h in history if h["role"] == "user"])
         ctx.save_conversation_turn(full_message, final_response, turn_count)
     except Exception:
-        pass  # Don't crash the UI if persistence fails
+        pass
 
+    # 7. THE CRITICAL RETURN (Aligned with the Function Definition)
     return (
         history,
         "",  # Clear the textbox
@@ -959,56 +957,22 @@ def execute_approved_proposals(selected_ids: list, pending_proposals: list,
 
 
 def auto_continue_after_approval(history: list, pending_proposals: list) -> tuple:
-    """Automatically re-enter the agent loop after approval so Kimi sees results.
-
-    CHANGELOG [2026-02-01 - Claude/Opus]
-    PROBLEM: After Josh approved staged operations, results were injected into
-    chat history but Kimi never got another turn. Josh had to type something
-    like "continue" to trigger Kimi to process the tool results.
-
-    FIX: This function is chained via .then() after execute_approved_proposals.
-    It sends a synthetic continuation prompt through the agent loop so Kimi
-    automatically processes the approved tool results and continues working.
-
-    We only continue if the last message in history is our injected results
-    (starts with '✅ **Approved'). This prevents infinite loops if called
-    when there's nothing to continue from.
-
-    Args:
-        history: Chat history (should contain injected results from approval)
-        pending_proposals: Current pending proposals (passed through)
-
-    Returns:
-        Same tuple shape as agent_loop so it can update the same outputs
-    """
-    # Safety check: only continue if last message is our injected results
+    """WHY: Handles Gradio 6 list-of-dicts format to prevent 'startswith' crash."""
     if not history or history[-1].get("role") != "assistant":
-        return (
-            history, "", pending_proposals,
-            _format_gate_choices(pending_proposals),
-            _stats_label_files(), _stats_label_convos()
-        )
+        return (history, "", pending_proposals, _format_gate_choices(pending_proposals), _stats_label_files(), _stats_label_convos())
 
+    # Extract content which may be a list of blocks in Gradio 6
     last_msg_content = history[-1].get("content", "")
-
-    # Handle Gradio 6 list-of-dicts format
+    
     if isinstance(last_msg_content, list):
-        # Extract text from the first content block
+        # Extract the text portion of the first content block
         last_msg_text = last_msg_content[0].get("text", "") if last_msg_content else ""
     else:
-        last_msg_text = last_msg_content
+        last_msg_text = str(last_msg_content)
 
     if not last_msg_text.startswith("✅ **Approved"):
+        return (history, "", pending_proposals, _format_gate_choices(pending_proposals), _stats_label_files(), _stats_label_convos())
 
-        return (
-            history, "", pending_proposals,
-            _format_gate_choices(pending_proposals),
-            _stats_label_files(), _stats_label_convos()
-        )
-
-    # Re-enter the agent loop with a synthetic continuation prompt
-    # This tells Kimi "I approved your operations, here are the results,
-    # now keep going with whatever you were doing."
     return agent_loop(
         message="[The operations above were approved and executed. Continue with your task using these results.]",
         history=history,
@@ -1099,6 +1063,8 @@ with gr.Blocks(
         # ==== TAB 1: VIBE CHAT ====
         with gr.Tab("💬 Vibe Chat"):
             with gr.Row():
+                # Define the buttons before assigning clicks to them
+
                 # ---- Sidebar ----
                 with gr.Column(scale=1, min_width=200):
                     gr.Markdown("### 📊 System Status")
@@ -1109,13 +1075,14 @@ with gr.Blocks(
                     gr.Markdown("---")
                     gr.Markdown("### 📎 Upload Context")
                     file_input = gr.File(
-                        label="Drop a file here",
-                        file_types=[
-                            '.py', '.js', '.ts', '.json', '.md', '.txt',
-                            '.yaml', '.yml', '.html', '.css', '.sh',
-                            '.toml', '.cfg', '.csv', '.xml'
-                        ]
-                    )
+    label="Drop files or ZIPs here",
+    file_types=[
+        '.py', '.js', '.ts', '.tsx', '.json', '.md', '.txt',
+        '.yaml', '.yml', '.html', '.css', '.sh', '.zip',
+        '.toml', '.sql', '.dockerfile', '.env'
+    ],
+    file_count="multiple" # Allows selecting multiple files at once
+)
                     gr.Markdown(
                         "*Upload code, configs, or docs to include in your message.*"
                     )
@@ -1148,23 +1115,18 @@ with gr.Blocks(
                 # These reference components in the Gate tab — defined below
             ]
 
-        # ==== TAB 2: BUILD APPROVAL GATE ====
+                # ==== TAB 2: BUILD APPROVAL GATE ====
         with gr.Tab("🛡️ Build Approval Gate"):
-            gr.Markdown(
-                "### Review Staged Operations\n"
-                "Write operations (file writes, shell commands, branch creation) "
-                "are staged here for your review before execution.\n\n"
-                "**Select proposals to approve, then click Execute.**"
-            )
-            gate_list = gr.CheckboxGroup(
-                label="Pending Proposals",
-                choices=[],
-                interactive=True
-            )
+            gr.Markdown("### Review Staged Operations")
+            gate_list = gr.CheckboxGroup(label="Pending Proposals", choices=[], interactive=True)
+            
             with gr.Row():
+                # Define buttons HERE so they are next to the gate list
                 btn_exec = gr.Button("✅ Execute Selected", variant="primary")
                 btn_clear = gr.Button("🗑️ Clear All", variant="secondary")
+            
             gate_results = gr.Markdown("*No operations executed yet.*")
+
 
     # ==================================================================
     # EVENT WIRING
@@ -1208,11 +1170,10 @@ with gr.Blocks(
         fn=execute_approved_proposals,
         inputs=[gate_list, pending_proposals_state, chatbot],
         outputs=[gate_results, pending_proposals_state, gate_list, chatbot]
-        ).then(
-        fn=auto_continue_after_approval,
+    ).then(
+        fn=auto_continue_after_approval, # THIS RE-CONNECTS THE BRAIN
         inputs=[chatbot, pending_proposals_state],
-        outputs=[chatbot, msg, pending_proposals_state,
-                 gate_list, stats_files, stats_convos]
+        outputs=[chatbot, msg, pending_proposals_state, gate_list, stats_files, stats_convos]
     )
     btn_clear.click(
         fn=clear_all_proposals,
