@@ -398,7 +398,83 @@ class RecursiveContextManager:
             return f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         except Exception as e:
             return f"Execution Error: {e}"
+        def push_to_github(self, commit_message="Auto-backup from Clawdbot"):
+            """Pushes the current workspace to the configured GitHub repository."""
+        token = os.getenv("GITHUB_TOKEN")
+        repo = os.getenv("GITHUB_REPO")
+        
+        if not token or not repo:
+            return "❌ Error: GITHUB_TOKEN or GITHUB_REPO secret is missing."
 
+        # authenticated URL
+        remote_url = f"https://{token}@github.com/{repo}.git"
+        
+        try:
+            # 1. Initialize if needed (Docker containers often lack .git)
+            if not (self.repo_path / ".git").exists():
+                subprocess.run(["git", "init"], cwd=self.repo_path, check=True)
+                subprocess.run(["git", "config", "user.email", "clawdbot@e-t-systems.ai"], cwd=self.repo_path)
+                subprocess.run(["git", "config", "user.name", "Clawdbot"], cwd=self.repo_path)
+                subprocess.run(["git", "branch", "-M", "main"], cwd=self.repo_path)
+                
+            # 2. Configure Remote (Idempotent)
+            # Remove existing remote to ensure token is fresh/correct
+            subprocess.run(["git", "remote", "remove", "origin"], cwd=self.repo_path, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=self.repo_path, check=True)
+
+            # 3. Add, Commit, Push
+            subprocess.run(["git", "add", "."], cwd=self.repo_path, check=True)
+            
+            # Commit (allow empty if nothing changed)
+            commit_res = subprocess.run(
+                ["git", "commit", "-m", commit_message], 
+                cwd=self.repo_path, capture_output=True, text=True
+            )
+            
+            # Push (force is safer for a backup mirror to overwrite conflicts)
+            push_res = subprocess.run(
+                ["git", "push", "-u", "origin", "main", "--force"], 
+                cwd=self.repo_path, capture_output=True, text=True
+            )
+            
+            if push_res.returncode == 0:
+                return f"✅ Successfully pushed to GitHub: https://github.com/{repo}"
+            else:
+                return f"⚠️ Git Push Failed: {push_res.stderr}"
+
+        except Exception as e:
+            return f"❌ Critical Git Error: {e}"
+
+    def pull_from_github(self, branch="main"):
+        """Hard reset: Destroys local changes and pulls clean code from GitHub."""
+        token = os.getenv("GITHUB_TOKEN")
+        repo = os.getenv("GITHUB_REPO")
+        
+        if not token or not repo:
+            return "❌ Error: GITHUB_TOKEN or GITHUB_REPO secret is missing."
+
+        remote_url = f"https://{token}@github.com/{repo}.git"
+        
+        try:
+            # 1. Init if missing
+            if not (self.repo_path / ".git").exists():
+                subprocess.run(["git", "init"], cwd=self.repo_path, check=True)
+                subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=self.repo_path)
+
+            # 2. Fetch and Reset (Destructive but safe for recovery)
+            subprocess.run(["git", "fetch", "origin"], cwd=self.repo_path, check=True)
+            res = subprocess.run(
+                ["git", "reset", "--hard", f"origin/{branch}"], 
+                cwd=self.repo_path, capture_output=True, text=True
+            )
+            
+            if res.returncode == 0:
+                return f"✅ RESTORE COMPLETED. Local files replaced with GitHub/{branch}."
+            else:
+                return f"⚠️ Pull Failed: {res.stderr}"
+
+        except Exception as e:
+            return f"❌ Critical Git Error: {e}"
     # =====================================================================
     # RECURSIVE SEARCH TOOLS
     # =====================================================================
