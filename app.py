@@ -9,6 +9,22 @@ import time
 import zipfile
 import shutil
 import traceback
+import logging
+
+# Configure Logging to file AND console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("clawdbot_system.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("Clawdbot")
+
+def log_action(action: str, details: str):
+    """Records critical system events."""
+    logger.info(f"ACTION: {action} | DETAILS: {details}")
 
 """
 Clawdbot Unified Command Center
@@ -25,7 +41,7 @@ FIXED: Increased Loop Stamina to 15 (Prevents silence).
 AVAILABLE_TOOLS = {
     "list_files", "read_file", "search_code", "write_file", 
     "create_shadow_branch", "shell_execute", "get_stats",
-    "search_conversations", "search_testament"
+    "search_conversations", "search_testament", "push_to_github"
 }
 
 TEXT_EXTENSIONS = {
@@ -94,6 +110,12 @@ def build_system_prompt() -> str:
 System Stats: {stats.get('total_files', 0)} files, {stats.get('conversations', 0)} memories.
 {tools_doc}
 Output Format: Use [TOOL: tool_name(arg="value")] for tools.
+
+## CRITICAL PROTOCOLS:
+1. **RECURSIVE MEMORY FIRST**: If the user asks about past context (e.g., "the new UI"), you MUST use `search_conversations` BEFORE you answer. Do not ask the user for context you already have.
+2. **THINK OUT LOUD**: When writing code, output the full code block in the chat BEFORE calling `write_file`. This ensures a backup exists in memory if the write fails.
+3. **CHECK BEFORE WRITE**: Before writing code, use `read_file` or `list_files` to ensure you aren't overwriting good code with bad.
+4. **NO SILENCE**: If you perform an action, report the result.
 """
 
 def parse_tool_calls(text: str) -> list:
@@ -167,11 +189,17 @@ def execute_tool(tool_name: str, args: dict) -> dict:
             # BYPASS GATE: Execute immediately
             result = ctx.write_file(args.get('path', ''), args.get('content', ''))
             return {"status": "executed", "tool": tool_name, "result": result}
+        elif tool_name == 'write_file':
+            log_action("WRITE_ATTEMPT", f"Writing to {args.get('path')}")
+            # ... existing write logic ...
         elif tool_name == 'shell_execute':
             # BYPASS GATE: Execute immediately
             result = ctx.shell_execute(args.get('command', ''))
             return {"status": "executed", "tool": tool_name, "result": result}
-
+        elif tool_name == 'push_to_github':
+            # BYPASS GATE: Immediate backup is always safe
+            result = ctx.push_to_github(args.get('message', 'Manual Backup'))
+            return {"status": "executed", "tool": tool_name, "result": result}
         elif tool_name == 'create_shadow_branch':
             return {"status": "staged", "tool": tool_name, "args": args, "description": "🛡️ Create shadow branch"}
         return {"status": "error", "result": f"Unknown tool: {tool_name}"}
