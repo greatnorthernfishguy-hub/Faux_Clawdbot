@@ -41,7 +41,8 @@ FIXED: Increased Loop Stamina to 15 (Prevents silence).
 AVAILABLE_TOOLS = {
     "list_files", "read_file", "search_code", "write_file", 
     "create_shadow_branch", "shell_execute", "get_stats",
-    "search_conversations", "search_testament", "push_to_github"
+    "search_conversations", "search_testament", "push_to_github",
+    "pull_from_github", "notebook_add", "notebook_delete", "notebook_read"
 }
 
 TEXT_EXTENSIONS = {
@@ -80,9 +81,7 @@ def sync_from_space(space_id: str, local_path: Path):
     except Exception: pass
 
 def _resolve_repo_path() -> str:
-    repo_path = Path(REPO_PATH)
-    if ET_SYSTEMS_SPACE: sync_from_space(ET_SYSTEMS_SPACE, repo_path)
-    if repo_path.exists() and any(repo_path.iterdir()): return str(repo_path)
+    # FORCE: Use the directory where this app.py file actually lives
     return os.path.dirname(os.path.abspath(__file__))
 
 # Initialize Memory
@@ -95,6 +94,9 @@ ctx = RecursiveContextManager(_resolve_repo_path())
 
 def build_system_prompt() -> str:
     stats = ctx.get_stats()
+    
+    # ... (Keep your notebook auto-loading logic here) ...
+
     tools_doc = """
 ## Available Tools
 - **search_code(query, n=5)**: Semantic search codebase.
@@ -105,8 +107,14 @@ def build_system_prompt() -> str:
 - **write_file(path, content)**: Create/Update file (REQUIRES CHANGELOG).
 - **shell_execute(command)**: Run shell command.
 - **create_shadow_branch()**: Backup repository.
+- **push_to_github(message)**: Save current state to GitHub.
+- **pull_from_github(branch)**: Hard reset state from GitHub.
+- **notebook_read()**: Read your working memory.
+- **notebook_add(content)**: Add a note (max 25).
+- **notebook_delete(index)**: Delete a note.
 """
-    return f"""You are Clawdbot 🦞.
+    return f"""You are Clawdbot 🦞. ... {tools_doc} ...
+
 System Stats: {stats.get('total_files', 0)} files, {stats.get('conversations', 0)} memories.
 {tools_doc}
 Output Format: Use [TOOL: tool_name(arg="value")] for tools.
@@ -200,6 +208,10 @@ def execute_tool(tool_name: str, args: dict) -> dict:
             # BYPASS GATE: Immediate backup is always safe
             result = ctx.push_to_github(args.get('message', 'Manual Backup'))
             return {"status": "executed", "tool": tool_name, "result": result}
+        elif tool_name == 'pull_from_github':
+            # BYPASS GATE: Emergency Restore
+            result = ctx.pull_from_github(args.get('branch', 'main'))
+            return {"status": "executed", "tool": tool_name, "result": result}    
         elif tool_name == 'create_shadow_branch':
             return {"status": "staged", "tool": tool_name, "args": args, "description": "🛡️ Create shadow branch"}
         return {"status": "error", "result": f"Unknown tool: {tool_name}"}
