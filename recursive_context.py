@@ -552,6 +552,21 @@ class RecursiveContextManager:
         except ValueError:
             return "❌ Index must be a number."
 
+    def _get_notebook_path(self):
+        """ENSURE THIS METHOD EXISTS: It directs traffic to persistent storage"""
+        # 1. Try Persistent Storage first
+        if Path("/data").exists():
+            return Path("/data/notebook.json")
+        # 2. Fallback to Repo Path (Ephemeral)
+        return self.repo_path / "memory" / "notebook.json"
+
+    def _save_notebook(self, notes):
+        target = self._get_notebook_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(notes, indent=2))
+        
+        # EXTRA SAFETY: Push to HF Hub if possible (Optional but recommended)
+        # self.push_to_github("Backup Notebook")
     # =====================================================================
     # RECURSIVE SEARCH TOOLS
     # =====================================================================
