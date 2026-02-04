@@ -186,8 +186,8 @@ def execute_tool(tool_name: str, args: dict) -> dict:
              # Calls the method in recursive_context.py
              return {"result": ctx.notebook_add(args.get('content', ''))}
         elif tool_name == 'map_repository_structure':
-     # Calls the method in recursive_context.py
-     return {"result": ctx.map_repository_structure()}
+             # Calls the method in recursive_context.py
+             return {"result": ctx.map_repository_structure()}
         elif tool_name == 'create_shadow_branch':
             return {"status": "staged", "tool": tool_name, "args": args, "description": "🛡️ Create shadow branch"}
         return {"status": "error", "result": f"Unknown tool: {tool_name}"}
