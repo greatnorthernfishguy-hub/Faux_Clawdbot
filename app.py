@@ -95,7 +95,10 @@ ctx = RecursiveContextManager(_resolve_repo_path())
 def build_system_prompt() -> str:
     stats = ctx.get_stats()
     
-    # ... (Keep your notebook auto-loading logic here) ...
+    # --- FIX: READ NOTEBOOK ---
+    nb_text = ctx.notebook_read()
+    notebook_section = f"\n## 🧠 WORKING MEMORY (Notebook):\n{nb_text}\n" if nb_text else ""
+    # --------------------------
 
     tools_doc = """
 ## Available Tools
@@ -116,14 +119,16 @@ def build_system_prompt() -> str:
     return f"""You are Clawdbot 🦞. ... {tools_doc} ...
 
 System Stats: {stats.get('total_files', 0)} files, {stats.get('conversations', 0)} memories.
+{notebook_section} 
 {tools_doc}
 Output Format: Use [TOOL: tool_name(arg="value")] for tools.
 
 ## CRITICAL PROTOCOLS:
-1. **RECURSIVE MEMORY FIRST**: If the user asks about past context (e.g., "the new UI"), you MUST use `search_conversations` BEFORE you answer. Do not ask the user for context you already have.
-2. **THINK OUT LOUD**: When writing code, output the full code block in the chat BEFORE calling `write_file`. This ensures a backup exists in memory if the write fails.
-3. **CHECK BEFORE WRITE**: Before writing code, use `read_file` or `list_files` to ensure you aren't overwriting good code with bad.
-4. **NO SILENCE**: If you perform an action, report the result.
+1. **DIRECT ACTION**: Do not say what you are *going* to do. JUST DO IT. Do not say "I will now search for the file." and stop. Output the `[TOOL: ...]` command immediately in the same response.
+2. **RECURSIVE MEMORY FIRST**: If the user asks about past context (e.g., "the new UI"), you MUST use `search_conversations` BEFORE you answer.
+3. **THINK OUT LOUD**: When writing code, output the full code block in the chat BEFORE calling `write_file`.
+4. **CHECK BEFORE WRITE**: Before writing code, use `read_file` or `list_files` to ensure you aren't overwriting good code with bad.
+5. **NO SILENCE**: If you perform an action, report the result.
 """
 
 def parse_tool_calls(text: str) -> list:
@@ -282,6 +287,7 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
     safe_props = pending_proposals or []
     
     try:
+        # 1. Handle Empty Input
         if not message.strip() and uploaded_file is None:
             return (safe_hist, "", safe_props, _format_gate_choices(safe_props), _stats_label_files(), _stats_label_convos())
 
@@ -289,44 +295,54 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
         if uploaded_file:
             full_message = f"{process_uploaded_file(uploaded_file)}\n\n{full_message}"
 
+        # 2. Add User Message to History
         safe_hist = safe_hist + [{"role": "user", "content": full_message}]
         
+        # 3. Build API Context
         system_prompt = build_system_prompt()
         api_messages = [{"role": "system", "content": system_prompt}]
-        for h in safe_hist[-40:]:
+        for h in safe_hist[-40:]: # Context Window Protection
             api_messages.append({"role": h["role"], "content": h["content"]})
 
         accumulated_text = ""
         staged_this_turn = []
-        
-        # KEY FIX: Stamina increased to 15 turns
-        MAX_ITERATIONS = 15
+        MAX_ITERATIONS = 15 
+        tool_results_buffer = [] # Keep track of what we did
 
+        # 4. The "Anti-Ok" Recursion Loop
         for iteration in range(MAX_ITERATIONS):
             try:
-                # KEY FIX: Forced Surface logic
+                # Force a conclusion if we are running too long
                 if iteration == MAX_ITERATIONS - 1:
-                    api_messages.append({"role": "system", "content": "SYSTEM ALERT: Max steps reached. STOP using tools. Summarize findings immediately."})
+                    api_messages.append({"role": "system", "content": "SYSTEM ALERT: Max steps reached. Stop using tools. Summarize findings immediately."})
 
-                # KEY FIX: Use the new wrapper function instead of direct client call
+                # Call Model
                 resp = call_model_with_retry(api_messages, MODEL_ID)
                 content = resp.choices[0].message.content or ""
             except Exception as e:
                 safe_hist.append({"role": "assistant", "content": f"⚠️ API Error: {e}"})
                 return (safe_hist, "", safe_props, _format_gate_choices(safe_props), _stats_label_files(), _stats_label_convos())
 
+            # Parse Content
             calls = parse_tool_calls(content)
             text = extract_conversational_text(content)
             
-            if text: accumulated_text += ("\n\n" if accumulated_text else "") + text
+            # Accumulate text (so we don't lose the "I'm searching..." part)
+            if text: 
+                accumulated_text += ("\n\n" if accumulated_text else "") + text
             
-            if not calls: break
+            # No tools? We are done.
+            if not calls: 
+                break
 
+            # Execute Tools
             results = []
             for name, args in calls:
                 res = execute_tool(name, args)
                 if res["status"] == "executed":
-                    results.append(f"[Tool Result: {name}]\n{res['result']}")
+                    output = f"[Tool Result: {name}]\n{res['result']}"
+                    results.append(output)
+                    tool_results_buffer.append(f"Used {name}: {str(res['result'])[:100]}...")
                 elif res["status"] == "staged":
                     p_id = f"p_{int(time.time())}_{name}"
                     staged_this_turn.append({
@@ -335,11 +351,26 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
                     })
                     results.append(f"[STAGED: {name}]")
             
+            # Loop Back: Feed results into the model so it can "see" them
             if results:
-                api_messages += [{"role": "assistant", "content": content}, {"role": "user", "content": "\n".join(results)}]
+                api_messages += [
+                    {"role": "assistant", "content": content}, 
+                    {"role": "user", "content": "\n".join(results)}
+                ]
             else:
                 break
 
+        # 5. THE SAFETY NET (Fixing the "No Text Response" bug)
+        # If we did work (tools used) but have no text to show for it, force a summary.
+        if not accumulated_text.strip() and tool_results_buffer:
+            try:
+                summary_prompt = api_messages + [{"role": "system", "content": "You have executed tools but produced no text explanation. Summarize the tool results for the user now."}]
+                final_resp = call_model_with_retry(summary_prompt, MODEL_ID)
+                accumulated_text = final_resp.choices[0].message.content or "Task completed (See logs)."
+            except:
+                accumulated_text = "✅ Actions completed."
+
+        # 6. Finalize Output
         final = accumulated_text
         if staged_this_turn:
             final += "\n\n🛡️ **Proposals Staged.** Check the Gate tab."
@@ -348,13 +379,11 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
         if not final: final = "🤔 I processed that but have no text response."
         
         safe_hist.append({"role": "assistant", "content": final})
+        
+        # Save to Memory
         try: ctx.save_conversation_turn(full_message, final, len(safe_hist))
         except: pass
 
-        return (safe_hist, "", safe_props, _format_gate_choices(safe_props), _stats_label_files(), _stats_label_convos())
-
-    except Exception as e:
-        safe_hist.append({"role": "assistant", "content": f"💥 Critical Error: {e}"})
         return (safe_hist, "", safe_props, _format_gate_choices(safe_props), _stats_label_files(), _stats_label_convos())
 
 # =============================================================================
