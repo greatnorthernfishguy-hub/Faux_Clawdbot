@@ -11,7 +11,7 @@ import shutil
 import traceback
 import logging
 
-# Configure Logging to file AND console
+# Configure Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -23,15 +23,14 @@ logging.basicConfig(
 logger = logging.getLogger("Clawdbot")
 
 def log_action(action: str, details: str):
-    """Records critical system events."""
     logger.info(f"ACTION: {action} | DETAILS: {details}")
 
 """
 Clawdbot Unified Command Center
-DIAMOND COPY [2026-02-03]
-FIXED: Added missing retry logic.
-FIXED: Increased Max Tokens to 8192 (Prevents truncation).
-FIXED: Increased Loop Stamina to 15 (Prevents silence).
+DIAMOND COPY [2026-02-04]
+FIXED: Syntax Error in agent_loop (missing except block).
+FIXED: Anti-'Ok' Logic (Recursion loop).
+FIXED: Data persistence warnings.
 """
 
 # =============================================================================
@@ -42,7 +41,8 @@ AVAILABLE_TOOLS = {
     "list_files", "read_file", "search_code", "write_file", 
     "create_shadow_branch", "shell_execute", "get_stats",
     "search_conversations", "search_testament", "push_to_github",
-    "pull_from_github", "notebook_add", "notebook_delete", "notebook_read"
+    "pull_from_github", "notebook_add", "notebook_delete", "notebook_read",
+    "map_repository_structure", "map_repository_structure"
 }
 
 TEXT_EXTENSIONS = {
@@ -60,26 +60,6 @@ MODEL_ID = "moonshotai/Kimi-K2.5"
 # =============================================================================
 # REPO SYNC
 # =============================================================================
-def sync_from_space(space_id: str, local_path: Path):
-    token = os.getenv("HF_TOKEN")
-    if not token: return
-    try:
-        from huggingface_hub import HfFileSystem
-        fs = HfFileSystem(token=token)
-        space_path = f"spaces/{space_id}"
-        all_files = fs.glob(f"{space_path}/**")
-        local_path.mkdir(parents=True, exist_ok=True)
-        for file_path in all_files:
-            rel = file_path.replace(f"{space_path}/", "", 1)
-            if any(p.startswith('.') for p in rel.split('/')) or '__pycache__' in rel: continue
-            try:
-                if fs.info(file_path)['type'] == 'directory': continue
-            except: continue
-            dest = local_path / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with fs.open(file_path, "rb") as f: dest.write_bytes(f.read())
-    except Exception: pass
-
 def _resolve_repo_path() -> str:
     # FORCE: Use the directory where this app.py file actually lives
     return os.path.dirname(os.path.abspath(__file__))
@@ -95,10 +75,9 @@ ctx = RecursiveContextManager(_resolve_repo_path())
 def build_system_prompt() -> str:
     stats = ctx.get_stats()
     
-    # --- FIX: READ NOTEBOOK ---
+    # READ NOTEBOOK
     nb_text = ctx.notebook_read()
     notebook_section = f"\n## 🧠 WORKING MEMORY (Notebook):\n{nb_text}\n" if nb_text else ""
-    # --------------------------
 
     tools_doc = """
 ## Available Tools
@@ -115,6 +94,7 @@ def build_system_prompt() -> str:
 - **notebook_read()**: Read your working memory.
 - **notebook_add(content)**: Add a note (max 25).
 - **notebook_delete(index)**: Delete a note.
+- **map_repository_structure()**: Analyze code structure (files/functions).
 """
     return f"""You are Clawdbot 🦞. ... {tools_doc} ...
 
@@ -141,7 +121,7 @@ def parse_tool_calls(text: str) -> list:
         args = parse_tool_args(args_str)
         calls.append((tool_name, args))
 
-    # 2. XML Format (Translator)
+    # 2. XML Format
     if "<|tool_calls" in text:
         clean_text = re.sub(r"<\|tool_calls_section_begin\|>", "", text)
         clean_text = re.sub(r"<\|tool_calls_section_end\|>", "", clean_text)
@@ -150,16 +130,9 @@ def parse_tool_calls(text: str) -> list:
         xml_matches = re.finditer(r"(\w+)\s*\((.*?)\)", clean_text, re.DOTALL)
         for match in xml_matches:
             tool_name = match.group(1)
-            if tool_name in ["print", "range", "len", "str", "int"]: continue
-            if any(existing[0] == tool_name for existing in calls): continue
             if tool_name in AVAILABLE_TOOLS:
                 calls.append((tool_name, parse_tool_args(match.group(2))))
 
-    # 3. Legacy Kimi Tags
-    if not calls:
-        for match in re.finditer(r'<\|tool_call_begin\|>\s*functions\.(\w+):\d+\s*\n(.*?)<\|tool_call_end\|>', text, re.DOTALL):
-            try: calls.append((match.group(1), json.loads(match.group(2).strip())))
-            except: pass
     return calls
 
 def parse_tool_args(args_str: str) -> dict:
@@ -170,7 +143,7 @@ def parse_tool_args(args_str: str) -> dict:
         for match in re.finditer(pattern, args_str):
             key = match.group(1)
             val = match.group(2) or match.group(3) or match.group(4)
-            if val.isdigit(): val = int(val)
+            if val and val.isdigit(): val = int(val)
             args[key] = val
     except: pass
     return args
@@ -178,7 +151,6 @@ def parse_tool_args(args_str: str) -> dict:
 def extract_conversational_text(content: str) -> str:
     cleaned = re.sub(r'\[TOOL:.*?\]', '', content, flags=re.DOTALL)
     cleaned = re.sub(r'<\|tool_calls.*?<\|tool_calls.*?\|>', '', cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r'<\|tool_call_begin\|>.*?<\|tool_call_end\|>', '', cleaned, flags=re.DOTALL)
     return cleaned.strip()
 
 def execute_tool(tool_name: str, args: dict) -> dict:
@@ -199,24 +171,23 @@ def execute_tool(tool_name: str, args: dict) -> dict:
             formatted = "\n\n".join([f"📜 **{r['file']}**\n{r['snippet']}" for r in res]) if res else "No matches found."
             return {"status": "executed", "tool": tool_name, "result": formatted}
         elif tool_name == 'write_file':
-            # BYPASS GATE: Execute immediately
             result = ctx.write_file(args.get('path', ''), args.get('content', ''))
             return {"status": "executed", "tool": tool_name, "result": result}
-        elif tool_name == 'write_file':
-            log_action("WRITE_ATTEMPT", f"Writing to {args.get('path')}")
-            # ... existing write logic ...
         elif tool_name == 'shell_execute':
-            # BYPASS GATE: Execute immediately
             result = ctx.shell_execute(args.get('command', ''))
             return {"status": "executed", "tool": tool_name, "result": result}
         elif tool_name == 'push_to_github':
-            # BYPASS GATE: Immediate backup is always safe
             result = ctx.push_to_github(args.get('message', 'Manual Backup'))
             return {"status": "executed", "tool": tool_name, "result": result}
         elif tool_name == 'pull_from_github':
-            # BYPASS GATE: Emergency Restore
             result = ctx.pull_from_github(args.get('branch', 'main'))
             return {"status": "executed", "tool": tool_name, "result": result}    
+        elif tool_name == 'notebook_add':
+             # Calls the method in recursive_context.py
+             return {"result": ctx.notebook_add(args.get('content', ''))}
+        elif tool_name == 'map_repository_structure':
+     # Calls the method in recursive_context.py
+     return {"result": ctx.map_repository_structure()}
         elif tool_name == 'create_shadow_branch':
             return {"status": "staged", "tool": tool_name, "args": args, "description": "🛡️ Create shadow branch"}
         return {"status": "error", "result": f"Unknown tool: {tool_name}"}
@@ -264,11 +235,9 @@ def process_uploaded_file(file) -> str:
         except Exception as e: return f"📎 **Uploaded: {file_name}** (error reading: {e})"
     return f"📎 **Uploaded: {file_name}** (binary file, {os.path.getsize(file_path):,} bytes)"
 
-# NEW FUNCTION: This is what was missing!
 def call_model_with_retry(messages, model_id, max_retries=4):
     for attempt in range(max_retries):
         try:
-            # KEY FIX: max_tokens=8192 allows writing large files without cutoff
             return client.chat_completion(model=model_id, messages=messages, max_tokens=8192, temperature=0.7)
         except Exception as e:
             error_str = str(e)
@@ -307,7 +276,7 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
         accumulated_text = ""
         staged_this_turn = []
         MAX_ITERATIONS = 15 
-        tool_results_buffer = [] # Keep track of what we did
+        tool_results_buffer = [] 
 
         # 4. The "Anti-Ok" Recursion Loop
         for iteration in range(MAX_ITERATIONS):
@@ -327,7 +296,7 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
             calls = parse_tool_calls(content)
             text = extract_conversational_text(content)
             
-            # Accumulate text (so we don't lose the "I'm searching..." part)
+            # Accumulate text
             if text: 
                 accumulated_text += ("\n\n" if accumulated_text else "") + text
             
@@ -361,7 +330,6 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
                 break
 
         # 5. THE SAFETY NET (Fixing the "No Text Response" bug)
-        # If we did work (tools used) but have no text to show for it, force a summary.
         if not accumulated_text.strip() and tool_results_buffer:
             try:
                 summary_prompt = api_messages + [{"role": "system", "content": "You have executed tools but produced no text explanation. Summarize the tool results for the user now."}]
@@ -380,10 +348,13 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
         
         safe_hist.append({"role": "assistant", "content": final})
         
-        # Save to Memory
         try: ctx.save_conversation_turn(full_message, final, len(safe_hist))
         except: pass
 
+        return (safe_hist, "", safe_props, _format_gate_choices(safe_props), _stats_label_files(), _stats_label_convos())
+
+    except Exception as e:
+        safe_hist.append({"role": "assistant", "content": f"💥 Critical Error: {e}"})
         return (safe_hist, "", safe_props, _format_gate_choices(safe_props), _stats_label_files(), _stats_label_convos())
 
 # =============================================================================
