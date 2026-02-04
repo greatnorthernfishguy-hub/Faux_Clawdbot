@@ -398,19 +398,33 @@ class RecursiveContextManager:
             return f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         except Exception as e:
             return f"Execution Error: {e}"
-        def push_to_github(self, commit_message="Auto-backup from Clawdbot"):
-            """Pushes the current workspace to the configured GitHub repository."""
+        # =====================================================================
+    # GIT TOOLS (Fixed for Double-URL Issue)
+    # =====================================================================
+    def _get_authenticated_remote_url(self):
+        """Helper to construct the correct authenticated URL."""
         token = os.getenv("GITHUB_TOKEN")
         repo = os.getenv("GITHUB_REPO")
         
         if not token or not repo:
-            return "❌ Error: GITHUB_TOKEN or GITHUB_REPO secret is missing."
+            return None
+            
+        # Clean the repo string if it's already a full URL
+        if repo.startswith("https://github.com/"):
+            repo = repo.replace("https://github.com/", "")
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+            
+        return f"https://{token}@github.com/{repo}.git"
 
-        # authenticated URL
-        remote_url = f"https://{token}@github.com/{repo}.git"
+    def push_to_github(self, commit_message="Auto-backup from Clawdbot"):
+        """Pushes the current workspace to the configured GitHub repository."""
+        remote_url = self._get_authenticated_remote_url()
+        if not remote_url:
+            return "❌ Error: GITHUB_TOKEN or GITHUB_REPO secret is missing."
         
         try:
-            # 1. Initialize if needed (Docker containers often lack .git)
+            # 1. Initialize if needed
             if not (self.repo_path / ".git").exists():
                 subprocess.run(["git", "init"], cwd=self.repo_path, check=True)
                 subprocess.run(["git", "config", "user.email", "clawdbot@e-t-systems.ai"], cwd=self.repo_path)
@@ -418,7 +432,6 @@ class RecursiveContextManager:
                 subprocess.run(["git", "branch", "-M", "main"], cwd=self.repo_path)
                 
             # 2. Configure Remote (Idempotent)
-            # Remove existing remote to ensure token is fresh/correct
             subprocess.run(["git", "remote", "remove", "origin"], cwd=self.repo_path, stderr=subprocess.DEVNULL)
             subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=self.repo_path, check=True)
 
@@ -431,14 +444,16 @@ class RecursiveContextManager:
                 cwd=self.repo_path, capture_output=True, text=True
             )
             
-            # Push (force is safer for a backup mirror to overwrite conflicts)
+            # Push (force is safer for a backup mirror)
             push_res = subprocess.run(
                 ["git", "push", "-u", "origin", "main", "--force"], 
                 cwd=self.repo_path, capture_output=True, text=True
             )
             
             if push_res.returncode == 0:
-                return f"✅ Successfully pushed to GitHub: https://github.com/{repo}"
+                # Clean URL for display security
+                display_url = remote_url.replace(os.getenv("GITHUB_TOKEN"), "TOKEN_HIDDEN")
+                return f"✅ Successfully pushed to GitHub"
             else:
                 return f"⚠️ Git Push Failed: {push_res.stderr}"
 
@@ -447,13 +462,9 @@ class RecursiveContextManager:
 
     def pull_from_github(self, branch="main"):
         """Hard reset: Destroys local changes and pulls clean code from GitHub."""
-        token = os.getenv("GITHUB_TOKEN")
-        repo = os.getenv("GITHUB_REPO")
-        
-        if not token or not repo:
+        remote_url = self._get_authenticated_remote_url()
+        if not remote_url:
             return "❌ Error: GITHUB_TOKEN or GITHUB_REPO secret is missing."
-
-        remote_url = f"https://{token}@github.com/{repo}.git"
         
         try:
             # 1. Init if missing
@@ -461,7 +472,7 @@ class RecursiveContextManager:
                 subprocess.run(["git", "init"], cwd=self.repo_path, check=True)
                 subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=self.repo_path)
 
-            # 2. Fetch and Reset (Destructive but safe for recovery)
+            # 2. Fetch and Reset
             subprocess.run(["git", "fetch", "origin"], cwd=self.repo_path, check=True)
             res = subprocess.run(
                 ["git", "reset", "--hard", f"origin/{branch}"], 
@@ -475,6 +486,72 @@ class RecursiveContextManager:
 
         except Exception as e:
             return f"❌ Critical Git Error: {e}"
+
+    # =====================================================================
+    # WORKING MEMORY NOTEBOOK (Structured List)
+    # =====================================================================
+    def _load_notebook(self) -> List[Dict]:
+        """Internal helper to load notebook JSON."""
+        notebook_path = self.repo_path / "memory" / "notebook.json"
+        if not notebook_path.exists():
+            return []
+        try:
+            return json.loads(notebook_path.read_text(encoding='utf-8'))
+        except:
+            return []
+
+    def _save_notebook(self, notes: List[Dict]):
+        """Internal helper to save notebook JSON with audit logging."""
+        notebook_path = self.repo_path / "memory" / "notebook.json"
+        log_path = self.repo_path / "memory" / "history.log"
+        
+        notebook_path.parent.mkdir(parents=True, exist_ok=True)
+        notebook_path.write_text(json.dumps(notes, indent=2), encoding='utf-8')
+        
+        # Audit Log (Metadata only)
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, "a") as f:
+                f.write(f"[{timestamp}] NOTEBOOK UPDATED | Count: {len(notes)}\n")
+        except: pass
+
+    def notebook_read(self) -> str:
+        """Reads the Working Memory notebook."""
+        notes = self._load_notebook()
+        if not notes:
+            return "" 
+        
+        display = []
+        for i, note in enumerate(notes):
+            display.append(f"{i+1}. [{note['timestamp']}] {note['content']}")
+        return "\n".join(display)
+
+    def notebook_add(self, content: str) -> str:
+        """Adds a new note to the notebook."""
+        notes = self._load_notebook()
+        
+        if len(notes) >= 25:
+            return "⚠️ Notebook full (25/25 slots). Please delete obsolete notes first."
+        
+        timestamp = time.strftime("%Y-%m-%d %H:%M")
+        notes.append({"timestamp": timestamp, "content": content})
+        self._save_notebook(notes)
+        return f"✅ Note added. ({len(notes)}/25 slots used)"
+
+    def notebook_delete(self, index: int) -> str:
+        """Deletes a note by its number (1-based index)."""
+        notes = self._load_notebook()
+        try:
+            idx = int(index) - 1
+            if 0 <= idx < len(notes):
+                removed = notes.pop(idx)
+                self._save_notebook(notes)
+                return f"✅ Deleted note #{index}: '{removed['content'][:30]}...'"
+            else:
+                return f"❌ Invalid index: {index}. Valid range: 1-{len(notes)}"
+        except ValueError:
+            return "❌ Index must be a number."
+
     # =====================================================================
     # RECURSIVE SEARCH TOOLS
     # =====================================================================
@@ -585,3 +662,143 @@ class RecursiveContextManager:
             
         # 3. Push the entire manifest back to your PRO storage dataset
         self.persistence.save_conversations(full_data)
+
+    # =====================================================================
+    # GIT TOOLS
+    # =====================================================================
+    def _get_authenticated_remote_url(self):
+        """Helper to construct the correct authenticated URL."""
+        token = os.getenv("GITHUB_TOKEN")
+        repo = os.getenv("GITHUB_REPO")
+        
+        if not token or not repo:
+            return None
+            
+        # Clean the repo string if it's already a full URL
+        if repo.startswith("https://github.com/"):
+            repo = repo.replace("https://github.com/", "")
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+            
+        return f"https://{token}@github.com/{repo}.git"
+
+    def push_to_github(self, commit_message="Auto-backup from Clawdbot"):
+        """Pushes the current workspace to the configured GitHub repository."""
+        remote_url = self._get_authenticated_remote_url()
+        if not remote_url:
+            return "❌ Error: GITHUB_TOKEN or GITHUB_REPO secret is missing."
+        
+        try:
+            # 1. Initialize if needed
+            if not (self.repo_path / ".git").exists():
+                subprocess.run(["git", "init"], cwd=self.repo_path, check=True)
+                subprocess.run(["git", "config", "user.email", "clawdbot@e-t-systems.ai"], cwd=self.repo_path)
+                subprocess.run(["git", "config", "user.name", "Clawdbot"], cwd=self.repo_path)
+                subprocess.run(["git", "branch", "-M", "main"], cwd=self.repo_path)
+                
+            # 2. Configure Remote (Idempotent)
+            subprocess.run(["git", "remote", "remove", "origin"], cwd=self.repo_path, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=self.repo_path, check=True)
+
+            # 3. Add, Commit, Push
+            subprocess.run(["git", "add", "."], cwd=self.repo_path, check=True)
+            
+            # Commit (allow empty if nothing changed)
+            commit_res = subprocess.run(
+                ["git", "commit", "-m", commit_message], 
+                cwd=self.repo_path, capture_output=True, text=True
+            )
+            
+            # Push (force is safer for a backup mirror)
+            push_res = subprocess.run(
+                ["git", "push", "-u", "origin", "main", "--force"], 
+                cwd=self.repo_path, capture_output=True, text=True
+            )
+            
+            if push_res.returncode == 0:
+                repo_name = os.getenv("GITHUB_REPO").replace("https://github.com/", "").replace(".git", "")
+                return f"✅ Successfully pushed to GitHub: https://github.com/{repo_name}"
+            else:
+                return f"⚠️ Git Push Failed: {push_res.stderr}"
+
+        except Exception as e:
+            return f"❌ Critical Git Error: {e}"
+
+    def pull_from_github(self, branch="main"):
+        """Hard reset: Destroys local changes and pulls clean code from GitHub."""
+        remote_url = self._get_authenticated_remote_url()
+        if not remote_url:
+            return "❌ Error: GITHUB_TOKEN or GITHUB_REPO secret is missing."
+        
+        try:
+            # 1. Init if missing
+            if not (self.repo_path / ".git").exists():
+                subprocess.run(["git", "init"], cwd=self.repo_path, check=True)
+                subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=self.repo_path)
+
+            # 2. Fetch and Reset
+            subprocess.run(["git", "fetch", "origin"], cwd=self.repo_path, check=True)
+            res = subprocess.run(
+                ["git", "reset", "--hard", f"origin/{branch}"], 
+                cwd=self.repo_path, capture_output=True, text=True
+            )
+            
+            if res.returncode == 0:
+                return f"✅ RESTORE COMPLETED. Local files replaced with GitHub/{branch}."
+            else:
+                return f"⚠️ Pull Failed: {res.stderr}"
+
+        except Exception as e:
+            return f"❌ Critical Git Error: {e}"
+
+    # =====================================================================
+    # WORKING MEMORY NOTEBOOK (Structured List)
+    # =====================================================================
+    def _load_notebook(self) -> List[Dict]:
+        """Internal helper to load notebook JSON."""
+        notebook_path = self.repo_path / "memory" / "notebook.json"
+        if not notebook_path.exists(): return []
+        try: return json.loads(notebook_path.read_text(encoding='utf-8'))
+        except: return []
+
+    def _save_notebook(self, notes: List[Dict]):
+        """Internal helper to save notebook JSON with audit logging."""
+        notebook_path = self.repo_path / "memory" / "notebook.json"
+        log_path = self.repo_path / "memory" / "history.log"
+        notebook_path.parent.mkdir(parents=True, exist_ok=True)
+        notebook_path.write_text(json.dumps(notes, indent=2), encoding='utf-8')
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, "a") as f: f.write(f"[{timestamp}] NOTEBOOK UPDATED | Count: {len(notes)}\n")
+        except: pass
+
+    def notebook_read(self) -> str:
+        """Reads the Working Memory notebook."""
+        notes = self._load_notebook()
+        if not notes: return ""
+        display = []
+        for i, note in enumerate(notes):
+            display.append(f"{i+1}. [{note['timestamp']}] {note['content']}")
+        return "\n".join(display)
+
+    def notebook_add(self, content: str) -> str:
+        """Adds a new note to the notebook."""
+        notes = self._load_notebook()
+        if len(notes) >= 25: return "⚠️ Notebook full (25/25 slots). Please delete obsolete notes first."
+        timestamp = time.strftime("%Y-%m-%d %H:%M")
+        notes.append({"timestamp": timestamp, "content": content})
+        self._save_notebook(notes)
+        return f"✅ Note added. ({len(notes)}/25 slots used)"
+
+    def notebook_delete(self, index: int) -> str:
+        """Deletes a note by its number (1-based index)."""
+        notes = self._load_notebook()
+        try:
+            idx = int(index) - 1
+            if 0 <= idx < len(notes):
+                removed = notes.pop(idx)
+                self._save_notebook(notes)
+                return f"✅ Deleted note #{index}: '{removed['content'][:30]}...'"
+            else: return f"❌ Invalid index: {index}. Valid range: 1-{len(notes)}"
+        except ValueError: return "❌ Index must be a number."
+
