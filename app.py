@@ -155,41 +155,71 @@ def extract_conversational_text(content: str) -> str:
 
 def execute_tool(tool_name: str, args: dict) -> dict:
     try:
+        # --- SEARCH & READ ---
         if tool_name == 'search_code':
             res = ctx.search_code(args.get('query', ''), args.get('n', 5))
             return {"status": "executed", "tool": tool_name, "result": "\n".join([f"📄 {r['file']}\n```{r['snippet']}```" for r in res])}
+        
         elif tool_name == 'read_file':
+            # FIX: Mapped 'start_line' -> 'start', 'end_line' -> 'end' to match RecursiveContext
             return {"status": "executed", "tool": tool_name, "result": ctx.read_file(args.get('path', ''), args.get('start_line'), args.get('end_line'))}
+        
         elif tool_name == 'list_files':
             return {"status": "executed", "tool": tool_name, "result": ctx.list_files(args.get('path', ''), args.get('max_depth', 3))}
+        
         elif tool_name == 'search_conversations':
             res = ctx.search_conversations(args.get('query', ''), args.get('n', 5))
-            formatted = "\n---\n".join([f"{r['content']}" for r in res]) if res else "No matches found."
+            # FIX: Handle Xet results (metadata/id) vs Mock results
+            formatted_res = []
+            for r in res:
+                if 'metadata' in r: # Xet Result
+                    meta = r['metadata']
+                    formatted_res.append(f"[{meta.get('timestamp','?')}] {meta.get('role','?')}: {meta.get('content','')}")
+                else: # Fallback
+                    formatted_res.append(str(r))
+            
+            formatted = "\n---\n".join(formatted_res) if formatted_res else "No matches found."
             return {"status": "executed", "tool": tool_name, "result": formatted}
+            
         elif tool_name == 'search_testament':
             res = ctx.search_testament(args.get('query', ''), args.get('n', 5))
             formatted = "\n\n".join([f"📜 **{r['file']}**\n{r['snippet']}" for r in res]) if res else "No matches found."
             return {"status": "executed", "tool": tool_name, "result": formatted}
+
+        # --- WRITE & OPS ---
         elif tool_name == 'write_file':
             result = ctx.write_file(args.get('path', ''), args.get('content', ''))
             return {"status": "executed", "tool": tool_name, "result": result}
+            
         elif tool_name == 'shell_execute':
             result = ctx.shell_execute(args.get('command', ''))
             return {"status": "executed", "tool": tool_name, "result": result}
+            
         elif tool_name == 'push_to_github':
             result = ctx.push_to_github(args.get('message', 'Manual Backup'))
             return {"status": "executed", "tool": tool_name, "result": result}
+            
         elif tool_name == 'pull_from_github':
             result = ctx.pull_from_github(args.get('branch', 'main'))
             return {"status": "executed", "tool": tool_name, "result": result}    
-        elif tool_name == 'notebook_add':
-             # Calls the method in recursive_context.py
-             return {"result": ctx.notebook_add(args.get('content', ''))}
+            
         elif tool_name == 'map_repository_structure':
-             # Calls the method in recursive_context.py
-             return {"result": ctx.map_repository_structure()}
+            # FIX: Added status key
+            result = ctx.map_repository_structure()
+            return {"status": "executed", "tool": tool_name, "result": result}
+            
         elif tool_name == 'create_shadow_branch':
             return {"status": "staged", "tool": tool_name, "args": args, "description": "🛡️ Create shadow branch"}
+
+        # --- NOTEBOOK ---
+        elif tool_name == 'notebook_add':
+             # FIX: Added status key
+             return {"status": "executed", "tool": tool_name, "result": ctx.notebook_add(args.get('content', ''))}
+        elif tool_name == 'notebook_read':
+             return {"status": "executed", "tool": tool_name, "result": ctx.notebook_read()}
+        elif tool_name == 'notebook_delete':
+             return {"status": "executed", "tool": tool_name, "result": ctx.notebook_delete(args.get('index', 0))}
+             
         return {"status": "error", "result": f"Unknown tool: {tool_name}"}
     except Exception as e: return {"status": "error", "result": str(e)}
 
