@@ -22,8 +22,12 @@ class RecursiveContextManager:
         
         # --- XET / DATABASE INIT ---
         self.xet_root = self.repo_path / "xet_data"
-        self.xet_dataset_file = "xet_vectors.json" # Claude's Strategy
+        self.xet_dataset_file = "xet_vectors.json"
         self.xet_store = None
+        
+        # DEBOUNCE CONTROLS (NEW)
+        self._saves_since_xet_backup = 0
+        self.XET_BACKUP_EVERY_N = 5  # Backup every 5 conversations
         
         try:
             if (self.repo_path / "xet_storage.py").exists():
@@ -70,26 +74,76 @@ class RecursiveContextManager:
             print(f"⚠️ Xet restore failed (New dataset?): {e}")
 
     def _backup_xet_to_dataset(self):
-        """Syncs all Xet vectors to HF Dataset as JSON."""
-        if not self.token or not self.xet_store: return
+        """Sync only NEW vectors since last backup (incremental)."""
+        if not self.token or not self.xet_store: 
+            return
         
-        vectors = []
+        # Track what we've already backed up via manifest
+        manifest_path = self.memory_path / "xet_manifest.json"
+        try:
+            known_hashes = set(json.loads(manifest_path.read_text()))
+        except:
+            known_hashes = set()
+        
+        # Find new vectors (filename IS the content hash in Xet storage)
+        new_vectors = []
+        current_hashes = set()
+        
         for f in self.xet_store.vectors_path.glob("*/*/*"):
-            if f.is_file():
-                try: vectors.append(json.loads(f.read_text()))
-                except: pass
+            if not f.is_file(): 
+                continue
+            file_hash = f.name
+            current_hashes.add(file_hash)
+            
+            if file_hash not in known_hashes:
+                try:
+                    new_vectors.append(json.loads(f.read_text()))
+                except:
+                    pass
         
-        backup_path = self.memory_path / self.xet_dataset_file
-        backup_path.write_text(json.dumps(vectors, indent=2))
+        if not new_vectors:
+            # Nothing new to sync
+            return
         
         try:
+            # Download existing vectors from dataset to merge
+            existing = []
+            try:
+                local_path = hf_hub_download(
+                    repo_id=self.dataset_id,
+                    filename=self.xet_dataset_file,
+                    repo_type="dataset",
+                    token=self.token,
+                    local_dir=self.memory_path,
+                    local_dir_use_symlinks=False
+                )
+                existing = json.loads(Path(local_path).read_text())
+            except:
+                pass  # File doesn't exist yet
+            
+            # Merge with deduplication by id
+            existing_ids = {v["id"] for v in existing}
+            for v in new_vectors:
+                if v["id"] not in existing_ids:
+                    existing.append(v)
+            
+            # Upload merged file
+            backup_path = self.memory_path / self.xet_dataset_file
+            backup_path.write_text(json.dumps(existing, indent=2))
+            
             api = HfApi(token=self.token)
             api.upload_file(
-                path_or_fileobj=backup_path, path_in_repo=self.xet_dataset_file,
-                repo_id=self.dataset_id, repo_type="dataset",
-                commit_message=f"🧠 Xet Backup: {len(vectors)} vectors"
+                path_or_fileobj=backup_path,
+                path_in_repo=self.xet_dataset_file,
+                repo_id=self.dataset_id,
+                repo_type="dataset",
+                commit_message=f"🧠 Xet: +{len(new_vectors)} vectors (total: {len(existing)})"
             )
-            print(f"☁️ Backed up {len(vectors)} vectors.")
+            
+            # Update manifest so we don't re-upload these
+            manifest_path.write_text(json.dumps(list(current_hashes)))
+            print(f"☁️ Backed up {len(new_vectors)} new vectors")
+            
         except Exception as e:
             print(f"⚠️ Xet backup failed: {e}")
 
@@ -101,7 +155,6 @@ class RecursiveContextManager:
         try:
             # feature-extraction returns list of floats
             response = self.client.feature_extraction(text, model="sentence-transformers/all-MiniLM-L6-v2")
-            # Handle API return types (sometimes nested list)
             return response[0] if isinstance(response[0], list) else response
         except Exception: return [0.0] * 384
 
@@ -168,8 +221,12 @@ class RecursiveContextManager:
                 "timestamp": time.time()
             }
         )
-        # Sync occasionally (Debounce could go here, for now sync on turn)
-        self._backup_xet_to_dataset()
+        
+        # Debounced backup - not every turn
+        self._saves_since_xet_backup += 1
+        if self._saves_since_xet_backup >= self.XET_BACKUP_EVERY_N:
+            self._backup_xet_to_dataset()
+            self._saves_since_xet_backup = 0
 
     def search_conversations(self, query: str, n: int=5) -> List[Dict]:
         if not self.xet_store: return []
@@ -205,10 +262,9 @@ class RecursiveContextManager:
         return results[:n]
 
     # =========================================================================
-    # 🛠️ STANDARD TOOLS (Matched to Claude's Specs)
+    # 🛠️ STANDARD TOOLS
     # =========================================================================
     def read_file(self, path: str, start_line: int = None, end_line: int = None) -> str:
-        # Renamed params to match LLM output
         try:
             target = self.repo_path / path
             content = target.read_text(encoding='utf-8', errors='ignore')
@@ -264,8 +320,40 @@ class RecursiveContextManager:
             return f"✅ Map Generated: {file_count} files, {len(graph['nodes'])} nodes."
         except Exception as e: return f"❌ Mapping failed: {e}"
 
-    def push_to_github(self, message: str) -> str: return "✅ Push simulation."
-    def pull_from_github(self, branch: str) -> str: return "✅ Pull simulation."
-    def create_shadow_branch(self) -> str: return "✅ Shadow branch created."
+    def push_to_github(self, message: str) -> str:
+        """Push current state to the connected HF Space (Git)."""
+        try:
+            subprocess.run(["git", "config", "user.email", "clawdbot@system.local"], check=False)
+            subprocess.run(["git", "config", "user.name", "Clawdbot"], check=False)
+            subprocess.run(["git", "add", "."], check=True)
+            subprocess.run(["git", "commit", "-m", message], check=True)
+            # Note: 'git push' requires the token to be in the remote URL or credential helper
+            return "✅ Changes committed (Push requires configured remote with token)."
+        except Exception as e: 
+            return f"Git Error: {e}"
+
+    def pull_from_github(self, branch: str) -> str:
+        """Pull latest from remote."""
+        try:
+            subprocess.run(["git", "pull", "origin", branch], check=True)
+            return f"✅ Pulled {branch}"
+        except Exception as e: 
+            return f"Git Pull Error: {e}"
+
+    def create_shadow_branch(self) -> str:
+        """Create timestamped backup branch."""
+        ts = int(time.time())
+        try:
+            subprocess.run(["git", "checkout", "-b", f"shadow_{ts}"], check=True)
+            return f"✅ Created branch shadow_{ts}"
+        except Exception as e: 
+            return f"Error: {e}"
+        
     def get_stats(self) -> Dict:
-        return {"total_files": len(list(self.repo_path.rglob("*"))), "conversations": 0}
+        conv_count = 0
+        if self.xet_store:
+            try:
+                # Count files in the vectors/shard/hash structure
+                conv_count = len(list(self.xet_store.vectors_path.glob("*/*/*")))
+            except: pass
+        return {"total_files": len(list(self.repo_path.rglob("*"))), "conversations": conv_count}
