@@ -1,6 +1,7 @@
 import gradio as gr
 from huggingface_hub import InferenceClient
 from recursive_context import RecursiveContextManager
+from openclaw_hook import NeuroGraphMemory
 from pathlib import Path
 import os
 import json
@@ -34,11 +35,11 @@ Aligned with Claude's Directives:
 """
 
 AVAILABLE_TOOLS = {
-    "list_files", "read_file", "search_code", "write_file", 
+    "list_files", "read_file", "search_code", "write_file",
     "create_shadow_branch", "shell_execute", "get_stats",
     "search_conversations", "search_testament", "push_to_github",
     "pull_from_github", "notebook_add", "notebook_delete", "notebook_read",
-    "map_repository_structure"
+    "map_repository_structure", "ingest_workspace"
 }
 
 TEXT_EXTENSIONS = {
@@ -65,35 +66,44 @@ def build_system_prompt() -> str:
     nb_text = ctx.notebook_read()
     notebook_section = f"\n## 🧠 WORKING MEMORY (Notebook):\n{nb_text}\n" if nb_text else ""
 
+    ng_stats_line = (
+        f"NeuroGraph: {stats.get('ng_nodes', 0)} nodes, "
+        f"{stats.get('ng_synapses', 0)} synapses, "
+        f"firing_rate={stats.get('ng_firing_rate', 0.0):.4f}, "
+        f"prediction_accuracy={stats.get('ng_prediction_accuracy', 0.0):.2%}"
+    )
+
     tools_doc = """
 ## Available Tools
-- **search_code(query, n=5)**: Semantic search codebase.
+- **search_code(query, n=5)**: Semantic search codebase (NeuroGraph-powered).
 - **read_file(path, start_line, end_line)**: Read file content.
 - **list_files(path, max_depth)**: Explore directory tree.
-- **search_conversations(query, n=5)**: Search persistent memory.
-- **search_testament(query, n=5)**: Search docs/plans.
+- **search_conversations(query, n=5)**: Search persistent memory (NeuroGraph recall).
+- **search_testament(query, n=5)**: Search docs/plans (NeuroGraph recall).
+- **ingest_workspace()**: Index/re-index the entire workspace into NeuroGraph memory.
 - **write_file(path, content)**: Create/Update file (REQUIRES CHANGELOG).
 - **shell_execute(command)**: Run shell command.
 - **create_shadow_branch()**: Backup repository.
 - **push_to_github(message)**: Save current state to GitHub.
 - **pull_from_github(branch)**: Hard reset state from GitHub.
 - **notebook_read()**: Read your working memory.
-- **notebook_add(content)**: Add a note (max 25).
+- **notebook_add(content)**: Add a note (max 50).
 - **notebook_delete(index)**: Delete a note.
 - **map_repository_structure()**: Analyze code structure (files/functions).
 """
-    return f"""You are Clawdbot 🦞. ... {tools_doc} ...
+    return f"""You are Clawdbot 🦞, a recursive AI coding assistant powered by NeuroGraph cognitive memory.
 
-System Stats: {stats.get('total_files', 0)} files, {stats.get('conversations', 0)} memories.
-{notebook_section} 
+System Stats: {stats.get('total_files', 0)} files, {stats.get('conversations', 0)} messages ingested.
+{ng_stats_line}
+{notebook_section}
 {tools_doc}
 Output Format: Use [TOOL: tool_name(arg="value")] for tools.
 
 ## CRITICAL PROTOCOLS:
-1. **DIRECT ACTION**: Do not say what you are *going* to do. JUST DO IT. Do not say "I will now search for the file." and stop. Output the `[TOOL: ...]` command immediately in the same response.
-2. **RECURSIVE MEMORY FIRST**: If the user asks about past context (e.g., "the new UI"), you MUST use `search_conversations` BEFORE you answer.
+1. **DIRECT ACTION**: Do not say what you are *going* to do. JUST DO IT. Output the `[TOOL: ...]` command immediately in the same response.
+2. **RECURSIVE MEMORY FIRST**: If the user asks about past context, you MUST use `search_conversations` BEFORE you answer.
 3. **THINK OUT LOUD**: When writing code, output the full code block in the chat BEFORE calling `write_file`.
-4. **CHECK BEFORE WRITE**: Before writing code, use `read_file` or `list_files` to ensure you aren't overwriting good code with bad.
+4. **CHECK BEFORE WRITE**: Before writing code, use `read_file` or `list_files` to ensure you aren't overwriting good code.
 5. **NO SILENCE**: If you perform an action, report the result.
 """
 
@@ -168,8 +178,9 @@ def execute_tool(tool_name: str, args: dict) -> dict:
             result = ctx.pull_from_github(args.get('branch', 'main'))
             return {"status": "executed", "tool": tool_name, "result": result}    
         elif tool_name == 'map_repository_structure':
-            # FIX: Added status key
             return {"status": "executed", "tool": tool_name, "result": ctx.map_repository_structure()}
+        elif tool_name == 'ingest_workspace':
+            return {"status": "executed", "tool": tool_name, "result": ctx.ingest_workspace()}
         elif tool_name == 'create_shadow_branch':
             return {"status": "staged", "tool": tool_name, "args": args, "description": "🛡️ Create shadow branch"}
         elif tool_name == 'notebook_add':
@@ -247,10 +258,26 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
             full_message = f"{process_uploaded_file(uploaded_file)}\n\n{full_message}"
 
         safe_hist = safe_hist + [{"role": "user", "content": full_message}]
-        
-        system_prompt = build_system_prompt()
+
+        # Ingest the user message into NeuroGraph
+        try:
+            ctx.ng.on_message(full_message)
+        except Exception:
+            pass
+
+        # Inject semantically relevant memories as a system context block
+        memory_context = ""
+        try:
+            recalls = ctx.ng.recall(full_message, k=5, threshold=0.35)
+            if recalls:
+                snippets = "\n---\n".join(r.get("content", "")[:300] for r in recalls)
+                memory_context = f"\n\n## Relevant Memory (NeuroGraph):\n{snippets}\n"
+        except Exception:
+            pass
+
+        system_prompt = build_system_prompt() + memory_context
         api_messages = [{"role": "system", "content": system_prompt}]
-        for h in safe_hist[-40:]: 
+        for h in safe_hist[-40:]:
             api_messages.append({"role": h["role"], "content": h["content"]})
 
         accumulated_text = ""
