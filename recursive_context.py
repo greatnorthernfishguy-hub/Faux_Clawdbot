@@ -7,47 +7,40 @@ import ast
 import glob
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from huggingface_hub import HfApi, hf_hub_download, InferenceClient
+from huggingface_hub import HfApi, hf_hub_download
+
+from openclaw_hook import NeuroGraphMemory
 
 class RecursiveContextManager:
     def __init__(self, repo_path: str):
         self.repo_path = Path(repo_path)
         self.memory_path = self.repo_path / "memory"
         self.notebook_file = self.memory_path / "notebook.json"
-        
+
         # --- AUTHENTICATION ---
         self.token = os.getenv("HF_TOKEN")
         self.dataset_id = os.getenv("DATASET_ID", "Executor-Tyrant-Framework/clawdbot-memory")
-        self.client = InferenceClient(token=self.token) if self.token else None
-        
-        # --- XET / DATABASE INIT ---
-        self.xet_root = self.repo_path / "xet_data"
-        self.xet_dataset_file = "xet_vectors.json"
-        self.xet_store = None
-        
-        # DEBOUNCE CONTROLS (NEW)
-        self._saves_since_xet_backup = 0
-        self.XET_BACKUP_EVERY_N = 5  # Backup every 5 conversations
-        
-        try:
-            if (self.repo_path / "xet_storage.py").exists():
-                import sys
-                sys.path.append(str(self.repo_path))
-                from xet_storage import XetVectorStore
-                self.xet_store = XetVectorStore(repo_path=str(self.xet_root))
-                print("✅ Xet Storage Driver Loaded.")
-        except Exception as e:
-            print(f"⚠️ Xet Driver not loaded: {e}")
 
-        # --- RESTORE MEMORY ---
+        # --- NEUROGRAPH MEMORY ---
+        neurograph_workspace = os.getenv(
+            "NEUROGRAPH_WORKSPACE_DIR",
+            str(self.repo_path / ".neurograph")
+        )
+        self.ng = NeuroGraphMemory.get_instance(workspace_dir=neurograph_workspace)
+        print("✅ NeuroGraph Memory Loaded.")
+
+        # Debounce for HF checkpoint uploads
+        self._saves_since_ng_backup = 0
+        self.NG_BACKUP_EVERY_N = 10
+
+        # --- RESTORE NOTEBOOK ---
         self._init_memory()
-        self._init_xet_memory()
 
     # =========================================================================
-    # 🧠 SYNC LOGIC (Notebook + Xet JSON)
+    # 🧠 SYNC LOGIC (Notebook + NeuroGraph Checkpoint Upload)
     # =========================================================================
     def _init_memory(self):
-        """STARTUP: Download Notebook."""
+        """STARTUP: Download Notebook from HF Dataset."""
         self.memory_path.mkdir(parents=True, exist_ok=True)
         if self.token:
             try:
@@ -55,108 +48,28 @@ class RecursiveContextManager:
                     repo_id=self.dataset_id, filename="notebook.json", repo_type="dataset",
                     token=self.token, local_dir=self.memory_path, local_dir_use_symlinks=False
                 )
-            except Exception: self._save_local([])
+            except Exception:
+                self._save_local([])
 
-    def _init_xet_memory(self):
-        """STARTUP: Download Xet Vectors (JSON)."""
-        if not self.token or not self.xet_store: return
-        try:
-            local_path = hf_hub_download(
-                repo_id=self.dataset_id, filename=self.xet_dataset_file, repo_type="dataset",
-                token=self.token, local_dir=self.memory_path, local_dir_use_symlinks=False
-            )
-            # Restore to Xet Store
-            vectors = json.loads(Path(local_path).read_text())
-            for v in vectors:
-                self.xet_store.store_vector(v["id"], v["vector"], v["metadata"])
-            print(f"🧠 Restored {len(vectors)} vectors from Dataset")
-        except Exception as e:
-            print(f"⚠️ Xet restore failed (New dataset?): {e}")
-
-    def _backup_xet_to_dataset(self):
-        """Sync only NEW vectors since last backup (incremental)."""
-        if not self.token or not self.xet_store: 
+    def _backup_ng_checkpoint_to_dataset(self):
+        """Upload NeuroGraph checkpoint to HF Dataset for persistence."""
+        if not self.token:
             return
-        
-        # Track what we've already backed up via manifest
-        manifest_path = self.memory_path / "xet_manifest.json"
-        try:
-            known_hashes = set(json.loads(manifest_path.read_text()))
-        except:
-            known_hashes = set()
-        
-        # Find new vectors (filename IS the content hash in Xet storage)
-        new_vectors = []
-        current_hashes = set()
-        
-        for f in self.xet_store.vectors_path.glob("*/*/*"):
-            if not f.is_file(): 
-                continue
-            file_hash = f.name
-            current_hashes.add(file_hash)
-            
-            if file_hash not in known_hashes:
-                try:
-                    new_vectors.append(json.loads(f.read_text()))
-                except:
-                    pass
-        
-        if not new_vectors:
-            # Nothing new to sync
+        checkpoint_path = Path(self.ng.save())
+        if not checkpoint_path.exists():
             return
-        
         try:
-            # Download existing vectors from dataset to merge
-            existing = []
-            try:
-                local_path = hf_hub_download(
-                    repo_id=self.dataset_id,
-                    filename=self.xet_dataset_file,
-                    repo_type="dataset",
-                    token=self.token,
-                    local_dir=self.memory_path,
-                    local_dir_use_symlinks=False
-                )
-                existing = json.loads(Path(local_path).read_text())
-            except:
-                pass  # File doesn't exist yet
-            
-            # Merge with deduplication by id
-            existing_ids = {v["id"] for v in existing}
-            for v in new_vectors:
-                if v["id"] not in existing_ids:
-                    existing.append(v)
-            
-            # Upload merged file
-            backup_path = self.memory_path / self.xet_dataset_file
-            backup_path.write_text(json.dumps(existing, indent=2))
-            
             api = HfApi(token=self.token)
             api.upload_file(
-                path_or_fileobj=backup_path,
-                path_in_repo=self.xet_dataset_file,
+                path_or_fileobj=checkpoint_path,
+                path_in_repo="neurograph/main.msgpack",
                 repo_id=self.dataset_id,
                 repo_type="dataset",
-                commit_message=f"🧠 Xet: +{len(new_vectors)} vectors (total: {len(existing)})"
+                commit_message=f"🧠 NeuroGraph checkpoint ({self.ng.stats()['nodes']} nodes)"
             )
-            
-            # Update manifest so we don't re-upload these
-            manifest_path.write_text(json.dumps(list(current_hashes)))
-            print(f"☁️ Backed up {len(new_vectors)} new vectors")
-            
+            print(f"☁️ NeuroGraph checkpoint uploaded.")
         except Exception as e:
-            print(f"⚠️ Xet backup failed: {e}")
-
-    # =========================================================================
-    # 🧬 EMBEDDINGS
-    # =========================================================================
-    def _get_embedding(self, text: str) -> List[float]:
-        if not self.client: return [0.0] * 384
-        try:
-            # feature-extraction returns list of floats
-            response = self.client.feature_extraction(text, model="sentence-transformers/all-MiniLM-L6-v2")
-            return response[0] if isinstance(response[0], list) else response
-        except Exception: return [0.0] * 384
+            print(f"⚠️ NeuroGraph checkpoint upload failed: {e}")
 
     # =========================================================================
     # 📓 NOTEBOOK
@@ -203,63 +116,51 @@ class RecursiveContextManager:
         except IndexError: return "❌ Invalid index."
 
     # =========================================================================
-    # 🔍 SEARCH & MEMORY
+    # 🔍 SEARCH & MEMORY (NeuroGraph-backed)
     # =========================================================================
-    def save_conversation_turn(self, user_msg, assist_msg, turn_id):
-        if not self.xet_store: return
+    def save_conversation_turn(self, user_msg: str, assist_msg: str, turn_id: int):
+        """Ingest a conversation turn into NeuroGraph and debounce checkpoint upload."""
+        from openclaw_hook import NeuroGraphMemory
+        from universal_ingestor import SourceType
         combined = f"USER: {user_msg}\n\nASSISTANT: {assist_msg}"
-        vector = self._get_embedding(combined)
-        
-        self.xet_store.store_vector(
-            id=f"conv_{turn_id}_{int(time.time())}",
-            vector=vector,
-            metadata={
-                "type": "conversation",
-                "user": user_msg[:500],
-                "assistant": assist_msg[:500],
-                "content": combined,
-                "timestamp": time.time()
-            }
-        )
-        
-        # Debounced backup - not every turn
-        self._saves_since_xet_backup += 1
-        if self._saves_since_xet_backup >= self.XET_BACKUP_EVERY_N:
-            self._backup_xet_to_dataset()
-            self._saves_since_xet_backup = 0
+        self.ng.on_message(combined, source_type=SourceType.TEXT)
+        # Also run a few extra STDP learning steps after each turn
+        self.ng.step(5)
 
-    def search_conversations(self, query: str, n: int=5) -> List[Dict]:
-        if not self.xet_store: return []
-        query_vector = self._get_embedding(query)
-        results = self.xet_store.similarity_search(query_vector, n)
-        
-        # Format strictly for app.py
+        self._saves_since_ng_backup += 1
+        if self._saves_since_ng_backup >= self.NG_BACKUP_EVERY_N:
+            self._backup_ng_checkpoint_to_dataset()
+            self._saves_since_ng_backup = 0
+
+    def search_conversations(self, query: str, n: int = 5) -> List[Dict]:
+        """Semantic recall from NeuroGraph memory."""
+        results = self.ng.recall(query, k=n, threshold=0.3)
         return [{
-            "content": r.get("metadata", {}).get("content", ""),
+            "content": r.get("content", ""),
             "similarity": r.get("similarity", 0),
-            "id": r.get("id", "")
+            "id": r.get("node_id", "")
         } for r in results]
 
-    def search_code(self, query: str, n: int=5) -> List[Dict]:
-        results = []
-        try:
-            for f in self.repo_path.rglob("*.py"):
-                if "venv" in str(f): continue
-                txt = f.read_text(errors='ignore')
-                if query in txt:
-                    results.append({"file": f.name, "snippet": txt[:300]})
-        except: pass
-        return results[:n]
-        
-    def search_testament(self, query: str, n: int=5) -> List[Dict]:
-        results = []
-        try:
-            for f in self.repo_path.rglob("*.md"):
-                txt = f.read_text(errors='ignore')
-                if query.lower() in txt.lower():
-                    results.append({"file": f.name, "snippet": txt[:300]})
-        except: pass
-        return results[:n]
+    def search_code(self, query: str, n: int = 5) -> List[Dict]:
+        """Semantic code search via NeuroGraph recall."""
+        results = self.ng.recall(query, k=n, threshold=0.3)
+        return [{
+            "file": r.get("metadata", {}).get("source", "memory"),
+            "snippet": r.get("content", "")[:500]
+        } for r in results]
+
+    def search_testament(self, query: str, n: int = 5) -> List[Dict]:
+        """Search docs/markdown via NeuroGraph recall."""
+        results = self.ng.recall(query, k=n, threshold=0.3)
+        return [{
+            "file": r.get("metadata", {}).get("source", "memory"),
+            "snippet": r.get("content", "")[:500]
+        } for r in results]
+
+    def ingest_workspace(self) -> str:
+        """Index the workspace codebase into NeuroGraph on demand."""
+        results = self.ng.ingest_directory(str(self.repo_path), extensions=[".py", ".md", ".txt"])
+        return f"✅ Indexed {len(results)} files into NeuroGraph."
 
     # =========================================================================
     # 🛠️ STANDARD TOOLS
@@ -350,10 +251,16 @@ class RecursiveContextManager:
             return f"Error: {e}"
         
     def get_stats(self) -> Dict:
-        conv_count = 0
-        if self.xet_store:
-            try:
-                # Count files in the vectors/shard/hash structure
-                conv_count = len(list(self.xet_store.vectors_path.glob("*/*/*")))
-            except: pass
-        return {"total_files": len(list(self.repo_path.rglob("*"))), "conversations": conv_count}
+        ng_stats = {}
+        try:
+            ng_stats = self.ng.stats()
+        except Exception:
+            pass
+        return {
+            "total_files": len(list(self.repo_path.rglob("*"))),
+            "conversations": ng_stats.get("message_count", 0),
+            "ng_nodes": ng_stats.get("nodes", 0),
+            "ng_synapses": ng_stats.get("synapses", 0),
+            "ng_firing_rate": ng_stats.get("firing_rate", 0.0),
+            "ng_prediction_accuracy": ng_stats.get("prediction_accuracy", 0.0),
+        }

@@ -1,21 +1,28 @@
 # Python Dependencies for Clawdbot Dev Assistant
 #
-# CHANGELOG [2025-01-28 - Josh]
-# Core dependencies for recursive context + HF inference
+# CHANGELOG [2026-02-14 - Integration]
+# Swapped custom xet vector store for NeuroGraph cognitive memory layer.
+# Removed unused chromadb. Added NeuroGraph dependencies.
 
 # Gradio for web interface (5.0+ required for type="messages" format)
 gradio>=5.0.0
 pytz>=2023.3
 
-# HuggingFace for model inference
+# HuggingFace for model inference and dataset persistence
 huggingface-hub>=0.20.0
 
-# ChromaDB for vector search (recursive context)
-chromadb>=0.4.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
+# NeuroGraph cognitive memory layer
+sentence-transformers>=2.2.0
+msgpack>=1.0.0
+scipy>=1.10.0
+
+# Document ingestion (universal_ingestor)
+beautifulsoup4>=4.12.0
+PyPDF2>=3.0.0
 
 # Additional utilities
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
 requests>=2.31.0
 gitpython>=3.1.0
 

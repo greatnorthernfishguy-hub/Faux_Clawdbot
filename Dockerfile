@@ -31,7 +31,7 @@
 FROM python:3.11-slim
 
 # CACHE BUSTER: Update this date to invalidate Docker cache for everything below
-ENV REBUILD_DATE=2025-01-31-v3
+ENV REBUILD_DATE=2026-02-14-neurograph-v1
 
 WORKDIR /app
 
@@ -56,10 +56,9 @@ RUN pip uninstall -y gradio gradio-client 2>/dev/null; \
 # /data/chroma_db - ChromaDB primary (persistent if storage enabled)
 # /tmp/.cache/* - embedding model downloads and HF cache
 RUN mkdir -p /workspace/e-t-systems \
-             /workspace/chroma_db \
-             /data/chroma_db \
              /tmp/.cache/huggingface \
-             /tmp/.cache/chroma
+             /tmp/.cache/torch \
+             /tmp/.neurograph/checkpoints
 
 # =============================================================================
 # ENVIRONMENT VARIABLES
@@ -80,7 +79,8 @@ RUN mkdir -p /workspace/e-t-systems \
 # =============================================================================
 ENV HF_HOME=/tmp/.cache/huggingface
 ENV XDG_CACHE_HOME=/tmp/.cache
-ENV CHROMA_CACHE_DIR=/tmp/.cache/chroma
+ENV TORCH_HOME=/tmp/.cache/torch
+ENV NEUROGRAPH_WORKSPACE_DIR=/tmp/.neurograph
 ENV HOME=/tmp
 ENV PYTHONUNBUFFERED=1
 ENV REPO_PATH=/workspace/e-t-systems
@@ -89,6 +89,10 @@ ENV REPO_PATH=/workspace/e-t-systems
 COPY recursive_context.py .
 COPY app.py .
 COPY entrypoint.sh .
+COPY neuro_foundation.py .
+COPY universal_ingestor.py .
+COPY openclaw_hook.py .
+COPY neurograph_migrate.py .
 
 # =============================================================================
 # PERMISSIONS FOR HF SPACES (UID 1000)
@@ -102,7 +106,7 @@ COPY entrypoint.sh .
 #   /tmp/.cache - embedding model downloads, HF cache
 # =============================================================================
 RUN chmod +x entrypoint.sh && \
-    chown -R 1000:1000 /app /workspace /tmp/.cache
+    chown -R 1000:1000 /app /workspace /tmp/.cache /tmp/.neurograph
 
 # Expose Gradio port (HF Spaces standard)
 EXPOSE 7860
