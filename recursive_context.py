@@ -33,7 +33,7 @@ class RecursiveContextManager:
         self.NG_BACKUP_EVERY_N = 10
 
         # --- Tool instances ---
-        pe = None  # policy_engine wired by Block B
+        import policy_engine as pe  # Cricket-shaped enforcement
         self._fs = FilesystemTool(self.repo_path, pe)
         self._git = GitTool(self.repo_path, pe)
         self._notebook = NotebookTool(self.repo_path, pe,

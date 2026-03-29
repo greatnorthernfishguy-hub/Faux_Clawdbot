@@ -68,10 +68,10 @@ MAX_ITERATIONS = 15
 
 TOOL_REGISTRY = {
     "read_file": lambda args: ctx.read_file(
-        args.get("path", ""), args.get("start_line"), args.get("end_line")
+        args.get("path") or "", args.get("start_line"), args.get("end_line")
     ),
     "write_file": lambda args: ctx.write_file(
-        args.get("path", ""), args.get("content", "")
+        args.get("path") or "", args.get("content") or ""
     ),
     "list_files": lambda args: ctx.list_files(
         args.get("path", "."), args.get("max_depth", 3)
@@ -86,16 +86,16 @@ TOOL_REGISTRY = {
         ctx.search_testament(args.get("query", ""), args.get("n", 5))
     ),
     "ingest_workspace": lambda args: ctx.ingest_workspace(),
-    "shell_execute": lambda args: ctx.shell_execute(args.get("command", "")),
+    "shell_execute": lambda args: ctx.shell_execute(args.get("command") or ""),
     "push_to_github": lambda args: ctx.push_to_github(
-        args.get("message", "Manual Backup")
+        args.get("message") or "Manual Backup"
     ),
     "pull_from_github": lambda args: ctx.pull_from_github(
-        args.get("branch", "main")
+        args.get("branch") or "main"
     ),
     "create_shadow_branch": lambda args: ctx.create_shadow_branch(),
     "notebook_read": lambda args: ctx.notebook_read(),
-    "notebook_add": lambda args: ctx.notebook_add(args.get("content", "")),
+    "notebook_add": lambda args: ctx.notebook_add(args.get("content") or ""),
     "notebook_delete": lambda args: ctx.notebook_delete(args.get("index", 0)),
     "map_repository_structure": lambda args: ctx.map_repository_structure(),
     "get_stats": lambda args: ctx.get_stats(),
