@@ -1,5 +1,5 @@
 ---
-title: Clawdbot Dev Assistant
+title: Working in a Codemine
 emoji: 🦞
 colorFrom: blue
 colorTo: purple
@@ -14,7 +14,7 @@ An AI coding assistant with **unlimited context** and **multimodal capabilities*
 
 ## Features
 
-### 🐝 Kimi K2.5 Agent Swarm
+### 🐝 Claude-Powered TQB Worker
 - **1 trillion parameters** (32B active via MoE)
 - **Agent swarm**: Spawns up to 100 sub-agents for parallel task execution
 - **4.5x faster** than single-agent processing
@@ -143,7 +143,7 @@ Recursive Context Manager
     ├─ Conversation Search (persistent memory)
     └─ Testament Parser (decisions)
     ↓
-Kimi K2.5 Agent Swarm (HF Inference API)
+Claude-Powered TQB Worker (HF Inference API)
     ├─ Spawns sub-agents for parallel processing
     ├─ Multimodal understanding (vision + text)
     └─ 256K context window
@@ -324,4 +324,4 @@ MIT License - See LICENSE file for details
 ---
 
 Built with 🦞 by Drone 11272 for E-T Systems consciousness research  
-Powered by Kimi K2.5 Agent Swarm + MIT Recursive Context + Translation Layer
+Powered by Claude-Powered TQB Worker + MIT Recursive Context + Translation Layer
