@@ -1,15 +1,19 @@
-# Python Dependencies for Clawdbot Dev Assistant
+# Python Dependencies for TQB Worker (Faux_Clawdbot)
 #
 # CHANGELOG [2026-02-14 - Integration]
 # Swapped custom xet vector store for NeuroGraph cognitive memory layer.
-# Removed unused chromadb. Added NeuroGraph dependencies.
+# [2026-03-29 - Hammer/TQB — Block G Assembly]
+# Added anthropic SDK. Removed HuggingFace InferenceClient dependency (model swap).
 
 # Gradio for web interface (5.0+ required for type="messages" format)
 gradio>=5.0.0
 pytz>=2023.3
 
-# HuggingFace for model inference and dataset persistence
+# HuggingFace for dataset persistence (notebook + checkpoint sync)
 huggingface-hub>=0.20.0
+
+# Anthropic SDK — Claude drives the model
+anthropic>=0.40.0
 
 # NeuroGraph cognitive memory layer
 sentence-transformers>=2.2.0
