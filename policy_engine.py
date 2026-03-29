@@ -233,12 +233,19 @@ _GATED_TOOLS: frozenset[str] = frozenset({
 })
 
 
-def should_gate_for_review(tool_name: str, args: dict) -> bool:  # noqa: ARG001
-    """Return ``True`` if *tool_name* should be held for QB review.
+# QB_DISPATCHED — when True, mesh gating is bypassed because QB's hooks
+# are the enforcement layer. Set via environment variable by QB's cron.
+_QB_DISPATCHED = os.getenv("QB_DISPATCHED", "").lower() in ("1", "true", "yes")
 
-    Bootstrap logic: any tool in ``_GATED_TOOLS`` is gated.
-    Everything else auto-executes.
+
+def should_gate_for_review(tool_name: str, args: dict) -> bool:  # noqa: ARG001
+    """Return ``True`` if *tool_name* should be held for review.
+
+    Under QB authority: auto-execute everything (QB's hooks enforce).
+    Standalone: mutating tools are staged for human review.
     """
+    if _QB_DISPATCHED:
+        return False
     return tool_name in _GATED_TOOLS
 
 
