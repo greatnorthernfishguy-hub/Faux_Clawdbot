@@ -90,14 +90,12 @@ _SHELL_ALLOWLIST: tuple[str, ...] = (
     "npm",
     "node",
     "ls",
-    "cat",
     "grep",
     "find",
     "wc",
     "head",
     "tail",
     "diff",
-    "echo",
 )
 
 # Secret patterns in content (partial matches are enough to deny)
