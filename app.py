@@ -359,8 +359,8 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
     for iteration in range(MAX_ITERATIONS):
         try:
             resp = call_model(client, system_prompt, api_messages, TOOL_DEFINITIONS)
-        except Exception as e:
-            logger.error("API call failed: %s", e, exc_info=True)
+        except (OSError, ConnectionError, ValueError) as e:
+            logger.error("API call failed: %s: %s", type(e).__name__, e, exc_info=True)
             safe_hist.append({"role": "assistant", "content": f"API Error: {e}"})
             return (safe_hist, "", safe_props, _format_gate_choices(safe_props),
                     _stats_label_files(), _stats_label_convos())
@@ -449,8 +449,8 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
                 if block.type == "text":
                     accumulated_text = block.text
                     break
-        except Exception as e:
-            logger.warning("Summary request failed: %s", e)
+        except (OSError, ConnectionError, ValueError) as e:
+            logger.warning("Summary request failed: %s: %s", type(e).__name__, e)
             accumulated_text = "Actions completed."
 
     final = accumulated_text

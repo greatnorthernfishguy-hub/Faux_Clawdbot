@@ -3,11 +3,18 @@
 # What: map_repository_structure, get_stats extracted from RecursiveContextManager
 # Why: PRD Block C — single-responsibility tool classes
 # How: AST-based repo mapping and NG stats; ng instance passed for stats retrieval
+# [2026-03-30] QB — Block D: Error handling hardening
+# What: Specific exception types, logger replaces print()
+# Why: PRD Block D — no broad except Exception, structured logging
+# How: Catch OSError/SyntaxError specifically; use logger.warning for NG stats
 # -------------------
 
 import ast
+import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
+
+logger = logging.getLogger("tools.workspace")
 
 
 class WorkspaceTool:
@@ -38,15 +45,16 @@ class WorkspaceTool:
                 except SyntaxError:
                     continue
             return f"Map Generated: {file_count} files, {len(graph['nodes'])} nodes."
-        except Exception as e:
+        except (OSError, PermissionError) as e:
+            logger.error("[workspace] map_repository_structure failed: %s: %s", type(e).__name__, e, exc_info=True)
             return {"status": "error", "tool": "workspace", "error": str(e), "type": type(e).__name__}
 
     def get_stats(self) -> Dict:
         ng_stats = {}
         try:
             ng_stats = self.ng.stats()
-        except Exception as e:
-            print(f"Warning: NG stats retrieval failed: {e}")
+        except (OSError, ValueError, AttributeError) as e:
+            logger.warning("NG stats retrieval failed: %s: %s", type(e).__name__, e)
         return {
             "total_files": len(list(self.repo_path.rglob("*"))),
             "conversations": ng_stats.get("message_count", 0),

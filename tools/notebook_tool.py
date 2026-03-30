@@ -3,12 +3,19 @@
 # What: notebook_read, notebook_add, notebook_delete + _load_notebook, _save_local extracted
 # Why: PRD Block C — single-responsibility tool classes
 # How: Notebook I/O isolated here; HF sync callback injected from facade for _save_notebook
+# [2026-03-30] QB — Block D: Error handling hardening
+# What: Specific exception types, logger replaces print()
+# Why: PRD Block D — no broad except Exception, structured logging
+# How: Catch json.JSONDecodeError/OSError/IndexError specifically; use logger.warning
 # -------------------
 
 import json
+import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Callable
+
+logger = logging.getLogger("tools.notebook")
 
 
 class NotebookTool:
@@ -29,7 +36,7 @@ class NotebookTool:
         try:
             return json.loads(self.notebook_file.read_text(encoding='utf-8'))
         except (json.JSONDecodeError, OSError) as e:
-            print(f"Warning: notebook load failed: {e}")
+            logger.warning("Notebook load failed: %s", e)
             return []
 
     def _save_local(self, notes: List[Dict]):
@@ -44,7 +51,8 @@ class NotebookTool:
             return "\n".join(
                 [f"[{i}] {n.get('timestamp', '')}: {n.get('content', '')}" for i, n in enumerate(notes)]
             )
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("[notebook] read failed: %s: %s", type(e).__name__, e, exc_info=True)
             return {"status": "error", "tool": "notebook", "error": str(e), "type": type(e).__name__}
 
     def notebook_add(self, content: str) -> str:
@@ -57,7 +65,8 @@ class NotebookTool:
             if self._save_callback:
                 self._save_callback(notes)
             return f"Note added & synced. ({len(notes)} items)"
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("[notebook] add failed: %s: %s", type(e).__name__, e, exc_info=True)
             return {"status": "error", "tool": "notebook", "error": str(e), "type": type(e).__name__}
 
     def notebook_delete(self, index: int) -> str:
@@ -70,5 +79,6 @@ class NotebookTool:
             return f"Deleted note: '{removed.get('content', '')[:20]}...'"
         except IndexError:
             return "Invalid index."
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("[notebook] delete failed: %s: %s", type(e).__name__, e, exc_info=True)
             return {"status": "error", "tool": "notebook", "error": str(e), "type": type(e).__name__}
