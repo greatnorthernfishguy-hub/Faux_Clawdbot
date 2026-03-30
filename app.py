@@ -301,7 +301,10 @@ def _build_api_messages(history: list, system_prompt: str) -> list:
         if budget - tokens < 0 and messages:
             break
         budget -= tokens
-        messages.append(msg)
+        # Sanitize — only pass role and content to Anthropic API
+        # Gradio adds metadata and other fields that Claude rejects
+        clean = {"role": msg["role"], "content": msg["content"]}
+        messages.append(clean)
 
     messages.reverse()
     return messages
@@ -490,15 +493,15 @@ def execute_approved_proposals(ids, proposals, history):
             results.append(f"**{p['tool']}**: {out}")
         else:
             remaining.append(p)
+    new_history = list(history) if history else []
     if results:
-        history.append({"role": "assistant", "content": "**Executed:**\n" + "\n".join(results)})
-    return "Done.", remaining, _format_gate_choices(remaining), history
+        new_history.append({"role": "assistant", "content": "**Executed:**\n" + "\n".join(results)})
+    return "Done.", remaining, _format_gate_choices(remaining), new_history
 
 
 def auto_continue_after_approval(history, proposals):
-    last = history[-1].get("content", "") if history else ""
-    if "**Executed:**" in str(last):
-        return agent_loop("[System: Tools executed. Continue.]", history, proposals, None)
+    # Don't auto-continue — it causes infinite gate loops.
+    # User sends a new message to continue after approval.
     return (history, "", proposals, _format_gate_choices(proposals),
             _stats_label_files(), _stats_label_convos())
 

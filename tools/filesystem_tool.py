@@ -85,7 +85,8 @@ class FilesystemTool:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding='utf-8')
-            return f"Written to {path}"
+            size = target.stat().st_size
+            return f"Written to {target} ({size:,} bytes)"
         except PermissionError as e:
             return {"status": "error", "tool": "filesystem", "error": str(e), "type": "PermissionError"}
         except OSError as e:
