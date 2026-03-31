@@ -67,6 +67,7 @@ COPY model_client.py .
 COPY system_prompt.py .
 COPY tool_definitions.py .
 COPY worker_ng.py .
+COPY ng_embed.py .
 
 # Copy tools directory
 COPY tools/ ./tools/

@@ -12,11 +12,15 @@ pytz>=2023.3
 # HuggingFace for dataset persistence (notebook + checkpoint sync)
 huggingface-hub>=0.20.0
 
-# Anthropic SDK — Claude drives the model
+# Model providers — Claude (Anthropic) and OpenRouter (OpenAI-compatible)
+# CODEMINE_PROVIDER env var selects: "anthropic" or "openrouter"
 anthropic>=0.40.0
+openai>=1.30.0
 
-# NeuroGraph cognitive memory layer
-sentence-transformers>=2.2.0
+# NeuroGraph cognitive memory layer + ng_embed (Snowflake ONNX, dual-pass)
+# [2026-03-30] Replaced sentence-transformers with onnxruntime + tokenizers (ng_embed)
+onnxruntime>=1.17.0
+tokenizers>=0.15.0
 msgpack>=1.0.0
 scipy>=1.10.0
 

@@ -827,140 +827,67 @@ class AdaptiveChunker:
 # ---------------------------------------------------------------------------
 
 class EmbeddingEngine:
-    """Converts chunks into vector representations.
+    """Converts chunks into vector representations using ng_embed (dual-pass capable).
 
-    Uses sentence-transformers/all-mpnet-base-v2 when available.
-    Falls back to a deterministic hash-based embedding for environments
-    without the model installed (testing, lightweight deployments).
+    Uses NGEmbed singleton — Snowflake/snowflake-arctic-embed-m-v1.5 (ONNX, 768-dim).
+    Falls back to deterministic hash-based embedding when ONNX unavailable.
 
-    Caching avoids recomputation of identical text.
+    This replaces the old sentence-transformers/all-mpnet-base-v2 approach.
+    Same interface (embed, embed_text) so the rest of the ingestor is unaffected.
 
-    Args:
-        config: Embedding configuration with keys:
-            - model_name: Model identifier (default "all-mpnet-base-v2")
-            - dimension: Embedding dimension (default 768)
-            - cache_size: Max cache entries (default 10000)
-            - use_model: Force model loading (default True, falls back if unavailable)
+    # ---- Changelog ----
+    # [2026-03-30] Josh + Claude — Replaced sentence-transformers with ng_embed
+    #   What: Swap EmbeddingEngine internals to use NGEmbed (Snowflake ONNX, dual-pass)
+    #   Why:  Dual-pass embedding gives multi-resolution semantic search + outcome tracking.
+    #         Single-pass was operating with one eye closed.
+    #   How:  NGEmbed singleton handles model loading, embedding, hash fallback.
+    #         This class is a thin adapter preserving the embed()/embed_text() interface.
+    # -------------------
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = config or {}
-        self.model_name = self.config.get("model_name", "all-mpnet-base-v2")
-        self.dimension = self.config.get("dimension", 768)
-        self.cache_size = self.config.get("cache_size", 10000)
-        self.use_model = self.config.get("use_model", True)
-        self._model = None
-        self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
-        self._model_available = False
+        # Import here to avoid circular imports at module level
+        from ng_embed import NGEmbed
 
-        if self.use_model:
-            self._try_load_model()
+        # Pass any ng_embed-specific config overrides
+        ng_config = {}
+        if self.config.get("extraction_endpoint"):
+            ng_config["tid_endpoint"] = self.config["extraction_endpoint"]
+        if self.config.get("extraction_model"):
+            ng_config["tid_model"] = self.config["extraction_model"]
 
-    def _try_load_model(self) -> None:
-        """Attempt to load the sentence-transformers model."""
-        try:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name)
-            self._model_available = True
-            # Update dimension from loaded model
-            self.dimension = self._model.get_sentence_embedding_dimension()
-        except (ImportError, Exception):
-            self._model_available = False
+        self._engine = NGEmbed.get_instance(ng_config if ng_config else None)
+        self.model_name = self._engine._config["model_id"]
+        self.dimension = self._engine._config["embedding_dim"]
+        self._cache_count = 0
 
     def embed(self, chunks: List[Chunk]) -> List[EmbeddedChunk]:
-        """Embed a list of chunks, using cache where possible.
+        """Embed a list of chunks via NGEmbed.
 
         Returns list of EmbeddedChunk with normalized vectors.
         """
-        results: List[EmbeddedChunk] = []
-        uncached: List[Tuple[int, Chunk]] = []
+        texts = [c.text for c in chunks]
+        vectors = self._engine.embed_batch(texts, normalize=True)
+        self._cache_count += len(texts)
 
-        # Check cache first
-        for i, chunk in enumerate(chunks):
-            cache_key = self._cache_key(chunk.text)
-            if cache_key in self._cache:
-                vec = self._cache[cache_key]
-                # Move to end for LRU
-                self._cache.move_to_end(cache_key)
-                results.append(EmbeddedChunk(
-                    chunk=chunk,
-                    vector=vec,
-                    model_name=self.model_name if self._model_available else "hash_fallback",
-                ))
-            else:
-                results.append(None)  # type: ignore[arg-type]
-                uncached.append((i, chunk))
-
-        if uncached:
-            texts = [c.text for _, c in uncached]
-            vectors = self._encode_batch(texts)
-            for (idx, chunk), vec in zip(uncached, vectors):
-                # Normalize
-                norm = np.linalg.norm(vec)
-                if norm > 0:
-                    vec = vec / norm
-                cache_key = self._cache_key(chunk.text)
-                self._update_cache(cache_key, vec)
-                results[idx] = EmbeddedChunk(
-                    chunk=chunk,
-                    vector=vec,
-                    model_name=self.model_name if self._model_available else "hash_fallback",
-                )
-
-        return results
+        return [
+            EmbeddedChunk(
+                chunk=chunk,
+                vector=vec,
+                model_name=self.model_name,
+            )
+            for chunk, vec in zip(chunks, vectors)
+        ]
 
     def embed_text(self, text: str) -> np.ndarray:
-        """Embed a single text string. Returns normalized vector."""
-        cache_key = self._cache_key(text)
-        if cache_key in self._cache:
-            self._cache.move_to_end(cache_key)
-            return self._cache[cache_key]
-
-        vectors = self._encode_batch([text])
-        vec = vectors[0]
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-        self._update_cache(cache_key, vec)
-        return vec
-
-    def _encode_batch(self, texts: List[str]) -> List[np.ndarray]:
-        """Encode a batch of texts into vectors."""
-        if self._model_available and self._model is not None:
-            embeddings = self._model.encode(texts, normalize_embeddings=True)
-            return [np.array(e) for e in embeddings]
-        else:
-            return [self._hash_embed(t) for t in texts]
-
-    def _hash_embed(self, text: str) -> np.ndarray:
-        """Deterministic hash-based embedding fallback.
-
-        Produces consistent vectors from text content using SHA-256 seeding.
-        Useful for testing without model dependencies.
-        """
-        h = hashlib.sha256(text.encode("utf-8")).digest()
-        seed = int.from_bytes(h[:4], "big")
-        rng = np.random.RandomState(seed)
-        vec = rng.randn(self.dimension).astype(np.float32)
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-        return vec
-
-    def _cache_key(self, text: str) -> str:
-        """Create cache key from text content."""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-    def _update_cache(self, key: str, vec: np.ndarray) -> None:
-        """Add to cache with LRU eviction."""
-        self._cache[key] = vec
-        if len(self._cache) > self.cache_size:
-            self._cache.popitem(last=False)
+        """Embed a single text string. Returns L2-normalized vector."""
+        return self._engine.embed(text, normalize=True)
 
     @property
     def cache_hits(self) -> int:
-        """Number of entries currently in cache."""
-        return len(self._cache)
+        """Approximate cache/embedding count."""
+        return self._cache_count
 
 
 # ---------------------------------------------------------------------------
