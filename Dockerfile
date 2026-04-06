@@ -68,6 +68,8 @@ COPY system_prompt.py .
 COPY tool_definitions.py .
 COPY worker_ng.py .
 COPY ng_embed.py .
+COPY work_block_schema.py .
+COPY spec_executor.py .
 
 # Copy tools directory
 COPY tools/ ./tools/

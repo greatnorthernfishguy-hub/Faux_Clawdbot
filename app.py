@@ -26,6 +26,7 @@ from model_client import get_client, call_model
 from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context
+from spec_executor import SpecExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -535,6 +536,45 @@ def _stats_label_convos():
 
 
 # ---------------------------------------------------------------------------
+# Spec Executor — structured work block execution
+# ---------------------------------------------------------------------------
+
+_spec_executor = SpecExecutor(
+    tool_registry=TOOL_REGISTRY,
+    policy_check_fn=check_tool_call,
+    worker_ng=worker_ng,
+    workspace=REPO_PATH,
+)
+
+
+def execute_spec(spec_json: str) -> str:
+    """Execute a structured work block spec. Returns JSON execution report."""
+    try:
+        spec = json.loads(spec_json)
+    except json.JSONDecodeError as e:
+        return json.dumps({"status": "rejected", "errors": [f"Invalid JSON: {e}"]}, indent=2)
+
+    report = _spec_executor.execute_block(spec)
+
+    # Log report to audit trail
+    try:
+        audit_dir = REPO_PATH / "data" / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        with open(audit_dir / "blocks.jsonl", "a") as f:
+            f.write(json.dumps(report, default=str) + "\n")
+    except OSError as e:
+        logger.warning("Failed to write block audit: %s", e)
+
+    # Save NG checkpoint after spec execution
+    try:
+        worker_ng.save()
+    except (OSError, ValueError) as e:
+        logger.warning("NG checkpoint after spec execution failed: %s", e)
+
+    return json.dumps(report, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 
@@ -560,6 +600,14 @@ with gr.Blocks(title="TQB Worker") as demo:
                 btn_exec = gr.Button("Execute", variant="primary")
                 btn_clear = gr.Button("Clear")
             res_md = gr.Markdown()
+        with gr.Tab("Spec"):
+            gr.Markdown("### Work Block Spec Executor\nPaste a JSON spec and execute it mechanically.")
+            spec_input = gr.Textbox(
+                label="JSON Spec", lines=15,
+                placeholder='{"spec_version": "1.0.0", "block": {...}, ...}'
+            )
+            btn_spec = gr.Button("Execute Spec", variant="primary")
+            spec_output = gr.Textbox(label="Execution Report", lines=20, interactive=False)
 
     inputs = [txt, chat, state_proposals, file_in]
     outputs = [chat, txt, state_proposals, gate, stat_f, stat_c]
@@ -585,6 +633,7 @@ with gr.Blocks(title="TQB Worker") as demo:
         state_proposals,
         [res_md, state_proposals, gate]
     )
+    btn_spec.click(execute_spec, [spec_input], [spec_output])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
