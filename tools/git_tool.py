@@ -42,7 +42,15 @@ class GitTool:
             subprocess.run(["git", "config", "user.name", "Clawdbot"], check=False, cwd=cwd)
             subprocess.run(["git", "add", "."], check=True, cwd=cwd)
             subprocess.run(["git", "commit", "-m", message], check=True, cwd=cwd)
-            return "Changes committed (Push requires configured remote with token)."
+            # Push if remote is configured
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                capture_output=True, text=True, cwd=cwd
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                subprocess.run(["git", "push"], check=True, cwd=cwd, capture_output=True, text=True)
+                return f"Committed and pushed: {message}"
+            return "Committed locally (no remote configured for push)."
         except subprocess.CalledProcessError as e:
             logger.error("Git push failed: %s", e)
             return {"status": "error", "tool": "git", "error": f"Git error: {e}", "type": "CalledProcessError"}

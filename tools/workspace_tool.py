@@ -11,10 +11,15 @@
 
 import ast
 import logging
+import time
 from pathlib import Path
 from typing import Dict
 
 logger = logging.getLogger("tools.workspace")
+
+# Stats cache — avoid repeated full disk scans
+_stats_cache = {"data": None, "expires": 0}
+_STATS_TTL = 30  # seconds
 
 
 class WorkspaceTool:
@@ -50,16 +55,30 @@ class WorkspaceTool:
             return {"status": "error", "tool": "workspace", "error": str(e), "type": type(e).__name__}
 
     def get_stats(self) -> Dict:
+        now = time.time()
+        if _stats_cache["data"] and now < _stats_cache["expires"]:
+            return _stats_cache["data"]
+
         ng_stats = {}
         try:
             ng_stats = self.ng.stats()
         except (OSError, ValueError, AttributeError) as e:
             logger.warning("NG stats retrieval failed: %s: %s", type(e).__name__, e)
-        return {
-            "total_files": len(list(self.repo_path.rglob("*"))),
+
+        # Count files excluding venv, __pycache__, .git, data/neurograph_worker checkpoints
+        file_count = 0
+        for p in self.repo_path.rglob("*"):
+            if p.is_file() and not any(skip in p.parts for skip in ("venv", "__pycache__", ".git")):
+                file_count += 1
+
+        stats = {
+            "total_files": file_count,
             "conversations": ng_stats.get("message_count", 0),
             "ng_nodes": ng_stats.get("nodes", 0),
             "ng_synapses": ng_stats.get("synapses", 0),
             "ng_firing_rate": ng_stats.get("firing_rate", 0.0),
             "ng_prediction_accuracy": ng_stats.get("prediction_accuracy", 0.0),
         }
+        _stats_cache["data"] = stats
+        _stats_cache["expires"] = now + _STATS_TTL
+        return stats

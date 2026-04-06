@@ -17,7 +17,7 @@
 FROM python:3.11-slim
 
 # CACHE BUSTER: Update this date to invalidate Docker cache
-ENV REBUILD_DATE=2026-03-29-gate-fix
+ENV REBUILD_DATE=2026-04-05-chassis-dialin
 
 WORKDIR /app
 

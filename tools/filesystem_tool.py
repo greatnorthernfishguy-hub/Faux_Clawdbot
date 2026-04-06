@@ -61,7 +61,8 @@ class FilesystemTool:
             content = target.read_text(encoding='utf-8', errors='ignore')
             lines = content.splitlines()
             if start_line is not None and end_line is not None:
-                lines = lines[start_line:end_line]
+                # Tool schema says 1-based — convert to 0-based for Python slicing
+                lines = lines[max(0, start_line - 1):end_line]
             return "\n".join(lines)
         except FileNotFoundError:
             return {"status": "error", "tool": "filesystem", "error": f"File not found: {path}", "type": "FileNotFoundError"}
@@ -113,7 +114,11 @@ class FilesystemTool:
                 if len(rel.parts) > max_depth:
                     continue
                 files.append(str(p.relative_to(self.repo_path)))
-            return "\n".join(files[:50])
+            total = len(files)
+            listing = "\n".join(files[:50])
+            if total > 50:
+                listing += f"\n\n(showing 50 of {total} files)"
+            return listing
         except PermissionError as e:
             return {"status": "error", "tool": "filesystem", "error": str(e), "type": "PermissionError"}
         except OSError as e:

@@ -9,7 +9,7 @@
 # -------------------
 
 import logging
-import shlex
+import os
 import subprocess
 from pathlib import Path
 
@@ -17,6 +17,9 @@ logger = logging.getLogger("tools.shell")
 
 # Maximum output size returned from shell commands (chars)
 MAX_OUTPUT_SIZE = 50_000
+
+# Shell timeout — configurable via env
+SHELL_TIMEOUT = int(os.getenv("CODEMINE_SHELL_TIMEOUT", "60"))
 
 
 class ShellTool:
@@ -36,19 +39,15 @@ class ShellTool:
                 return {"status": "error", "tool": "shell", "error": reason, "type": "PermissionError"}
 
         try:
-            # Split command for shell=False execution
-            cmd_parts = shlex.split(command)
-        except ValueError as e:
-            return {"status": "error", "tool": "shell", "error": f"Invalid command syntax: {e}", "type": "ValueError"}
-
-        try:
+            # shell=True — pipes and redirects work. Safety is enforced by
+            # PolicyEngine's command allowlist, not by shell=False.
             result = subprocess.run(
-                cmd_parts,
-                shell=False,
+                command,
+                shell=True,
                 cwd=str(self.repo_path),
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=SHELL_TIMEOUT,
             )
             stdout = result.stdout
             stderr = result.stderr
@@ -62,7 +61,7 @@ class ShellTool:
             return f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         except subprocess.TimeoutExpired:
             logger.warning("shell_execute timeout: %s", command[:100])
-            return {"status": "error", "tool": "shell", "error": "Command timed out (10s limit)", "type": "TimeoutError"}
+            return {"status": "error", "tool": "shell", "error": f"Command timed out ({SHELL_TIMEOUT}s limit)", "type": "TimeoutError"}
         except FileNotFoundError as e:
             return {"status": "error", "tool": "shell", "error": f"Command not found: {e}", "type": "FileNotFoundError"}
         except OSError as e:

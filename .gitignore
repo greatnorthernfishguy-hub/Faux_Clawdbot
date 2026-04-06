@@ -1,3 +1,7 @@
+# Worker data (NeuroGraph brain, checkpoints)
+data/
+.neurograph/
+
 # Python
 __pycache__/
 *.py[cod]

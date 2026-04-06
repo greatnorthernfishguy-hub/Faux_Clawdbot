@@ -18,15 +18,22 @@ logger = logging.getLogger("recursive_context")
 
 
 class RecursiveContextManager:
-    def __init__(self, repo_path: str):
+    def __init__(self, repo_path: str, ng=None):
         self.repo_path = Path(repo_path)
         self.memory_path = self.repo_path / "memory"
         self.notebook_file = self.memory_path / "notebook.json"
         self.token = os.getenv("HF_TOKEN")
         self.dataset_id = os.getenv("DATASET_ID", "Executor-Tyrant-Framework/clawdbot-memory")
 
-        neurograph_workspace = os.getenv("NEUROGRAPH_WORKSPACE_DIR", str(self.repo_path / ".neurograph"))
-        self.ng = NeuroGraphMemory.get_instance(workspace_dir=neurograph_workspace)
+        # Use the passed-in NG instance (owned by worker_ng) or fall back to creating one
+        if ng is not None:
+            self.ng = ng
+        else:
+            neurograph_workspace = os.getenv(
+                "NEUROGRAPH_WORKSPACE_DIR",
+                str(self.repo_path / "data" / "neurograph_worker")
+            )
+            self.ng = NeuroGraphMemory.get_instance(workspace_dir=neurograph_workspace)
         logger.info("NeuroGraph Memory Loaded.")
 
         self._saves_since_ng_backup = 0

@@ -96,6 +96,75 @@ def _call_anthropic(client, system_prompt, messages, tools, max_retries, max_tok
     raise last_error
 
 
+def _convert_messages_to_openai(messages: list) -> list:
+    """Convert Anthropic-style messages to OpenAI chat format.
+
+    Anthropic uses content block arrays for tool_use (assistant) and
+    tool_result (user) messages. OpenAI uses tool_calls on the assistant
+    message and separate role="tool" messages for results.
+    """
+    import json as _json
+    converted = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        # Simple string content — pass through
+        if isinstance(content, str):
+            if content:
+                converted.append({"role": role, "content": content})
+            continue
+
+        # List content — Anthropic content blocks
+        if not isinstance(content, list):
+            continue
+
+        if role == "assistant":
+            # Extract text and tool_use blocks
+            text_parts = []
+            tool_calls = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text" and block.get("text"):
+                        text_parts.append(block["text"])
+                    elif block.get("type") == "tool_use":
+                        tool_calls.append({
+                            "id": block["id"],
+                            "type": "function",
+                            "function": {
+                                "name": block["name"],
+                                "arguments": _json.dumps(block.get("input", {})),
+                            },
+                        })
+            assistant_msg = {"role": "assistant"}
+            assistant_msg["content"] = "\n".join(text_parts) if text_parts else None
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+            converted.append(assistant_msg)
+
+        elif role == "user":
+            # Could be tool_result blocks or mixed content
+            tool_results = []
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "tool_result":
+                        tool_results.append({
+                            "role": "tool",
+                            "tool_call_id": block["tool_use_id"],
+                            "content": str(block.get("content", "")),
+                        })
+                    elif block.get("type") == "text" and block.get("text"):
+                        text_parts.append(block["text"])
+                elif isinstance(block, str) and block:
+                    text_parts.append(block)
+            if text_parts:
+                converted.append({"role": "user", "content": "\n".join(text_parts)})
+            converted.extend(tool_results)
+
+    return converted
+
+
 def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_tokens):
     """OpenRouter call via OpenAI-compatible SDK.
 
@@ -111,8 +180,8 @@ def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_to
     # Convert Anthropic tool format to OpenAI format
     openai_tools = _convert_tools_to_openai(tools) if tools else []
 
-    # Prepend system prompt as first message (OpenAI format)
-    full_messages = [{"role": "system", "content": system_prompt}] + messages
+    # Convert Anthropic-style messages to OpenAI format and prepend system prompt
+    full_messages = [{"role": "system", "content": system_prompt}] + _convert_messages_to_openai(messages)
 
     for attempt in range(max_retries):
         try:

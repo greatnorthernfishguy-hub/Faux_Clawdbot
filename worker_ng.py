@@ -67,7 +67,9 @@ WORKER_SNN_CONFIG = {
     "he_experience_threshold": 100,
 }
 
-WORKER_NG_WORKSPACE = os.getenv("NEUROGRAPH_WORKSPACE_DIR", "/data/neurograph_worker")
+# Default to local data/ dir. HF Spaces sets NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
+_DEFAULT_WORKSPACE = str(Path(__file__).resolve().parent / "data" / "neurograph_worker")
+WORKER_NG_WORKSPACE = os.getenv("NEUROGRAPH_WORKSPACE_DIR", _DEFAULT_WORKSPACE)
 
 
 def get_worker_ng() -> NeuroGraphMemory:
@@ -76,15 +78,13 @@ def get_worker_ng() -> NeuroGraphMemory:
     Uses a separate workspace dir from any ecosystem NG.
     Persists to /data/ on HF Spaces (survives container restarts).
     """
-    # Reset singleton to ensure worker gets its own config
-    # (The singleton pattern in NeuroGraphMemory is designed for single-instance use;
-    #  we override it here because the worker IS the only instance in this container)
     instance = NeuroGraphMemory.get_instance(
         workspace_dir=WORKER_NG_WORKSPACE,
         config=WORKER_SNN_CONFIG,
     )
-    # Override auto-save interval — more frequent for build sessions
-    instance.auto_save_interval = 5  # every 5 tool calls, not every 10
+    # Save after every 100 messages — dual-pass sends dozens of on_message calls
+    # per tool result (1 forest + N concept trees), so 5 was causing constant disk I/O
+    instance.auto_save_interval = 100
     return instance
 
 
@@ -92,16 +92,18 @@ def get_worker_ng() -> NeuroGraphMemory:
 # Concept extraction config — OpenRouter for dual-pass Pass 2
 # ---------------------------------------------------------------------------
 
-_EXTRACTION_CONFIG = {
-    "endpoint": os.getenv("EXTRACTION_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions"),
-    "api_key": os.getenv("OPENROUTER_API_KEY", ""),
-    "model": os.getenv("EXTRACTION_MODEL", "google/gemini-2.0-flash-001"),
-    "max_content": 8000,
-    "max_concepts": 100,
-    "timeout": 30,
-    "temperature": 0.2,
-    "max_tokens": 2000,
-}
+def _get_extraction_config():
+    """Lazy config — reads env vars at call time, after dotenv has loaded."""
+    return {
+        "endpoint": os.getenv("EXTRACTION_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions"),
+        "api_key": os.getenv("OPENROUTER_API_KEY", ""),
+        "model": os.getenv("EXTRACTION_MODEL", "google/gemini-2.0-flash-001"),
+        "max_content": 8000,
+        "max_concepts": 100,
+        "timeout": 30,
+        "temperature": 0.2,
+        "max_tokens": 2000,
+    }
 
 _EXTRACTION_PROMPT = """Extract the key concepts, terms, and specific references from this text. Return them as a JSON array of short strings, each one a distinct concept or term mentioned in the text.
 
@@ -123,35 +125,36 @@ def _extract_concepts(text: str) -> List[str]:
 
     Returns list of concept strings, or empty list on failure (non-fatal).
     """
-    api_key = _EXTRACTION_CONFIG["api_key"]
+    cfg = _get_extraction_config()
+    api_key = cfg["api_key"]
     if not api_key:
         logger.debug("No OPENROUTER_API_KEY — skipping concept extraction (single-pass only)")
         return []
 
-    content = text[:_EXTRACTION_CONFIG["max_content"]]
+    content = text[:cfg["max_content"]]
     prompt = _EXTRACTION_PROMPT.format(content=content)
 
     try:
         resp = requests.post(
-            _EXTRACTION_CONFIG["endpoint"],
+            cfg["endpoint"],
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": _EXTRACTION_CONFIG["model"],
+                "model": cfg["model"],
                 "messages": [
                     {"role": "system", "content": "You extract concepts from text. Return only a JSON array of strings."},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": _EXTRACTION_CONFIG["temperature"],
-                "max_tokens": _EXTRACTION_CONFIG["max_tokens"],
+                "temperature": cfg["temperature"],
+                "max_tokens": cfg["max_tokens"],
             },
-            timeout=_EXTRACTION_CONFIG["timeout"],
+            timeout=cfg["timeout"],
         )
         resp.raise_for_status()
         response_text = resp.json()["choices"][0]["message"]["content"].strip()
-        return _parse_concepts(response_text)[:_EXTRACTION_CONFIG["max_concepts"]]
+        return _parse_concepts(response_text)[:cfg["max_concepts"]]
     except Exception as exc:
         logger.debug("Concept extraction failed (non-fatal): %s", exc)
         return []

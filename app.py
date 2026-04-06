@@ -8,6 +8,9 @@
 #        PolicyEngine.check_tool_call() on every tool; TOOL_REGISTRY dict dispatch
 # -------------------
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import gradio as gr
 import json
 import logging
@@ -39,9 +42,9 @@ logger = logging.getLogger("Clawdbot")
 # ---------------------------------------------------------------------------
 
 REPO_PATH = Path(os.path.dirname(os.path.abspath(__file__)))
-ctx = RecursiveContextManager(str(REPO_PATH))
+worker_ng = get_worker_ng()          # NG singleton created first — worker owns it
+ctx = RecursiveContextManager(str(REPO_PATH), ng=worker_ng)  # facade shares the same instance
 client = get_client()
-worker_ng = get_worker_ng()
 
 TEXT_EXTENSIONS = {
     '.py', '.js', '.ts', '.jsx', '.tsx', '.json', '.yaml', '.yml',
@@ -173,6 +176,11 @@ def execute_tool(tool_name: str, args: dict) -> dict:
         else:
             result_str = str(result)
 
+        # Prepend substrate recall if available — agent sees what it learned before
+        if recalls:
+            recall_text = "\n".join(r.get("content", "")[:200] for r in recalls[:3])
+            result_str = f"[Substrate recall for {tool_name}]\n{recall_text}\n\n[Result]\n{result_str}"
+
         # Ingest tool result as raw experience into worker substrate (Law 7)
         ingest_tool_result(worker_ng, tool_name, args, result_str)
 
@@ -297,13 +305,22 @@ def _build_api_messages(history: list, system_prompt: str) -> list:
 
     # Walk backwards from most recent, adding messages until budget exhausted
     for msg in reversed(history):
-        tokens = _estimate_tokens(msg.get("content", ""))
-        if budget - tokens < 0 and messages:
+        content = msg.get("content", "")
+        # Skip empty messages — API rejects them
+        if not content:
+            continue
+        # Content can be a string or a list (tool_result blocks)
+        # For string content, estimate tokens normally
+        # For list content (tool results), stringify for estimation
+        if isinstance(content, list):
+            token_est = sum(_estimate_tokens(str(c)) for c in content)
+        else:
+            token_est = _estimate_tokens(str(content))
+        if budget - token_est < 0 and messages:
             break
-        budget -= tokens
-        # Sanitize — only pass role and content to Anthropic API
-        # Gradio adds metadata and other fields that Claude rejects
-        clean = {"role": msg["role"], "content": msg["content"]}
+        budget -= token_est
+        # Sanitize — only pass role and content
+        clean = {"role": msg["role"], "content": content}
         messages.append(clean)
 
     messages.reverse()
@@ -465,6 +482,9 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
 
     try:
         ctx.save_conversation_turn(full_message, final, len(safe_hist))
+        # Explicit checkpoint at end of turn — auto_save_interval is high to avoid
+        # mid-turn I/O thrashing, so we save once when the turn is complete
+        worker_ng.save()
     except (OSError, ValueError) as e:
         logger.warning("Conversation save failed: %s", e)
 
