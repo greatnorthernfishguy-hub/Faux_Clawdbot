@@ -70,6 +70,7 @@ COPY worker_ng.py .
 COPY ng_embed.py .
 COPY work_block_schema.py .
 COPY spec_executor.py .
+COPY persona_client.py .
 
 # Copy tools directory
 COPY tools/ ./tools/
