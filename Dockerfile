@@ -72,6 +72,7 @@ COPY work_block_schema.py .
 COPY spec_executor.py .
 COPY persona_client.py .
 COPY report_evaluator.py .
+COPY risk_authority.py .
 
 # Copy tools directory
 COPY tools/ ./tools/
