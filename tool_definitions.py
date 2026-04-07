@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-04-06] Josh + Claude — Add edit_file tool definition
+# What: New edit_file tool for targeted find-and-replace edits
+# Why: Gap 3 — write_file does full overwrite, edit_file is safer for cross-repo work
+# How: Takes path, old_text, new_text — replaces exactly one occurrence
 # [2026-03-29] Switchblade (TQB / Block E) — Claude-native tool definitions
 # What: Centralized tool definitions with JSON Schema parameters for Anthropic API
 # Why: PRD Block E — modularize tools so adding a new tool = one list entry
@@ -44,6 +48,28 @@ TOOL_DEFINITIONS = [
                 }
             },
             "required": ["path", "content"]
+        }
+    },
+    {
+        "name": "edit_file",
+        "description": "Targeted find-and-replace edit. Reads the file, verifies old_text exists exactly once, replaces it with new_text. Safer than write_file for modifying existing files.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to the file to edit"
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": "Exact text to find (must occur exactly once in the file)"
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                }
+            },
+            "required": ["path", "old_text", "new_text"]
         }
     },
     {

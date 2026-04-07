@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-04-06] Josh + Claude — Add edit_file to TOOL_REGISTRY
+# What: Wire edit_file tool through ctx facade and add to registry
+# Why: Gap 3 — targeted find-and-replace is safer than full overwrite for cross-repo work
+# How: New TOOL_REGISTRY entry delegates to ctx.edit_file()
 # [2026-02-04] Josh — PLATINUM COPY: Original Clawdbot Unified Command Center
 # [2026-03-29] Hammer (TQB) — Block G: Agent Loop Hardening + Assembly
 # What: Complete rewrite — Claude native tool_use, PolicyEngine gates, tool registry,
@@ -76,6 +80,9 @@ TOOL_REGISTRY = {
     ),
     "write_file": lambda args: ctx.write_file(
         args.get("path") or "", args.get("content") or ""
+    ),
+    "edit_file": lambda args: ctx.edit_file(
+        args.get("path") or "", args.get("old_text") or "", args.get("new_text") or ""
     ),
     "list_files": lambda args: ctx.list_files(
         args.get("path", "."), args.get("max_depth", 3)

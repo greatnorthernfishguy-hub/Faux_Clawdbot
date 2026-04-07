@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-04-06] Josh + Claude — Add edit_file facade method
+# What: Delegate edit_file to FilesystemTool
+# Why: New edit_file tool needs facade wiring like read_file/write_file
+# How: One-line delegation to self._fs.edit_file()
 # [2026-03-29] Chisel/TQB — Block C: Rewrite as thin facade
 # What: RecursiveContextManager is now a facade delegating to tools/ classes
 # Why: PRD Block C — split 267-line god-class into focused single-responsibility tools
@@ -115,6 +119,9 @@ class RecursiveContextManager:
 
     def write_file(self, path, content):
         return self._fs.write_file(path, content)
+
+    def edit_file(self, path, old_text, new_text):
+        return self._fs.edit_file(path, old_text, new_text)
 
     def list_files(self, path=".", max_depth=3):
         return self._fs.list_files(path, max_depth)

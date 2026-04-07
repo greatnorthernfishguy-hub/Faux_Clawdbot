@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-04-06] Josh + Claude — Add edit_file method (find-and-replace)
+# What: New edit_file method on FilesystemTool for targeted file edits
+# Why: Gap 3 — write_file does full overwrite which risks corruption on cross-repo work
+# How: Read file, verify old_text exists exactly once, replace with new_text, write back
 # [2026-03-29] Chisel/TQB — Block C: FilesystemTool
 # What: read_file, write_file, list_files extracted from RecursiveContextManager
 # Why: PRD Block C — single-responsibility tool classes
@@ -88,6 +92,46 @@ class FilesystemTool:
             target.write_text(content, encoding='utf-8')
             size = target.stat().st_size
             return f"Written to {target} ({size:,} bytes)"
+        except PermissionError as e:
+            return {"status": "error", "tool": "filesystem", "error": str(e), "type": "PermissionError"}
+        except OSError as e:
+            return {"status": "error", "tool": "filesystem", "error": str(e), "type": type(e).__name__}
+
+    def edit_file(self, path: str, old_text: str, new_text: str) -> str:
+        """Find-and-replace edit: verify old_text exists exactly once, replace with new_text."""
+        target, err = self._check_path(path, "write")
+        if err:
+            return err
+
+        # Content secret scan on the new text via PolicyEngine
+        if self.policy_engine:
+            from policy_engine import can_write_content
+            allowed, reason = can_write_content(path, new_text)
+            if not allowed:
+                return {"status": "error", "tool": "filesystem", "error": reason, "type": "PermissionError"}
+
+        try:
+            if not target.exists():
+                return {"status": "error", "tool": "filesystem", "error": f"File not found: {path}", "type": "FileNotFoundError"}
+
+            # File size guard
+            if target.stat().st_size > MAX_READ_SIZE:
+                msg = f"File too large ({target.stat().st_size:,} bytes). Max: {MAX_READ_SIZE:,} bytes."
+                return {"status": "error", "tool": "filesystem", "error": msg, "type": "ValueError"}
+
+            content = target.read_text(encoding='utf-8', errors='ignore')
+            count = content.count(old_text)
+
+            if count == 0:
+                return {"status": "error", "tool": "filesystem", "error": f"old_text not found in {path}", "type": "ValueError"}
+            if count > 1:
+                return {"status": "error", "tool": "filesystem", "error": f"old_text found {count} times in {path} — must be unique (provide more context)", "type": "ValueError"}
+
+            new_content = content.replace(old_text, new_text, 1)
+            target.write_text(new_content, encoding='utf-8')
+            size = target.stat().st_size
+            return f"Edited {target} — replaced 1 occurrence ({size:,} bytes)"
+
         except PermissionError as e:
             return {"status": "error", "tool": "filesystem", "error": str(e), "type": "PermissionError"}
         except OSError as e:

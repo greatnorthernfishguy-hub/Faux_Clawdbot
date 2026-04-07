@@ -1,4 +1,12 @@
 # ---- Changelog ----
+# [2026-04-06] Josh + Claude — Fix 3 spec executor gaps
+# What: (1) Bypass tool-level path checks when workspace differs from default repo path
+#        (2) Support spec-configurable shell_allowlist in constraints
+#        (3) Wire edit_file tool through direct dispatch like read/write
+# Why: Cross-repo specs fail because FilesystemTool._check_path() enforces repo_path,
+#      shell allowlist was hardcoded with no spec override, edit_file didn't exist
+# How: Direct filesystem ops for read/write/edit when workspace != REPO_PATH,
+#      shell_allowlist check before PolicyEngine for spec-declared commands
 # [2026-04-05] Josh + Claude — Structured spec execution engine
 # What: Deterministic execution of WorkBlockSpec JSON specs
 # Why: No LLM in the loop — mechanical step execution, mandatory validation, zero improvisation
@@ -56,6 +64,7 @@ class SpecExecutor:
         self.policy_check = policy_check_fn
         self.ng = worker_ng
         self.workspace = workspace
+        self._default_workspace = workspace  # Original repo path — used to detect workspace overrides
 
     def execute_block(self, spec: dict) -> dict:
         """Execute a work block spec. Returns a structured execution report."""
@@ -73,6 +82,11 @@ class SpecExecutor:
         block = spec["block"]
         constraints = spec["constraints"]
         ctx = ExecutionContext(block_id=block["id"])
+
+        # Use spec-declared workspace if present, otherwise default
+        if "workspace" in block and block["workspace"]:
+            self.workspace = Path(block["workspace"]).expanduser().resolve()
+            logger.info("Workspace override: %s", self.workspace)
 
         logger.info("Executing block %s: %s", block["id"], block["name"])
 
@@ -135,28 +149,74 @@ class SpecExecutor:
         # Resolve $var references in params
         params = self._resolve_bindings(step["params"], ctx)
 
-        # PolicyEngine rim check
-        allowed, reason = self.policy_check(tool_name, params, self.workspace)
+        # --- Gap 2: Spec-configurable shell allowlist ---
+        # If the spec declares a shell_allowlist in constraints and this is a
+        # shell_execute call, check against the spec's list FIRST. If the command
+        # matches the spec allowlist, skip PolicyEngine's shell check (the executor
+        # already ran the broader policy check above for path/content).
+        _skip_policy_shell = False
+        if tool_name == "shell_execute":
+            spec_shell_allowlist = constraints.get("shell_allowlist")
+            if spec_shell_allowlist:
+                import os as _os
+                cmd = (params.get("command") or "").strip()
+                if cmd:
+                    binary = _os.path.basename(cmd.split()[0])
+                    if any(binary == a or binary.startswith(a) for a in spec_shell_allowlist):
+                        _skip_policy_shell = True
+                        logger.info("  [%s] Shell command '%s' approved by spec allowlist", step_id, binary)
+
+        # PolicyEngine rim check — skip shell portion if spec allowlist approved it
+        if _skip_policy_shell:
+            # Still run path/content checks, just not the shell check.
+            # We call policy_check and ignore shell-denied results.
+            allowed, reason = self.policy_check(tool_name, params, self.workspace)
+            if not allowed and "not on the allowlist" in reason:
+                # This is the shell allowlist denial — spec overrides it
+                allowed, reason = True, "Permitted by spec shell_allowlist."
+        else:
+            allowed, reason = self.policy_check(tool_name, params, self.workspace)
         if not allowed:
             self._record_failure(ctx, step_id, f"PolicyEngine denied: {reason}")
             self._handle_failure(step["on_failure"], step_id, ctx)
             return
 
-        # Execute tool
+        # --- Gap 1: Workspace-aware tool dispatch ---
+        # When the spec declares a workspace that differs from the default repo path,
+        # the TOOL_REGISTRY lambdas route through FilesystemTool._check_path() which
+        # is hardcoded to repo_path. Bypass the registry for filesystem tools and call
+        # operations directly against the spec's workspace. The executor already did
+        # its own PolicyEngine check above, so the tool-level check is redundant.
         ctx.tool_call_count += 1
-        handler = self.tools.get(tool_name)
-        if not handler:
-            self._record_failure(ctx, step_id, f"Unknown tool: {tool_name}")
-            self._handle_failure(step["on_failure"], step_id, ctx)
-            return
+        use_direct_dispatch = (
+            self._default_workspace is not None
+            and self.workspace != self._default_workspace
+            and tool_name in ("read_file", "write_file", "edit_file")
+        )
 
-        try:
-            result = handler(params)
-        except Exception as e:
-            logger.error("  [%s] Tool exception: %s", step_id, e, exc_info=True)
-            self._record_failure(ctx, step_id, f"Tool exception: {type(e).__name__}: {e}")
-            self._handle_failure(step["on_failure"], step_id, ctx)
-            return
+        if use_direct_dispatch:
+            try:
+                result = self._direct_filesystem_op(tool_name, params)
+            except Exception as e:
+                logger.error("  [%s] Direct filesystem exception: %s", step_id, e, exc_info=True)
+                self._record_failure(ctx, step_id, f"Tool exception: {type(e).__name__}: {e}")
+                self._handle_failure(step["on_failure"], step_id, ctx)
+                return
+        else:
+            # Standard registry dispatch
+            handler = self.tools.get(tool_name)
+            if not handler:
+                self._record_failure(ctx, step_id, f"Unknown tool: {tool_name}")
+                self._handle_failure(step["on_failure"], step_id, ctx)
+                return
+
+            try:
+                result = handler(params)
+            except Exception as e:
+                logger.error("  [%s] Tool exception: %s", step_id, e, exc_info=True)
+                self._record_failure(ctx, step_id, f"Tool exception: {type(e).__name__}: {e}")
+                self._handle_failure(step["on_failure"], step_id, ctx)
+                return
 
         # Coerce result to string
         if isinstance(result, dict):
@@ -297,6 +357,60 @@ class SpecExecutor:
 
         if not group_ok and "on_failure" in step:
             self._handle_failure(step["on_failure"], step_id, ctx)
+
+    # ------------------------------------------------------------------
+    # Direct filesystem operations (workspace override bypass)
+    # ------------------------------------------------------------------
+
+    def _direct_filesystem_op(self, tool_name: str, params: dict):
+        """Execute filesystem tools directly against self.workspace.
+
+        Bypasses TOOL_REGISTRY (and therefore FilesystemTool._check_path)
+        when the spec's workspace differs from the default repo path.
+        The executor already ran PolicyEngine checks with the correct workspace.
+        """
+        if tool_name == "read_file":
+            path = params.get("path", "")
+            target = (self.workspace / path).resolve()
+            if not target.is_relative_to(self.workspace.resolve()):
+                return {"status": "error", "error": f"Path escapes workspace: {path}"}
+            start = params.get("start_line")
+            end = params.get("end_line")
+            content = target.read_text(encoding="utf-8", errors="ignore")
+            lines = content.splitlines()
+            if start is not None and end is not None:
+                lines = lines[max(0, start - 1):end]
+            return "\n".join(lines)
+
+        elif tool_name == "write_file":
+            path = params.get("path", "")
+            content = params.get("content", "")
+            target = (self.workspace / path).resolve()
+            if not target.is_relative_to(self.workspace.resolve()):
+                return {"status": "error", "error": f"Path escapes workspace: {path}"}
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            size = target.stat().st_size
+            return f"Written to {target} ({size:,} bytes)"
+
+        elif tool_name == "edit_file":
+            path = params.get("path", "")
+            old_text = params.get("old_text", "")
+            new_text = params.get("new_text", "")
+            target = (self.workspace / path).resolve()
+            if not target.is_relative_to(self.workspace.resolve()):
+                return {"status": "error", "error": f"Path escapes workspace: {path}"}
+            content = target.read_text(encoding="utf-8", errors="ignore")
+            count = content.count(old_text)
+            if count == 0:
+                return {"status": "error", "error": f"old_text not found in {path}"}
+            if count > 1:
+                return {"status": "error", "error": f"old_text found {count} times in {path} — must be unique"}
+            new_content = content.replace(old_text, new_text, 1)
+            target.write_text(new_content, encoding="utf-8")
+            return f"Edited {target} — replaced 1 occurrence ({len(new_content):,} bytes)"
+
+        return {"status": "error", "error": f"No direct dispatch for {tool_name}"}
 
     # ------------------------------------------------------------------
     # Validation

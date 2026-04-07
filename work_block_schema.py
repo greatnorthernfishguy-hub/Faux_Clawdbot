@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-04-06] Josh + Claude — Add edit_file tool + shell_allowlist constraint
+# What: (1) edit_file in _TOOL_NAMES (2) shell_allowlist in constraints schema
+# Why: Gap 2 — specs need to extend shell allowlist; Gap 3 — edit_file is a new tool
+# How: New enum entry in _TOOL_NAMES, new array property in constraints
 # [2026-04-05] Josh + Claude — Structured work block spec schema
 # What: JSON Schema for QB → Codemine worker handoff
 # Why: Structured specs produce +37% better agent execution vs prose (zero improvisation, 97% validation)
@@ -21,7 +25,7 @@ logger = logging.getLogger("work_block_schema")
 
 # Tools available in Codemine's TOOL_REGISTRY
 _TOOL_NAMES = [
-    "read_file", "write_file", "list_files",
+    "read_file", "write_file", "edit_file", "list_files",
     "search_code", "search_conversations", "search_testament",
     "ingest_workspace", "shell_execute",
     "push_to_github", "pull_from_github", "create_shadow_branch",
@@ -206,6 +210,10 @@ WORK_BLOCK_SCHEMA = {
                 "name": {"type": "string", "maxLength": 120},
                 "agent": {"type": "string"},
                 "scope": {"type": "string"},
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace root for PolicyEngine path checks. Defaults to Codemine repo if omitted.",
+                },
                 "acceptance_criteria": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -262,6 +270,11 @@ WORK_BLOCK_SCHEMA = {
                 "never": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 "anti_drift": {"type": "array", "items": {"type": "string"}},
                 "tool_allowlist": {"type": "array", "items": {"enum": _TOOL_NAMES}},
+                "shell_allowlist": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Additional shell command prefixes allowed for this spec, extends PolicyEngine's base allowlist.",
+                },
                 "max_iterations": {"type": "integer", "minimum": 1, "maximum": 100, "default": 15},
                 "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 3600, "default": 300},
             },

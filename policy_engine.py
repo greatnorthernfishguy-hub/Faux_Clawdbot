@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-04-06] Josh + Claude — Add edit_file to policy checks and gating
+# What: edit_file path+content checks in check_tool_call, added to _GATED_TOOLS
+# Why: New edit_file tool needs the same security gates as write_file
+# How: Same path access (write mode) and content secret scan as write_file
 # [2026-03-29] Anvil (TQB) — Initial creation of policy_engine.py
 # What: Cricket-shaped gating layer with Rim (immutable) and Mesh (evolving) components
 # Why: PRD Block B — all tool calls must route through policy checks before execution
@@ -222,6 +226,7 @@ def can_write_content(path: str, content: str) -> tuple[bool, str]:
 
 _GATED_TOOLS: frozenset[str] = frozenset({
     "write_file",
+    "edit_file",
     "shell_execute",
     "push_to_github",
     "pull_from_github",
@@ -271,9 +276,9 @@ def check_tool_call(
     reason = "Permitted."
 
     # --- Path access checks ---
-    if tool_name in ("write_file", "read_file", "notebook_add", "notebook_delete"):
+    if tool_name in ("write_file", "edit_file", "read_file", "notebook_add", "notebook_delete"):
         path = args.get("path", args.get("file_path", ""))
-        mode = "write" if tool_name != "read_file" else "read"
+        mode = "write" if tool_name not in ("read_file",) else "read"
         allowed, reason = can_access_path(path, mode, workspace)
 
     # --- Content checks (write operations) ---
@@ -281,6 +286,11 @@ def check_tool_call(
         content = args.get("content", "")
         path = args.get("path", args.get("file_path", ""))
         allowed, reason = can_write_content(path, content)
+
+    if allowed and tool_name == "edit_file":
+        new_text = args.get("new_text", "")
+        path = args.get("path", args.get("file_path", ""))
+        allowed, reason = can_write_content(path, new_text)
 
     # --- Shell command checks ---
     if allowed and tool_name == "shell_execute":
