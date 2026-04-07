@@ -31,6 +31,7 @@ from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context
 from spec_executor import SpecExecutor
+from orchestrator import Orchestrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -582,6 +583,40 @@ def execute_spec(spec_json: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Orchestrator — full mission loop
+# ---------------------------------------------------------------------------
+
+_orchestrator = Orchestrator(
+    spec_executor=_spec_executor,
+    worker_ng=worker_ng,
+    workspace=REPO_PATH,
+)
+
+
+def run_mission(intent: str, constraints: str, workspace: str) -> str:
+    """Run a full mission from intent to completion. Returns JSON result."""
+    ws = workspace.strip() if workspace.strip() else None
+    cs = constraints.strip() if constraints.strip() else None
+
+    if not intent.strip():
+        return json.dumps({"status": "failed", "error": "No intent provided"}, indent=2)
+
+    result = _orchestrator.orchestrate(
+        intent=intent.strip(),
+        constraints=cs,
+        workspace=ws,
+    )
+
+    # Save NG checkpoint after mission
+    try:
+        worker_ng.save()
+    except (OSError, ValueError) as e:
+        logger.warning("NG checkpoint after mission failed: %s", e)
+
+    return json.dumps(result, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
 # Gradio UI
 # ---------------------------------------------------------------------------
 
@@ -615,6 +650,22 @@ with gr.Blocks(title="TQB Worker") as demo:
             )
             btn_spec = gr.Button("Execute Spec", variant="primary")
             spec_output = gr.Textbox(label="Execution Report", lines=20, interactive=False)
+        with gr.Tab("Mission"):
+            gr.Markdown("### Mission Control\nDescribe what you want done. TQB handles the rest.")
+            mission_intent = gr.Textbox(
+                label="Intent", lines=3,
+                placeholder="What do you want built, fixed, or audited?"
+            )
+            mission_constraints = gr.Textbox(
+                label="Constraints (optional)", lines=3,
+                placeholder="Project rules, standards, things to avoid..."
+            )
+            mission_workspace = gr.Textbox(
+                label="Workspace (optional)", lines=1,
+                placeholder="/home/josh (leave blank for default)"
+            )
+            btn_mission = gr.Button("Go", variant="primary")
+            mission_output = gr.Textbox(label="Mission Result", lines=25, interactive=False)
 
     inputs = [txt, chat, state_proposals, file_in]
     outputs = [chat, txt, state_proposals, gate, stat_f, stat_c]
@@ -641,6 +692,7 @@ with gr.Blocks(title="TQB Worker") as demo:
         [res_md, state_proposals, gate]
     )
     btn_spec.click(execute_spec, [spec_input], [spec_output])
+    btn_mission.click(run_mission, [mission_intent, mission_constraints, mission_workspace], [mission_output])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)
