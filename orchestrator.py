@@ -18,11 +18,16 @@ The system gets smarter with every mission.
 
 import json
 import logging
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("orchestrator")
+
+# Worktree base directory — where mission worktrees get created
+WORKTREE_BASE = Path("/tmp/tqb-worktrees")
 
 
 class Orchestrator:
@@ -50,6 +55,8 @@ class Orchestrator:
         workspace: Optional[str] = None,
         graph_query: Optional[str] = None,
         max_iterations: int = 5,
+        use_worktree: bool = True,
+        cleanup_on_fail: bool = False,
     ) -> dict:
         """Run a full mission from intent to completion.
 
@@ -59,6 +66,8 @@ class Orchestrator:
             workspace: Override workspace for cross-repo work
             graph_query: Custom query for Graph recall (defaults to intent)
             max_iterations: Max spec→execute→evaluate cycles before mandatory escalation
+            use_worktree: If True and workspace is a git repo, create an isolated worktree
+            cleanup_on_fail: If True, remove worktree on failure. If False, leave for inspection.
 
         Returns:
             {
@@ -68,6 +77,7 @@ class Orchestrator:
                 final_evaluation: dict | None,
                 history: [{spec, report, evaluation}, ...],
                 escalation: {to, reason} | None,
+                worktree: {path, branch, source_branch, merged} | None,
                 elapsed_seconds: float,
             }
         """
@@ -79,6 +89,14 @@ class Orchestrator:
         start_time = time.time()
         history = []
         ws = workspace or str(self.workspace)
+        worktree_info = None
+
+        # Create isolated worktree if the target is a git repo
+        if use_worktree:
+            worktree_info = self._create_worktree(ws, intent)
+            if worktree_info:
+                ws = worktree_info["path"]
+                logger.info("Working in worktree: %s (branch: %s)", ws, worktree_info["branch"])
 
         # Query Graph for relevant context
         graph_context = self._recall(graph_query or intent)
@@ -108,10 +126,13 @@ class Orchestrator:
 
             if not gen_result["success"]:
                 logger.error("Spec generation failed: %s", gen_result.get("errors"))
+                if worktree_info and cleanup_on_fail:
+                    self._cleanup_worktree(worktree_info)
+                    worktree_info["cleaned_up"] = True
                 return self._build_result(
                     "failed", iteration + 1, None, None, history,
                     {"to": "josh", "reason": f"Spec generation failed: {gen_result.get('errors')}"},
-                    start_time,
+                    start_time, worktree_info,
                 )
 
             spec = gen_result["spec"]
@@ -157,18 +178,26 @@ class Orchestrator:
             # Step 5: Act on decision
             if decision == "done":
                 logger.info("=== MISSION COMPLETE === (%d iterations)", iteration + 1)
+                # Merge worktree back to source branch on success
+                if worktree_info:
+                    merged = self._merge_worktree(worktree_info)
+                    worktree_info["merged"] = merged
                 return self._build_result(
-                    "complete", iteration + 1, report, evaluation, history, None, start_time,
+                    "complete", iteration + 1, report, evaluation, history, None,
+                    start_time, worktree_info,
                 )
 
             elif decision == "escalate":
                 escalate_to = evaluation.get("escalate_to", "josh")
                 reason = evaluation.get("escalate_reason", "Reviewer escalation")
                 logger.warning("=== ESCALATED to %s: %s ===", escalate_to, reason)
+                if worktree_info and cleanup_on_fail:
+                    self._cleanup_worktree(worktree_info)
+                    worktree_info["cleaned_up"] = True
                 return self._build_result(
                     "escalated", iteration + 1, report, evaluation, history,
                     {"to": escalate_to, "reason": reason},
-                    start_time,
+                    start_time, worktree_info,
                 )
 
             elif decision == "iterate":
@@ -194,14 +223,170 @@ class Orchestrator:
 
         # Max iterations hit
         logger.warning("=== MAX ITERATIONS (%d) — escalating to josh ===", max_iterations)
+        if worktree_info and cleanup_on_fail:
+            self._cleanup_worktree(worktree_info)
+            worktree_info["cleaned_up"] = True
         return self._build_result(
             "escalated", max_iterations,
             history[-1]["report"] if history else None,
             history[-1]["evaluation"] if history else None,
             history,
             {"to": "josh", "reason": f"Max iterations ({max_iterations}) reached without completion"},
-            start_time,
+            start_time, worktree_info,
         )
+
+    # ------------------------------------------------------------------
+    # Git worktree lifecycle
+    # ------------------------------------------------------------------
+
+    def _is_git_repo(self, path: str) -> bool:
+        """Check if a path is inside a git repository."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=path, capture_output=True, text=True, timeout=5,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    def _get_current_branch(self, repo_path: str) -> str:
+        """Get the current branch name of a repo."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=repo_path, capture_output=True, text=True, timeout=5,
+            )
+            return result.stdout.strip() or "main"
+        except (subprocess.TimeoutExpired, OSError):
+            return "main"
+
+    def _create_worktree(self, repo_path: str, intent: str) -> Optional[dict]:
+        """Create an isolated git worktree for this mission.
+
+        Returns worktree info dict or None if not a git repo.
+        """
+        if not self._is_git_repo(repo_path):
+            logger.info("Workspace %s is not a git repo — skipping worktree", repo_path)
+            return None
+
+        source_branch = self._get_current_branch(repo_path)
+
+        # Generate a unique branch name from intent
+        slug = intent[:40].lower()
+        slug = "".join(c if c.isalnum() or c == "-" else "-" for c in slug)
+        slug = slug.strip("-")[:30]
+        timestamp = int(time.time())
+        branch = f"tqb/{slug}-{timestamp}"
+
+        worktree_path = WORKTREE_BASE / f"{slug}-{timestamp}"
+        WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Create the worktree with a new branch from current HEAD
+            subprocess.run(
+                ["git", "worktree", "add", "-b", branch, str(worktree_path)],
+                cwd=repo_path, capture_output=True, text=True,
+                check=True, timeout=30,
+            )
+            logger.info("Created worktree: %s (branch: %s)", worktree_path, branch)
+            return {
+                "path": str(worktree_path),
+                "branch": branch,
+                "source_branch": source_branch,
+                "repo_path": repo_path,
+                "merged": False,
+                "cleaned_up": False,
+            }
+        except subprocess.CalledProcessError as e:
+            logger.error("Failed to create worktree: %s", e.stderr)
+            return None
+        except subprocess.TimeoutExpired:
+            logger.error("Worktree creation timed out")
+            return None
+
+    def _merge_worktree(self, info: dict) -> bool:
+        """Merge the worktree's branch back to the source branch.
+
+        Returns True if merge succeeded.
+        """
+        repo_path = info["repo_path"]
+        branch = info["branch"]
+        source = info["source_branch"]
+        worktree_path = info["path"]
+
+        try:
+            # Check if there are any changes to merge
+            result = subprocess.run(
+                ["git", "diff", "--stat", f"{source}...{branch}"],
+                cwd=repo_path, capture_output=True, text=True, timeout=10,
+            )
+            if not result.stdout.strip():
+                logger.info("No changes to merge from %s", branch)
+                self._cleanup_worktree(info)
+                return True
+
+            # Commit any uncommitted work in the worktree first
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=worktree_path, capture_output=True, text=True, timeout=10,
+            )
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", f"TQB mission: {branch}"],
+                cwd=worktree_path, capture_output=True, text=True, timeout=10,
+            )
+            if commit_result.returncode == 0:
+                logger.info("Committed pending changes in worktree")
+
+            # Merge into source branch
+            merge_result = subprocess.run(
+                ["git", "merge", "--no-ff", branch, "-m", f"Merge TQB mission: {branch}"],
+                cwd=repo_path, capture_output=True, text=True, timeout=30,
+            )
+
+            if merge_result.returncode == 0:
+                logger.info("Merged %s into %s", branch, source)
+                self._cleanup_worktree(info)
+                return True
+            else:
+                logger.error("Merge failed: %s", merge_result.stderr)
+                # Leave worktree for manual resolution
+                return False
+
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+            logger.error("Merge error: %s", e)
+            return False
+
+    def _cleanup_worktree(self, info: dict):
+        """Remove a worktree and optionally delete its branch."""
+        worktree_path = info["path"]
+        branch = info["branch"]
+        repo_path = info["repo_path"]
+
+        try:
+            # Remove the worktree
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", worktree_path],
+                cwd=repo_path, capture_output=True, text=True, timeout=15,
+            )
+            logger.info("Removed worktree: %s", worktree_path)
+
+            # Delete the branch if it was merged
+            if info.get("merged"):
+                subprocess.run(
+                    ["git", "branch", "-d", branch],
+                    cwd=repo_path, capture_output=True, text=True, timeout=5,
+                )
+                logger.info("Deleted branch: %s", branch)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("Worktree cleanup error: %s", e)
+            # Fallback: try to remove the directory
+            try:
+                if Path(worktree_path).exists():
+                    shutil.rmtree(worktree_path)
+                    logger.info("Removed worktree directory via shutil: %s", worktree_path)
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------
     # Graph integration
@@ -250,7 +435,7 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _build_result(self, status, iterations, final_report, final_evaluation,
-                      history, escalation, start_time):
+                      history, escalation, start_time, worktree_info=None):
         elapsed = round(time.time() - start_time, 2)
 
         result = {
@@ -271,6 +456,7 @@ class Orchestrator:
                 for h in history
             ],
             "escalation": escalation,
+            "worktree": worktree_info,
             "elapsed_seconds": elapsed,
         }
 
