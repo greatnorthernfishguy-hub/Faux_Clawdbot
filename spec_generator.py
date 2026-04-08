@@ -73,9 +73,12 @@ Five step types:
 ### CRITICAL RULES
 1. EVERY action step MUST have a validation block with at least one check
 2. EVERY action step MUST have an on_failure handler
-3. Start specs by reading the source of truth (vault docs, canonical files) before acting
-4. Verify before asserting — add read/grep steps before write steps
-5. Use shell_execute for reads outside the default workspace (grep, head, tail, etc.)
+3. NEVER guess file paths — start with shell_execute "find" or "ls" to discover repo structure
+4. Start specs by reading the source of truth (vault docs, canonical files) before acting
+5. Verify before asserting — add read/grep steps before write steps
+6. Use shell_execute for reads outside the default workspace (grep, head, tail, find, ls, etc.)
+7. All file paths in params must be ABSOLUTE (starting with /) when workspace is set
+8. ONLY use operators from the list above — do NOT invent new operators
 """
 
 
