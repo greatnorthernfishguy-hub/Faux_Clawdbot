@@ -135,7 +135,9 @@ def can_access_path(path: str, mode: str, workspace: Path) -> tuple[bool, str]:
         (allowed, reason)
     """
     try:
-        resolved = Path(path).resolve()
+        p = Path(path)
+        # Resolve relative paths against workspace, not CWD
+        resolved = (workspace / p).resolve() if not p.is_absolute() else p.resolve()
     except (OSError, ValueError) as exc:
         return False, f"Path resolution failed: {exc}"
 
@@ -177,8 +179,16 @@ def can_execute_shell(command: str) -> tuple[bool, str]:
     if not stripped:
         return False, "Empty command denied."
 
+    # Strip leading env var assignments (KEY=value) before finding the binary.
+    # e.g. PYTHONPATH=/foo python3 -m pytest → check 'python3', not 'PYTHONPATH'
+    tokens = stripped.split()
+    while tokens and "=" in tokens[0] and not tokens[0].startswith("="):
+        tokens = tokens[1:]
+    if not tokens:
+        return False, "Command is only env var assignments — no binary found."
+
     # Extract the first token (the binary / command name)
-    first_token = stripped.split()[0]
+    first_token = tokens[0]
     # Strip any path prefix so `/usr/bin/python` matches `python`
     binary = os.path.basename(first_token)
 

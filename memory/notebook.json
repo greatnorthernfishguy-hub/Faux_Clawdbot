@@ -1,0 +1,6 @@
+[
+  {
+    "timestamp": "2026-04-07 01:18",
+    "content": "AUDIT FINDING \u2014 Elmer/et_modules/manager.py KNOWN_LOCATIONS has stale paths:\n  STALE: ~/.openclaw/skills/neurograph \u2192 SHOULD BE: ~/NeuroGraph/\n  STALE: /opt/inference-difference \u2192 SHOULD BE: ~/The-Inference-Difference/\n  STALE: /opt/trollguard \u2192 SHOULD BE: ~/TrollGuard/\nCanonical paths verified from ~/docs/ROUTING.md Module Registry and confirmed on disk."
+  }
+]

@@ -188,11 +188,12 @@ class SpecExecutor:
         # operations directly against the spec's workspace. The executor already did
         # its own PolicyEngine check above, so the tool-level check is redundant.
         ctx.tool_call_count += 1
+        _DIRECT_DISPATCH_TOOLS = {"read_file", "write_file", "edit_file", "shell_execute", "notebook_add"}
         use_direct_dispatch = (
             self._default_workspace is not None
             and self.workspace != self._default_workspace
-            and tool_name in ("read_file", "write_file", "edit_file")
-        )
+            and tool_name in _DIRECT_DISPATCH_TOOLS
+        ) or (tool_name in _DIRECT_DISPATCH_TOOLS and tool_name not in self.tools)
 
         if use_direct_dispatch:
             try:
@@ -409,6 +410,22 @@ class SpecExecutor:
             new_content = content.replace(old_text, new_text, 1)
             target.write_text(new_content, encoding="utf-8")
             return f"Edited {target} — replaced 1 occurrence ({len(new_content):,} bytes)"
+
+        elif tool_name == "shell_execute":
+            import subprocess as _sp
+            command = params.get("command", "")
+            if not command:
+                return {"status": "error", "error": "Empty command"}
+            result = _sp.run(
+                command, shell=True, capture_output=True, text=True,
+                cwd=str(self.workspace), timeout=120,
+            )
+            return (result.stdout + result.stderr).strip()
+
+        elif tool_name == "notebook_add":
+            content = params.get("content", "")
+            logger.info("  [notebook_add] %s", content[:120])
+            return f"noted: {content[:60]}"
 
         return {"status": "error", "error": f"No direct dispatch for {tool_name}"}
 
