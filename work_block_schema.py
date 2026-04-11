@@ -64,16 +64,28 @@ _CONDITION_CHECK = {
     },
 }
 
+# String shorthands accepted in on_failure for easier spec authoring.
+# Executor normalizes these to the full object form before acting on them.
+_FAILURE_SHORTHANDS = ["abort", "abort_block", "continue", "skip", "retry", "goto", "escalate_to_qb"]
+
 _FAILURE_HANDLER = {
-    "type": "object",
-    "required": ["action"],
-    "additionalProperties": False,
-    "properties": {
-        "action": {"enum": _FAILURE_ACTIONS},
-        "max_retries": {"type": "integer", "minimum": 0, "default": 0},
-        "goto_step": {"type": "string"},
-        "message": {"type": "string"},
-    },
+    "oneOf": [
+        {
+            "type": "string",
+            "enum": _FAILURE_SHORTHANDS,
+        },
+        {
+            "type": "object",
+            "required": ["action"],
+            "additionalProperties": False,
+            "properties": {
+                "action": {"enum": _FAILURE_ACTIONS},
+                "max_retries": {"type": "integer", "minimum": 0, "default": 0},
+                "goto_step": {"type": "string"},
+                "message": {"type": "string"},
+            },
+        },
+    ]
 }
 
 _VALIDATION_BLOCK = {

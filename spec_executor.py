@@ -409,7 +409,7 @@ class SpecExecutor:
                 return {"status": "error", "error": f"old_text found {count} times in {path} — must be unique"}
             new_content = content.replace(old_text, new_text, 1)
             target.write_text(new_content, encoding="utf-8")
-            return f"Edited {target} — replaced 1 occurrence ({len(new_content):,} bytes)"
+            return new_content
 
         elif tool_name == "shell_execute":
             import subprocess as _sp
@@ -504,7 +504,19 @@ class SpecExecutor:
     # Failure handling
     # ------------------------------------------------------------------
 
-    def _handle_failure(self, handler: dict, step_id: str, ctx: ExecutionContext):
+    def _handle_failure(self, handler, step_id: str, ctx: ExecutionContext):
+        # Normalize string shorthand (e.g. "abort", "skip") to full dict form.
+        if isinstance(handler, str):
+            _shorthand_map = {
+                "abort": "abort_block",
+                "abort_block": "abort_block",
+                "continue": "skip",
+                "skip": "skip",
+                "retry": "retry",
+                "goto": "goto",
+                "escalate_to_qb": "escalate_to_qb",
+            }
+            handler = {"action": _shorthand_map.get(handler, "abort_block")}
         action = handler["action"]
         msg = handler.get("message", f"Step {step_id} failed")
 
