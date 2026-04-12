@@ -3,6 +3,10 @@
 # What: Dedicated NG instance for the Faux_Clawdbot worker with code-judgment-optimized SNN params
 # Why: Worker needs its own isolated substrate tuned for code pattern learning, not conversation
 # How: Wraps NeuroGraphMemory with worker-specific config, separate workspace, three-factor learning
+# [2026-04-12] Codemine (BLK-CM-DUALPASS-001) — Dual-pass outcome recording
+# What: WorkerEcosystem proxy + record_tool_outcome wired into spec_executor
+# Why: Success/failure outcome signals never reached substrate — three_factor_enabled was wired but never fired
+# How: WorkerEcosystem.record_outcome calls on_message (STDP traces) then inject_reward (factor 3)
 # [2026-03-30] Josh + Claude — Dual-pass ingestion via ng_embed
 # What: Tool results ingested with forest (gestalt) + trees (concepts) dual-pass methodology
 # Why: Multi-resolution semantic search. Single-pass was operating with one eye closed.
@@ -227,3 +231,97 @@ def recall_context(ng: NeuroGraphMemory, tool_name: str, context: str, k: int = 
     from ng_embed import embed
     query = f"{tool_name} {context}"
     return ng.recall(query, k=k, threshold=0.4)
+
+
+# ---------------------------------------------------------------------------
+# Dual-pass outcome recording
+# ---------------------------------------------------------------------------
+
+class WorkerEcosystem:
+    """Minimal NGEcosystem proxy for dual_record_outcome compatibility.
+
+    NeuroGraphMemory (vendored) wraps neuro_foundation.py's Graph, which
+    does not have record_outcome(). This proxy implements the interface
+    that ng_embed.dual_record_outcome() expects using the full SNN
+    three-factor learning loop that the worker was built for.
+
+    Law 7: raw experience in — no classification before substrate ingestion.
+    The outcome-labeled message is semantic content. The substrate learns
+    'tool:X passed' / 'tool:X failed' as raw experience, which is correct.
+    """
+
+    def __init__(self, ng: NeuroGraphMemory):
+        self._ng = ng
+
+    def record_outcome(
+        self,
+        embedding,
+        target_id: str,
+        success: bool,
+        strength: float = 1.0,
+        metadata: Optional[Dict] = None,
+    ) -> Dict:
+        """Record outcome via full SNN three-factor learning loop.
+
+        Factor 1+2 (STDP): ng.on_message() ingests the outcome experience,
+        fires nodes, and builds eligibility traces via STDP.
+
+        Factor 3 (Reward): ng.graph.inject_reward() broadcasts the reward
+        signal — positive for success, negative (half-strength) for failure.
+        Final weight change: Δw = eligibility_trace × reward × learning_rate.
+
+        This activates three_factor_enabled=True in WORKER_SNN_CONFIG, which
+        has been wired but never triggered until now.
+        """
+        outcome_label = "success" if success else "failure"
+        experience = f"outcome: {target_id} {outcome_label}"
+        # Tree-level calls include the concept for richer semantic signal
+        if metadata and metadata.get("_concept"):
+            concept = metadata["_concept"]
+            experience = f"outcome: {target_id} concept:{concept} {outcome_label}"
+        # Factor 1+2: ingest experience, STDP builds eligibility traces
+        self._ng.on_message(experience)
+        # Factor 3: inject reward — confirms or rejects the eligibility traces
+        # Half-strength penalty on failure avoids catastrophic forgetting
+        reward = strength if success else -strength * 0.5
+        self._ng.graph.inject_reward(reward)
+        return {"target_id": target_id, "success": success, "reward": reward, "ingested": True}
+
+
+def record_tool_outcome(
+    ng: NeuroGraphMemory,
+    tool_name: str,
+    target_id: str,
+    success: bool,
+    strength: float = 1.0,
+    context: str = "",
+) -> None:
+    """Record tool execution outcome via dual-pass to the worker substrate.
+
+    Called after step validation — success=True if validation passed,
+    success=False if failed. Uses dual_record_outcome() from ng_embed.py
+    for forest (gestalt) + tree (concept) outcome recording.
+
+    Silent on failure — a dead embedding service must never interrupt
+    the spec executor's flow.
+    """
+    try:
+        from ng_embed import NGEmbed, embed
+        content = f"tool:{tool_name} step:{target_id} {'PASS' if success else 'FAIL'}"
+        if context:
+            content += f" context:{context[:200]}"
+        embedding = embed(content)
+        eco = WorkerEcosystem(ng)
+        NGEmbed.get_instance().dual_record_outcome(
+            ecosystem=eco,
+            content=content,
+            embedding=embedding,
+            target_id=target_id,
+            success=success,
+            strength=strength,
+        )
+        logger.info(
+            "  Outcome recorded: %s %s", target_id, "PASS" if success else "FAIL"
+        )
+    except Exception as exc:
+        logger.warning("  Outcome recording failed (non-fatal): %s", exc)

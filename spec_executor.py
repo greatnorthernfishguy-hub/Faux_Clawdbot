@@ -247,10 +247,14 @@ class SpecExecutor:
             logger.warning("  [%s] Validation failed", step_id)
             self._handle_failure(step["on_failure"], step_id, ctx)
 
-        # Ingest into worker substrate
+        # Ingest into worker substrate + record outcome
         try:
-            from worker_ng import ingest_tool_result
+            from worker_ng import ingest_tool_result, record_tool_outcome
             ingest_tool_result(self.ng, tool_name, params, result_str)
+            record_tool_outcome(
+                self.ng, tool_name, step_id, passed,
+                strength=1.0, context=result_str[:200],
+            )
         except Exception as e:
             logger.warning("  [%s] Substrate ingestion failed: %s", step_id, e)
 
