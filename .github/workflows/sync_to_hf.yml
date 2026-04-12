@@ -1,0 +1,24 @@
+name: Sync to HuggingFace Space
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync-to-hf:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync to HuggingFace Space
+        uses: nateraw/huggingface-sync-action@v0.0.5
+        with:
+          github_repo_id: greatnorthernfishguy-hub/Faux_Clawdbot
+          huggingface_repo_id: Executor-Tyrant-Framework/Working-in-a-Codemine
+          hf_token: ${{ secrets.HF_TOKEN }}
+          repo_type: space
+          space_sdk: docker
