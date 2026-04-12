@@ -1,5 +1,6 @@
 # Worker data (NeuroGraph brain, checkpoints)
 data/
+!data/fix_log.md
 .neurograph/
 
 # Python
