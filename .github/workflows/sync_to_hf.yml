@@ -14,11 +14,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync to HuggingFace Space
-        uses: nateraw/huggingface-sync-action@v0.0.5
-        with:
-          github_repo_id: greatnorthernfishguy-hub/Faux_Clawdbot
-          huggingface_repo_id: Executor-Tyrant-Framework/Working-in-a-Codemine
-          hf_token: ${{ secrets.HF_TOKEN }}
-          repo_type: space
-          space_sdk: docker
+      - name: Push to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git remote add hf https://Executor-Tyrant-Framework:${HF_TOKEN}@huggingface.co/spaces/Executor-Tyrant-Framework/Working-in-a-Codemine
+          git push hf main --force
