@@ -17,6 +17,8 @@ The system gets smarter with every mission.
 """
 
 import json
+import requests
+import os
 import logging
 import shutil
 import subprocess
@@ -434,6 +436,40 @@ class Orchestrator:
     # Result building
     # ------------------------------------------------------------------
 
+    def _notify_discord(self, result: dict) -> None:
+        """Post mission completion notification to Discord via webhook.
+
+        Reads QB_DISCORD_WEBHOOK from environment.  Silent on failure —
+        a dead webhook must never interrupt or surface as a mission error.
+        """
+        webhook_url = os.environ.get("QB_DISCORD_WEBHOOK", "").strip()
+        if not webhook_url:
+            return
+        try:
+            status = result.get("status", "unknown")
+            iterations = result.get("iterations", 0)
+            elapsed = result.get("elapsed_seconds", 0)
+            # Pull block name from last history entry if available
+            history = result.get("history", [])
+            block_name = history[-1].get("block_name", "unknown") if history else "unknown"
+            steps_passed = history[-1].get("steps_passed", 0) if history else 0
+            steps_failed = history[-1].get("steps_failed", 0) if history else 0
+            escalation = result.get("escalation")
+            status_emoji = {"complete": "✅", "escalated": "🚨"}.get(status, "⚠️")
+            lines = [
+                f"{status_emoji} **QB Mission {status.upper()}**",
+                f"Block: `{block_name}`",
+                f"Iterations: {iterations} | Steps: {steps_passed} passed, {steps_failed} failed | Elapsed: {elapsed}s",
+            ]
+            if escalation:
+                reason = escalation.get("reason", "")
+                to = escalation.get("to", "josh")
+                lines.append(f"Escalated to **{to}**: {reason}")
+            payload = {"content": "\n".join(lines), "username": "Queen Bitch"}
+            requests.post(webhook_url, json=payload, timeout=5)
+        except Exception as exc:
+            logger.warning("Discord webhook notification failed: %s", exc)
+
     def _build_result(self, status, iterations, final_report, final_evaluation,
                       history, escalation, start_time, worktree_info=None):
         elapsed = round(time.time() - start_time, 2)
@@ -469,4 +505,5 @@ class Orchestrator:
         except OSError as e:
             logger.warning("Failed to write mission audit: %s", e)
 
+        self._notify_discord(result)
         return result
