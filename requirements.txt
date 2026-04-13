@@ -40,6 +40,9 @@ python-dotenv>=1.0.0
 # Spec execution (structured work block validation)
 jsonschema>=4.20.0
 
+# SSH access to VPS for cross-repo specs (pure Python, avoids getpwuid() issue in HF containers)
+paramiko>=3.0.0
+
 # Token-efficient LLM data exchange (TOON format — for substrate metrics, audit logs, execution reports sent to QB)
 # NOT used for WorkBlockSpec itself (too non-uniform) — use for uniform tabular data passed to LLMs
 # Spec v3.0: https://github.com/toon-format/toon  Python lib: https://github.com/toon-format/toon-python
