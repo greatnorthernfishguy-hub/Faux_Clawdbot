@@ -1,4 +1,12 @@
 # ---- Changelog ----
+# [2026-04-12] Claude (Sonnet 4.6) — Fix shell_allowlist double-gate bug
+# What: spec shell_allowlist was bypassing executor-level policy check but not the
+#       ShellTool's own internal policy check — command was denied by the second gate.
+# Why: use_direct_dispatch was False when no workspace override, routing through
+#      TOOL_REGISTRY → ShellTool.can_execute_shell() which ignores spec allowlist.
+# How: Added third condition to use_direct_dispatch: when _skip_policy_shell is True
+#      (spec shell_allowlist approved the command), force direct dispatch to bypass
+#      the tool-level check entirely. Executor already validated; no double-checking.
 # [2026-04-06] Josh + Claude — Fix 3 spec executor gaps
 # What: (1) Bypass tool-level path checks when workspace differs from default repo path
 #        (2) Support spec-configurable shell_allowlist in constraints
@@ -193,7 +201,8 @@ class SpecExecutor:
             self._default_workspace is not None
             and self.workspace != self._default_workspace
             and tool_name in _DIRECT_DISPATCH_TOOLS
-        ) or (tool_name in _DIRECT_DISPATCH_TOOLS and tool_name not in self.tools)
+        ) or (tool_name in _DIRECT_DISPATCH_TOOLS and tool_name not in self.tools
+        ) or (_skip_policy_shell and tool_name == "shell_execute")
 
         if use_direct_dispatch:
             try:
