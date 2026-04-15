@@ -1,3 +1,12 @@
+# ---- Changelog ----
+# [2026-04-15] Claude (Sonnet 4.6) — v0.4.1 homeostasis audit + three-factor enable
+# What: OPENCLAW_SNN_CONFIG: scaling_interval 100→25, threshold_ceiling 5.0 added,
+#       three_factor_enabled False→True, tonic disabled, stats() version bumped to 0.4.2
+# Why: scaling_interval=100 means homeostatic scaling never fires in ephemeral workers.
+#      three_factor_enabled was False — reward learning never fired even with inject_reward.
+#      Tonic requires a persistent process; workers are ephemeral.
+# -------------------
+
 from __future__ import annotations
 
 import logging
@@ -29,7 +38,8 @@ OPENCLAW_SNN_CONFIG = {
     "refractory_period": 2,
     "max_weight": 5.0,
     "target_firing_rate": 0.05,
-    "scaling_interval": 100,
+    "scaling_interval": 25,        # v0.4.1: lowered from 100 — homeostatic scaling fires more often
+    "threshold_ceiling": 5.0,      # v0.4.1: prevents runaway threshold growth
     "weight_threshold": 0.01,
     "grace_period": 500,
     "inactivity_threshold": 1000,
@@ -45,7 +55,10 @@ OPENCLAW_SNN_CONFIG = {
     "prediction_error_penalty": 0.02,
     "prediction_max_active": 1000,
     "surprise_sprouting_weight": 0.1,
-    "three_factor_enabled": False,
+    "three_factor_enabled": True,   # reward learning enabled — inject_reward wired in worker_ng
+    # Tonic disabled — workers are ephemeral subprocesses, no persistent process
+    # to accumulate attractor state between calls.
+    "tonic": {"enabled": False},
     # Hypergraph
     "he_pattern_completion_strength": 0.3,
     "he_member_weight_lr": 0.05,
@@ -203,7 +216,7 @@ class NeuroGraphMemory:
         """Return current graph statistics and telemetry."""
         tel = self.graph.get_telemetry()
         return {
-            "version": "0.4.0",
+            "version": "0.4.2",
             "timestep": tel.timestep,
             "nodes": tel.total_nodes,
             "synapses": tel.total_synapses,
