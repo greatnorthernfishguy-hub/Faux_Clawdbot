@@ -1,4 +1,11 @@
 # ---- Changelog ----
+# [2026-04-15] Claude (Sonnet 4.6) — v0.4.1 homeostasis audit values
+# What: scaling_interval 100→25, threshold_ceiling 5.0 added, tonic disabled
+# Why: scaling_interval=100 with ephemeral subprocess calls means homeostatic
+#      scaling never fires — same root cause as CC hook silent-node bug.
+#      threshold_ceiling prevents runaway threshold growth. Tonic disabled:
+#      workers are ephemeral, no persistent process to accumulate attractor state.
+# How: Config changes only, no structural changes.
 # [2026-03-29] Forge (TQB) — Worker NeuroGraph configuration and lifecycle
 # What: Dedicated NG instance for the Faux_Clawdbot worker with code-judgment-optimized SNN params
 # Why: Worker needs its own isolated substrate tuned for code pattern learning, not conversation
@@ -42,7 +49,8 @@ WORKER_SNN_CONFIG = {
     "refractory_period": 2,
     "max_weight": 5.0,
     "target_firing_rate": 0.05,
-    "scaling_interval": 100,
+    "scaling_interval": 25,        # v0.4.1: lowered from 100 — homeostatic scaling fires more often
+    "threshold_ceiling": 5.0,      # v0.4.1: prevents runaway threshold growth
     "weight_threshold": 0.01,
     "grace_period": 500,
     "inactivity_threshold": 1000,
@@ -69,6 +77,9 @@ WORKER_SNN_CONFIG = {
     "he_discovery_min_nodes": 3,
     "he_consolidation_overlap": 0.8,
     "he_experience_threshold": 100,
+    # Tonic disabled — workers are ephemeral subprocesses, no persistent process
+    # to accumulate attractor state between calls.
+    "tonic": {"enabled": False},
 }
 
 # Default to local data/ dir. HF Spaces sets NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
