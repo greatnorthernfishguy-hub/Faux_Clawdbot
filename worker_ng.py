@@ -1,4 +1,13 @@
 # ---- Changelog ----
+# [2026-04-16] Claude (Sonnet 4.6) — Tonic enabled (heuristic mode)
+# What: tonic.enabled False→True in WORKER_SNN_CONFIG.
+# Why: Gradio process is long-lived — substrate was dormant between spec
+#      executions, nodes never warmed up, zeros everywhere. TonicEngine heuristic
+#      mode (no transformer weights on HF) runs a background loop at 2s/0.5s
+#      cadence: thread continuity + attractor pull + prediction tension +
+#      exploration. Keeps substrate alive continuously.
+# How: tonic_thread.py + tonic_engine.py vendored; openclaw_hook.py wired.
+#      _concurrent_lock on graph serializes on_message vs Tonic engine.
 # [2026-04-15] Claude (Sonnet 4.6) — v0.4.1 homeostasis audit values
 # What: scaling_interval 100→25, threshold_ceiling 5.0 added, tonic disabled
 # Why: scaling_interval=100 with ephemeral subprocess calls means homeostatic
@@ -77,9 +86,10 @@ WORKER_SNN_CONFIG = {
     "he_discovery_min_nodes": 3,
     "he_consolidation_overlap": 0.8,
     "he_experience_threshold": 100,
-    # Tonic disabled — workers are ephemeral subprocesses, no persistent process
-    # to accumulate attractor state between calls.
-    "tonic": {"enabled": False},
+    # Tonic enabled — Gradio process is long-lived (same reasoning as CC daemon).
+    # No transformer weights on HF Spaces → TonicEngine runs heuristic mode
+    # automatically. Background loop at 2s idle / 0.5s active.
+    "tonic": {"enabled": True},
 }
 
 # Default to local data/ dir. HF Spaces sets NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker

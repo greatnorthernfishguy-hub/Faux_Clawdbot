@@ -1,4 +1,15 @@
 # ---- Changelog ----
+# [2026-04-16] Claude (Sonnet 4.6) — Tonic wiring (heuristic mode)
+# What: TonicThread + TonicEngine wired into NeuroGraphMemory. _concurrent_lock added
+#       to graph. ouroboros_cycle() called on every on_message(). Tonic status in stats().
+# Why: Worker NG was dormant between spec executions — nodes never warmed up, nothing
+#      fired, zeros everywhere. TonicEngine background thread (2s idle / 0.5s active)
+#      keeps substrate alive via heuristic_inference(): thread continuity + attractor
+#      pull + prediction tension + exploration. No transformer weights on HF Spaces →
+#      _use_heuristic=True automatically. First-class inference path, not a stub.
+# How: tonic_thread.py + tonic_engine.py vendored from NeuroGraph canonical.
+#      Simplified wiring vs canonical: no BTF River deposit (Codemine has no River),
+#      no BrainSwitcher body sharing (no ProtoUniBrain on HF).
 # [2026-04-15] Claude (Sonnet 4.6) — v0.4.1 homeostasis audit + three-factor enable
 # What: OPENCLAW_SNN_CONFIG: scaling_interval 100→25, threshold_ceiling 5.0 added,
 #       three_factor_enabled False→True, tonic disabled, stats() version bumped to 0.4.2
@@ -11,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,9 +68,10 @@ OPENCLAW_SNN_CONFIG = {
     "prediction_max_active": 1000,
     "surprise_sprouting_weight": 0.1,
     "three_factor_enabled": True,   # reward learning enabled — inject_reward wired in worker_ng
-    # Tonic disabled — workers are ephemeral subprocesses, no persistent process
-    # to accumulate attractor state between calls.
-    "tonic": {"enabled": False},
+    # Tonic enabled — Gradio process is long-lived; TonicEngine runs in heuristic mode
+    # (no transformer weights on HF Spaces → _use_heuristic=True automatically).
+    # Background thread fires every 2s (idle) / 0.5s (active spec execution).
+    "tonic": {"enabled": True},
     # Hypergraph
     "he_pattern_completion_strength": 0.3,
     "he_member_weight_lr": 0.05,
@@ -102,6 +115,11 @@ class NeuroGraphMemory:
         snn_config = {**OPENCLAW_SNN_CONFIG, **(config or {})}
         self.graph = Graph(config=snn_config)
 
+        # Concurrent lock — Tonic engine acquires non-blocking; hook ops
+        # acquire blocking (waiting for Tonic to finish before mutating graph).
+        if not hasattr(self.graph, '_concurrent_lock'):
+            self.graph._concurrent_lock = threading.RLock()
+
         # Restore from checkpoint if one exists
         if self._checkpoint_path.exists():
             try:
@@ -126,6 +144,41 @@ class NeuroGraphMemory:
 
         self._message_count = 0
         self.auto_save_interval = 10
+
+        # --- The Tonic: Latent Thread + Engine ---
+        # Keeps the substrate alive between spec executions via continuous
+        # heuristic inference (thread continuity + attractor pull + prediction
+        # tension + exploration). No transformer weights needed — heuristic
+        # mode is the designed path for Codemine.
+        self._tonic_thread = None
+        tonic_conf = snn_config.get("tonic", {})
+        if tonic_conf.get("enabled", True):
+            try:
+                from tonic_thread import TonicThread, TonicConfig
+                tonic_config = TonicConfig()
+                for k, v in tonic_conf.items():
+                    if k != "enabled" and hasattr(tonic_config, k):
+                        setattr(tonic_config, k, v)
+                self._tonic_thread = TonicThread(
+                    self.graph, self.vector_db, tonic_config
+                )
+                logger.info("The Tonic initialized — latent thread live")
+                # Latent engine — heuristic inference loop between spec executions.
+                # No BrainSwitcher body sharing on Codemine (no ProtoUniBrain).
+                try:
+                    from tonic_engine import TonicEngine
+                    engine = TonicEngine(
+                        self.graph, self.vector_db, self._tonic_thread,
+                    )
+                    self._tonic_thread.set_latent_engine(engine)
+                    engine.start()
+                    logger.info("Tonic engine running — heuristic mode active")
+                except ImportError:
+                    logger.info("Tonic engine not available — ouroboros-only mode")
+                except Exception as exc:
+                    logger.info("Tonic engine init error: %s — ouroboros-only mode", exc)
+            except Exception as exc:
+                logger.info("The Tonic not available: %s", exc)
 
     @classmethod
     def get_instance(
@@ -161,13 +214,24 @@ class NeuroGraphMemory:
             return {"status": "skipped", "reason": "empty_input"}
 
         # Stage 1-5: Extract → Chunk → Embed → Register → Associate
-        result = self.ingestor.ingest(text, source_type=source_type)
+        # Acquire graph lock — waits for Tonic engine to finish its current
+        # token before mutating graph state (RLock so re-entrant calls are safe).
+        with self.graph._concurrent_lock:
+            result = self.ingestor.ingest(text, source_type=source_type)
 
-        # Run SNN learning step
-        step_result = self.graph.step()
+            # Run SNN learning step
+            step_result = self.graph.step()
 
-        # Update novelty probation for ingested nodes
-        graduated = self.ingestor.update_probation()
+            # Update novelty probation for ingested nodes
+            graduated = self.ingestor.update_probation()
+
+            # The Tonic: signal message arrival + ouroboros cycle
+            if self._tonic_thread is not None:
+                try:
+                    self._tonic_thread.message_received()
+                    self._tonic_thread.ouroboros_cycle()
+                except Exception as exc:
+                    logger.debug("Tonic cycle error: %s", exc)
 
         self._message_count += 1
 
@@ -215,7 +279,7 @@ class NeuroGraphMemory:
     def stats(self) -> Dict[str, Any]:
         """Return current graph statistics and telemetry."""
         tel = self.graph.get_telemetry()
-        return {
+        result = {
             "version": "0.4.2",
             "timestep": tel.timestep,
             "nodes": tel.total_nodes,
@@ -233,6 +297,9 @@ class NeuroGraphMemory:
             "checkpoint": str(self._checkpoint_path),
             "message_count": self._message_count,
         }
+        if self._tonic_thread is not None:
+            result["tonic"] = self._tonic_thread.status
+        return result
 
     def ingest_file(self, path: str, source_type: Optional[SourceType] = None) -> Dict[str, Any]:
         """Ingest a file from disk."""
