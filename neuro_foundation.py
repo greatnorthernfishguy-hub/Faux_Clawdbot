@@ -853,7 +853,7 @@ class HomeostaticRule(PlasticityRule):
             # Multiplicative synaptic scaling (PRD §3.2.1)
             # Scale incoming weights by (target/actual)^factor
             scale = ratio ** self.scaling_factor
-            incoming_syn_ids = graph._incoming.get(nid, set())
+            incoming_syn_ids = list(graph._incoming.get(nid, set()))
             for syn_id in incoming_syn_ids:
                 syn = graph.synapses.get(syn_id)
                 if syn is None:
@@ -1685,7 +1685,7 @@ class Graph:
         for nid in fired_ids:
             node = self.nodes[nid]
             sign = -1.0 if node.is_inhibitory else 1.0
-            for syn_id in self._outgoing.get(nid, set()):
+            for syn_id in list(self._outgoing.get(nid, set())):
                 syn = self.synapses.get(syn_id)
                 if syn is None:
                     logger.debug("Stale synapse ref %s in outgoing[%s]", syn_id, nid)
@@ -1943,7 +1943,7 @@ class Graph:
             if self._event_handlers.get("spikes"):
                 for nid in fired_ids:
                     traces = []
-                    for syn_id in self._outgoing.get(nid, set()):
+                    for syn_id in list(self._outgoing.get(nid, set())):
                         syn = self.synapses.get(syn_id)
                         if syn is not None and abs(syn.eligibility_trace) > 1e-12:
                             traces.append(syn.eligibility_trace)
@@ -2047,7 +2047,7 @@ class Graph:
         for dist in range(1, steps + 1):
             next_frontier: Set[str] = set()
             for nid in frontier:
-                for syn_id in self._outgoing.get(nid, set()):
+                for syn_id in list(self._outgoing.get(nid, set())):
                     syn = self.synapses.get(syn_id)
                     if syn and syn.post_node_id not in distances:
                         distances[syn.post_node_id] = dist
@@ -2126,7 +2126,7 @@ class Graph:
             for nid in fired_ids:
                 node = self.nodes[nid]
                 sign = -1.0 if node.is_inhibitory else 1.0
-                for syn_id in self._outgoing.get(nid, set()):
+                for syn_id in list(self._outgoing.get(nid, set())):
                     syn = self.synapses.get(syn_id)
                     if syn is None:
                         continue
@@ -2362,7 +2362,7 @@ class Graph:
             return
         visited.add(source_id)
 
-        for syn_id in self._outgoing.get(source_id, set()):
+        for syn_id in list(self._outgoing.get(source_id, set())):
             if len(self.active_predictions) >= max_active:
                 return
 
@@ -2641,7 +2641,7 @@ class Graph:
         salience_max = self.config["he_salience_max"]
         surprise_magnitude = pred.strength * pred.confidence
         context_boost = 1.0 + (surprise_magnitude * 2.0)  # softer than new synapse boost
-        for syn_id in self._outgoing.get(source_id, set()):
+        for syn_id in list(self._outgoing.get(source_id, set())):
             syn = self.synapses.get(syn_id)
             if syn and syn.inactive_steps < self.config["co_activation_window"] * 2:
                 # Recently active from source — this was part of the context.
@@ -2676,7 +2676,7 @@ class Graph:
         the prediction threshold.
         """
         threshold = self.config["prediction_threshold"]
-        for syn_id in self._outgoing.get(source_id, set()):
+        for syn_id in list(self._outgoing.get(source_id, set())):
             syn = self.synapses.get(syn_id)
             if syn and syn.post_node_id in targets and syn.weight >= threshold:
                 return True
@@ -2712,7 +2712,7 @@ class Graph:
         self, pre_id: str, post_id: str
     ) -> Optional[Synapse]:
         """Find a synapse connecting pre_id → post_id, if one exists."""
-        for syn_id in self._outgoing.get(pre_id, set()):
+        for syn_id in list(self._outgoing.get(pre_id, set())):
             syn = self.synapses.get(syn_id)
             if syn and syn.post_node_id == post_id:
                 return syn
@@ -2880,7 +2880,7 @@ class Graph:
             return {"node_id": node_id, "children": []}
         visited.add(node_id)
         children = []
-        for sid in self._outgoing.get(node_id, set()):
+        for sid in list(self._outgoing.get(node_id, set())):
             syn = self.synapses.get(sid)
             if syn and syn.weight > self.config["weight_threshold"]:
                 child = self._trace_causal(syn.post_node_id, depth - 1, visited)
