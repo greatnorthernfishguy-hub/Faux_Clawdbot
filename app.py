@@ -341,8 +341,8 @@ def _build_api_messages(history: list, system_prompt: str) -> list:
 # ---------------------------------------------------------------------------
 
 def agent_loop(message: str, history: list, pending_proposals: list, uploaded_file) -> tuple:
-    safe_hist = history or []
-    safe_props = pending_proposals or []
+    safe_hist = list(history or [])
+    safe_props = list(pending_proposals or [])
 
     if not message.strip() and uploaded_file is None:
         return (safe_hist, "", safe_props, _format_gate_choices(safe_props),

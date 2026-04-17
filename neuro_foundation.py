@@ -1893,7 +1893,7 @@ class Graph:
         if self.config.get("three_factor_enabled", False):
             trace_tau = self.config["eligibility_trace_tau"]
             trace_decay = math.exp(-1.0 / trace_tau) if trace_tau > 0 else 0.0
-            for syn in self.synapses.values():
+            for syn in list(self.synapses.values()):
                 if abs(syn.eligibility_trace) > 1e-12:
                     syn.eligibility_trace *= trace_decay
 
@@ -2757,7 +2757,7 @@ class Graph:
         initial_w = self.config["initial_sprouting_weight"]
 
         to_prune: List[str] = []
-        for sid, syn in self.synapses.items():
+        for sid, syn in list(self.synapses.items()):
             age = self.timestep - syn.creation_time
 
             # Weight-based pruning

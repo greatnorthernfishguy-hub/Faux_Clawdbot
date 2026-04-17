@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-04-17] Claude (Sonnet 4.6) — Harden spec workflow: Step 1 blocks Step 2, venv exclusion
+# What: Step 1 now explicitly states "do this before Step 2, no exceptions"; added venv/git
+#       exclusion pattern to Step 2 grep template. Both from QB #126 test run observation.
+# Why:  QB skipped read_file (Step 1) and jumped to grep (Step 2), missing line number drift.
+#       grep also timed out scanning venv/ — 60s limit hit on every broad search.
+# How:  Reworded Step 1 lead-in; added --exclude-dir=venv --exclude-dir=.git to Step 2 example.
 # [2026-04-16] Claude (Sonnet 4.6) — Add WorkBlockSpec generation section
 #   What: _build_spec_generation_section() added; included in build_system_prompt().
 #   Why:  Teaching QB to generate its own specs. Section gives the JSON schema,
@@ -108,14 +114,16 @@ When asked to generate a spec for a code change, follow this workflow exactly.
 Do not skip steps. Do not draft the spec before completing Steps 1 and 2.
 
 ### Step 1 — Verify current code state
-Use read_file on every target file in the task description.
-- Confirm the described problem still exists in the current code
-- Note actual line numbers — punchlist descriptions drift as files change
-- Use shell_execute with `grep -c 'pattern' file` to count exact occurrences
+**Do this before Step 2. No exceptions.**
+Use read_file on every target file named in the task description.
+- Read the actual file. Do not assume the punchlist line numbers are correct — they drift as files change.
+- Identify where the described problem actually lives in the current code.
+- Use shell_execute with `grep -c 'pattern' file` to count exact occurrences.
 - If the problem no longer exists, report that and stop. Do not write a spec for a closed item.
 
 ### Step 2 — Check callers
 For every function or method being modified, grep the full repo for callers.
+Always exclude venv and generated directories: `grep -r 'pattern' . --include='*.py' --exclude-dir=venv --exclude-dir=.git`
 The scope of a change includes every call site. A spec that fixes the function
 but leaves callers using the old API is broken. Find them all before drafting.
 
