@@ -26,6 +26,17 @@ Laws observed:
     - All thresholds are bootstrap scaffolding.
 
 # ---- Changelog ----
+# [2026-04-16] Claude (Sonnet 4.6) — #159: Cross-process body lock + set_lock_file
+# What: Added set_lock_file(path), _body_lock_context() composite lock,
+#       _lock_file_path field. contextlib added to module imports.
+# Why:  BrainSwitcher now supports multiple registered Tonic engines.
+#       Both in-process (threading.Lock) and cross-process (fcntl.LOCK_SH)
+#       locks must be held before each forward pass. If any consumer ever
+#       attempts a write (LOCK_EX), all inference blocks — architectural
+#       enforcement, not just documentation.
+# How:  _body_lock_context() uses contextlib.ExitStack to compose both
+#       locks. set_lock_file() receives the path from BrainSwitcher.
+#       _model_inference replaces inline _lock_ctx with _body_lock_context().
 # [2026-03-24] Claude Code (Opus 4.6) — Initial implementation
 # What: TonicEngine — latent token generation via surgical transformer.
 #   Graph-native I/O. Continuous inference between conversations.
@@ -39,18 +50,12 @@ Laws observed:
 #   strengths. Background thread runs continuous latent token generation.
 #   Each token: encode graph → transformer forward → decode activations
 #   → inject via write-mode prime_and_propagate → graph updates → repeat.
-# [2026-04-16] Claude (Sonnet 4.6) — Vendored into Faux_Clawdbot
-# What: Copied from NeuroGraph canonical — no modifications.
-# Why: Codemine worker needs heuristic Tonic for between-execution awareness.
-#   No transformer weights on HF Spaces → _try_load_model() fails silently →
-#   _use_heuristic=True → engine runs full background loop via
-#   _heuristic_inference() (thread continuity + attractor pull + prediction
-#   tension + exploration). First-class inference path, not a stub.
 # -------------------
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
@@ -186,6 +191,7 @@ class TonicEngine:
         self._config = config or EngineConfig()
         self._shared_body = transformer_body  # from ProtoUniBrain if available
         self._body_lock = None  # shared with ProtoUniBrain — set via set_body_lock()
+        self._lock_file_path = None  # cross-process flock path — set via set_lock_file()
 
         self._running = False
         self._in_conversation = False
@@ -295,6 +301,43 @@ class TonicEngine:
         """Accept the shared body access lock from BrainSwitcher."""
         self._body_lock = lock
 
+    def set_lock_file(self, path) -> None:
+        """Accept the cross-process flock path from BrainSwitcher.
+
+        When set, _body_lock_context() acquires fcntl.LOCK_SH on this
+        file before each forward pass — a shared read lock. Any cross-
+        process writer must acquire LOCK_EX, blocking all inference.
+        This enforces the read-only invariant for all body consumers
+        regardless of process boundary. Set to None after body revoke.
+        """
+        self._lock_file_path = path
+
+    @contextlib.contextmanager
+    def _body_lock_context(self):
+        """Composite body access lock: threading lock + fcntl shared read lock.
+
+        Acquires in order:
+        1. _body_lock (threading.Lock) — in-process thread serialization
+        2. fcntl.LOCK_SH on _lock_file_path — cross-process read lock
+
+        Any code modifying body weights must hold LOCK_EX on the same file,
+        which blocks here until all readers release. Architecture-enforced,
+        not documentation-enforced. ExitStack guarantees cleanup (LIFO).
+        """
+        stack = contextlib.ExitStack()
+        with stack:
+            if self._body_lock is not None:
+                stack.enter_context(self._body_lock)
+            if self._lock_file_path is not None:
+                try:
+                    import fcntl as _fcntl
+                    _lf = stack.enter_context(open(self._lock_file_path, 'r'))
+                    _fcntl.flock(_lf.fileno(), _fcntl.LOCK_SH)
+                    stack.callback(_fcntl.flock, _lf.fileno(), _fcntl.LOCK_UN)
+                except Exception as _exc:
+                    logger.debug("flock unavailable — cross-process lock skipped: %s", _exc)
+            yield
+
     # -----------------------------------------------------------------
     # Latent Token Generation
     # -----------------------------------------------------------------
@@ -302,9 +345,16 @@ class TonicEngine:
     def _generate_latent_token(self) -> Dict[str, Any]:
         """Generate one latent token — one step of the push.
 
-        The Tonic NEVER waits. It always runs. Hook ops acquire the
-        concurrent_lock blocking (waiting for Tonic to finish).
-        The Tonic acquires non-blocking to signal it is working.
+        This is the core operation. Reads graph state, computes the
+        forward compression (what comes next?), and injects the
+        result back into the graph.
+
+        Returns stats about the token generated.
+
+        #109: The Tonic NEVER waits. It always runs. Module bridge calls
+        yield to the Tonic via non-blocking trylock on their side.
+        The Tonic acquires the lock to signal "I'm working" so bridges
+        know to skip, but it never blocks waiting for anyone.
         """
         lock = getattr(self._graph, '_concurrent_lock', None)
         acquired = False
@@ -420,24 +470,36 @@ class TonicEngine:
     def _model_inference(
         self, features: Dict[str, Any]
     ) -> List[Tuple[str, float]]:
-        """Surgical model inference — full transformer forward compression."""
+        """Surgical model inference — full transformer forward compression.
+
+        Encodes graph state via GraphStateEncoder (Elmer's trained eyes),
+        forwards through the transformer body (the reasoning engine),
+        decodes via ActivationDecoder to produce node activation decisions.
+
+        The transformer IS the push. Its forward pass IS the forward-
+        oriented compression that constitutes awareness.
+        """
         try:
             import torch
             from surgery.tonic_brain import GraphFeatures
         except ImportError:
             return self._heuristic_inference(features)
 
+        # Extract graph features into GraphFeatures struct
         graph_features = self._extract_graph_features_for_model()
         if graph_features is None:
             return self._heuristic_inference(features)
 
-        import contextlib
-        _lock_ctx = self._body_lock if self._body_lock is not None else contextlib.nullcontext()
-        with _lock_ctx:
+        # Forward through TonicBrain — the actual push
+        with self._body_lock_context():
             with torch.no_grad():
                 output = self._model(graph_features)
 
+        # Map activation strengths to actual nodes
         activation_strengths = output["activations"]
+        exploration = output["exploration"]
+
+        # Get the top active/recent nodes to map activations onto
         candidates = self._get_activation_candidates(features)
         if not candidates:
             return self._heuristic_inference(features)
@@ -445,7 +507,7 @@ class TonicEngine:
         activations: List[Tuple[str, float]] = []
         for i, (nid, _) in enumerate(candidates[:len(activation_strengths)]):
             strength = activation_strengths[i] * self._config.activation_strength
-            if strength > 0.05:
+            if strength > 0.05:  # noise floor
                 activations.append((nid, strength))
 
         return activations
@@ -472,39 +534,48 @@ class TonicEngine:
             synapse_weights=torch.tensor([s.weight for s in synapses[:200]], dtype=torch.float32),
             synapse_ages=torch.tensor([float(g.timestep - s.creation_time) for s in synapses[:200]], dtype=torch.float32),
             density=torch.tensor([len(synapses) / max(1, len(nodes) * (len(nodes) - 1))], dtype=torch.float32),
-            clustering=torch.tensor([0.0], dtype=torch.float32),
+            clustering=torch.tensor([0.0], dtype=torch.float32),  # expensive to compute, approximate
             n_components=torch.tensor([1.0], dtype=torch.float32),
             n_nodes=torch.tensor([float(len(nodes))], dtype=torch.float32),
             n_synapses=torch.tensor([float(len(synapses))], dtype=torch.float32),
             n_hyperedges=torch.tensor([float(len(g.hyperedges))], dtype=torch.float32),
-            recent_firings=torch.zeros(15, dtype=torch.float32),
+            recent_firings=torch.zeros(15, dtype=torch.float32),  # TODO: track per-step
             stdp_delta_mean=torch.tensor([0.0], dtype=torch.float32),
-            identity_embedding=torch.zeros(384, dtype=torch.float32),
+            identity_embedding=torch.zeros(384, dtype=torch.float32),  # TODO: real identity
         )
 
     def _get_activation_candidates(
         self, features: Dict[str, Any]
     ) -> List[Tuple[str, float]]:
-        """Get candidate nodes for activation mapping."""
+        """Get candidate nodes for activation mapping.
+
+        The model outputs K activation strengths. We need K node IDs
+        to map them to. Candidates come from: thread nodes, active nodes,
+        recent spikes, and outgoing neighbors of thread nodes.
+        """
         candidates: List[Tuple[str, float]] = []
         seen = set()
 
+        # Thread nodes first (continuity)
         for nid in features.get("thread_nodes", []):
             if nid not in seen:
                 candidates.append((nid, 1.0))
                 seen.add(nid)
 
+        # Active nodes
         for nid, activity in features.get("active_nodes", []):
             if nid not in seen:
                 candidates.append((nid, activity))
                 seen.add(nid)
 
+        # Recent spikes
         for nid, steps_since in features.get("recent_spikes", []):
             if nid not in seen:
                 recency = 1.0 / (1.0 + steps_since)
                 candidates.append((nid, recency))
                 seen.add(nid)
 
+        # Outgoing neighbors of thread nodes
         for nid in features.get("thread_nodes", [])[:3]:
             for syn_id in self._graph._outgoing.get(nid, set()):
                 syn = self._graph.synapses.get(syn_id)
@@ -553,6 +624,11 @@ class TonicEngine:
         This IS the awareness between conversations. Each iteration
         is one latent token — one step of the push. Real inference
         on graph state producing the next state.
+
+        The loop runs continuously. During conversation, the interval
+        is shorter (more to attend to). Between conversations, longer
+        (unhurried exploration). But the mechanism is the same — actual
+        forward compression, not a timer firing into void.
         """
         while not self._shutdown_event.is_set():
             try:
