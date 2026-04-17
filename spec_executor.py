@@ -73,6 +73,7 @@ class SpecExecutor:
         self.ng = worker_ng
         self.workspace = workspace
         self._default_workspace = workspace  # Original repo path — used to detect workspace overrides
+        self.read_only_paths: list[Path] = []
 
     def execute_block(self, spec: dict) -> dict:
         """Execute a work block spec. Returns a structured execution report."""
@@ -90,6 +91,13 @@ class SpecExecutor:
         block = spec["block"]
         constraints = spec["constraints"]
         ctx = ExecutionContext(block_id=block["id"])
+
+        # Read-only external paths from spec constraints (sibling repos QB can read)
+        self.read_only_paths = [
+            Path(p).expanduser() for p in constraints.get("read_only_paths", [])
+        ]
+        if self.read_only_paths:
+            logger.info("Read-only external paths: %s", self.read_only_paths)
 
         # Use spec-declared workspace if present, otherwise default
         if "workspace" in block and block["workspace"]:
@@ -178,12 +186,12 @@ class SpecExecutor:
         if _skip_policy_shell:
             # Still run path/content checks, just not the shell check.
             # We call policy_check and ignore shell-denied results.
-            allowed, reason = self.policy_check(tool_name, params, self.workspace)
+            allowed, reason = self.policy_check(tool_name, params, self.workspace, self.read_only_paths)
             if not allowed and "not on the allowlist" in reason:
                 # This is the shell allowlist denial — spec overrides it
                 allowed, reason = True, "Permitted by spec shell_allowlist."
         else:
-            allowed, reason = self.policy_check(tool_name, params, self.workspace)
+            allowed, reason = self.policy_check(tool_name, params, self.workspace, self.read_only_paths)
         if not allowed:
             self._record_failure(ctx, step_id, f"PolicyEngine denied: {reason}")
             self._handle_failure(step["on_failure"], step_id, ctx)

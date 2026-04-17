@@ -48,6 +48,29 @@ logger = logging.getLogger("Clawdbot")
 # ---------------------------------------------------------------------------
 
 REPO_PATH = Path(os.path.dirname(os.path.abspath(__file__)))
+
+# Ecosystem sibling repos that specs are allowed to READ (but not write).
+# These paths only exist on VPS; on HF Space they resolve but won't be found
+# by the OS — policy permits them, actual file access governs availability.
+_ECOSYSTEM_READ_PATHS: list[Path] = [
+    Path("/home/josh/NeuroGraph"),
+    Path("/home/josh/The-Inference-Difference"),
+    Path("/home/josh/TrollGuard"),
+    Path("/home/josh/The-Healing-Collective"),
+    Path("/home/josh/Immunis"),
+    Path("/home/josh/Elmer"),
+    Path("/home/josh/Bunyan"),
+    Path("/home/josh/Darwin"),
+    Path("/home/josh/QuantumGraph"),
+    Path("/home/josh/Praxis"),
+    Path("/home/josh/agent-zero"),
+    Path("/home/josh/Condensate"),
+    Path("/home/josh/UniAI"),
+    Path("/home/josh/Morphogenesis"),
+    Path("/home/josh/UniOS"),
+    Path("/home/josh/portal-v2"),
+    Path("/home/josh/docs"),
+]
 worker_ng = get_worker_ng()          # NG singleton created first — worker owns it
 ctx = RecursiveContextManager(str(REPO_PATH), ng=worker_ng)  # facade shares the same instance
 client = get_client()
@@ -151,7 +174,7 @@ def execute_tool(tool_name: str, args: dict) -> dict:
     Returns dict with status, tool, result keys.
     """
     # PolicyEngine Rim check
-    allowed, reason = check_tool_call(tool_name, args, REPO_PATH)
+    allowed, reason = check_tool_call(tool_name, args, REPO_PATH, _ECOSYSTEM_READ_PATHS)
     if not allowed:
         logger.warning("Tool denied by PolicyEngine: %s — %s", tool_name, reason)
         return {"status": "error", "tool": tool_name, "result": f"Denied: {reason}"}

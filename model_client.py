@@ -1,4 +1,12 @@
 # ---- Changelog ----
+# [2026-04-17] Claude (Sonnet 4.6) — Enable Qwen3 thinking mode for OpenRouter + HuggingFace
+# What: /think prefix prepended to system prompt in _call_openrouter and _call_huggingface
+#   when QB_THINKING_ENABLED=true (default). Activates Qwen3's native chain-of-thought.
+# Why: QB was running without extended reasoning, producing fabricated anchor text in specs
+#   because it didn't reason through code structure before writing. Thinking on improves
+#   spec anchor quality and cross-repo reasoning.
+# How: Qwen3-native: /think in system prompt activates <think>...</think> CoT blocks.
+#   Controlled by QB_THINKING_ENABLED env var (default "true"). Anthropic provider unchanged.
 # [2026-04-16] Claude (Sonnet 4.6) — Add HuggingFace Inference API as primary provider
 # What: "huggingface" provider added; auto-fallback to OpenRouter on 402/404/503
 # Why: Leverage HF more; OpenRouter stays as backup. Explicit user request.
@@ -200,6 +208,10 @@ def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_to
         model_id = get_model_id()
     last_error = None
 
+    # Enable Qwen3 native thinking mode — prepend /think to activate chain-of-thought
+    if os.getenv("QB_THINKING_ENABLED", "true").lower() == "true":
+        system_prompt = "/think\n" + system_prompt
+
     # Convert Anthropic tool format to OpenAI format
     openai_tools = _convert_tools_to_openai(tools) if tools else []
 
@@ -245,6 +257,10 @@ def _call_huggingface(client, system_prompt, messages, tools, max_retries, max_t
     automatically falls back to OpenRouter so runs don't silently die.
     """
     from openai import OpenAI, APITimeoutError, APIConnectionError, APIStatusError
+
+    # Enable Qwen3 native thinking mode — prepend /think to activate chain-of-thought
+    if os.getenv("QB_THINKING_ENABLED", "true").lower() == "true":
+        system_prompt = "/think\n" + system_prompt
 
     model_id = get_model_id()
     openai_tools = _convert_tools_to_openai(tools) if tools else []

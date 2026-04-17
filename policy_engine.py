@@ -1,4 +1,12 @@
 # ---- Changelog ----
+# [2026-04-17] Claude (Sonnet 4.6) — read_only_paths: ecosystem sibling repo read access (#168)
+# What: can_access_path + check_tool_call gain optional read_only_paths param (list[Path]).
+#   Paths outside workspace are permitted for read_file if they fall under a read_only_paths root.
+# Why: QB workspace boundary (HF Space = /home/josh/Faux_Clawdbot) blocks reads of NeuroGraph
+#   and other sibling repos. Spec execution on VPS workers needs cross-repo read for verification.
+# How: ValueError branch in can_access_path walks read_only_paths before denying. All callers
+#   default to None (backward-compat). app.py passes _ECOSYSTEM_READ_PATHS; spec_executor passes
+#   constraints["read_only_paths"] from the spec.
 # [2026-04-06] Josh + Claude — Add edit_file to policy checks and gating
 # What: edit_file path+content checks in check_tool_call, added to _GATED_TOOLS
 # Why: New edit_file tool needs the same security gates as write_file
@@ -117,7 +125,12 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 )
 
 
-def can_access_path(path: str, mode: str, workspace: Path) -> tuple[bool, str]:
+def can_access_path(
+    path: str,
+    mode: str,
+    workspace: Path,
+    read_only_paths: list[Path] | None = None,
+) -> tuple[bool, str]:
     """Check whether *path* is allowed for the given *mode* within *workspace*.
 
     Parameters
@@ -128,6 +141,10 @@ def can_access_path(path: str, mode: str, workspace: Path) -> tuple[bool, str]:
         ``"read"`` or ``"write"``.
     workspace : Path
         The root directory the bot is allowed to operate within.
+    read_only_paths : list[Path] | None
+        Additional directories that are readable but not writable (e.g. sibling
+        ecosystem repos).  Only consulted when the path falls outside *workspace*
+        and mode is ``"read"``.
 
     Returns
     -------
@@ -147,6 +164,14 @@ def can_access_path(path: str, mode: str, workspace: Path) -> tuple[bool, str]:
     try:
         resolved.relative_to(workspace_resolved)
     except ValueError:
+        # Outside workspace — check read-only external allowlist
+        if mode == "read" and read_only_paths:
+            for ro_root in read_only_paths:
+                try:
+                    resolved.relative_to(Path(ro_root).resolve())
+                    return True, f"Read permitted via external allowlist: {ro_root}"
+                except ValueError:
+                    continue
         return False, (
             f"Path escapes workspace. Resolved path '{resolved}' "
             f"is not inside '{workspace_resolved}'."
@@ -270,6 +295,7 @@ def check_tool_call(
     tool_name: str,
     args: dict,
     workspace: Path,
+    read_only_paths: list[Path] | None = None,
 ) -> tuple[bool, str]:
     """Run Rim checks applicable to *tool_name* and log the result.
 
@@ -289,7 +315,7 @@ def check_tool_call(
     if tool_name in ("write_file", "edit_file", "read_file", "notebook_add", "notebook_delete"):
         path = args.get("path", args.get("file_path", ""))
         mode = "write" if tool_name not in ("read_file",) else "read"
-        allowed, reason = can_access_path(path, mode, workspace)
+        allowed, reason = can_access_path(path, mode, workspace, read_only_paths)
 
     # --- Content checks (write operations) ---
     if allowed and tool_name == "write_file":
