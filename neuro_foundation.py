@@ -2056,9 +2056,9 @@ class Graph:
 
         # Collect current prediction targets for was_predicted tagging
         predicted_targets: Set[str] = set()
-        for pred in self.active_predictions.values():
+        for pred in list(self.active_predictions.values()):
             predicted_targets.add(pred.target_node_id)
-        for pred_state in self._active_predictions.values():
+        for pred_state in list(self._active_predictions.values()):
             predicted_targets.update(pred_state.predicted_targets)
 
         # --- PRIME: inject current into specified nodes ---
@@ -2693,8 +2693,8 @@ class Graph:
         # Collect recently fired nodes for surprise analysis
         recent_window = self.config["prediction_window"]
         recent_fired: Set[str] = set()
-        for nid, spikes in self._recent_spikes.items():
-            for t in spikes:
+        for nid, spikes in list(self._recent_spikes.items()):
+            for t in list(spikes):
                 if self.timestep - t <= recent_window:
                     recent_fired.add(nid)
                     break
@@ -2808,12 +2808,12 @@ class Graph:
         # Build a set of recently-fired-but-not-this-step nodes for quick lookup
         fired_set = set(fired_ids)
         candidates: Set[str] = set()
-        for nid, spikes in self._recent_spikes.items():
+        for nid, spikes in list(self._recent_spikes.items()):
             if nid in fired_set:
                 continue
             if any(
                 0 < (self.timestep - t) <= window
-                for t in spikes
+                for t in list(spikes)
             ):
                 candidates.add(nid)
 
@@ -3757,7 +3757,7 @@ class Graph:
             },
             "recent_spikes": {
                 nid: list(spikes)
-                for nid, spikes in self._recent_spikes.items()
+                for nid, spikes in list(self._recent_spikes.items())
                 if spikes
             },
             "steps_since_last_fire": self._steps_since_last_fire,
