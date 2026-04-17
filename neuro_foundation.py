@@ -1635,7 +1635,7 @@ class Graph:
 
         # 1. Voltage decay: v = v * decay_rate + (1-decay) * resting  (PRD §2.2.4)
         decay = self.config["decay_rate"]
-        for node in self.nodes.values():
+        for node in list(self.nodes.values()):
             node.voltage = node.voltage * decay + (1.0 - decay) * node.resting_potential
 
         # 2. Deliver delayed spikes arriving this timestep
@@ -1928,7 +1928,7 @@ class Graph:
 
         # 10. Track synapse inactivity + decay salience armor (Phase 4).
         salience_decay = self.config["he_salience_decay_rate"]
-        for syn in self.synapses.values():
+        for syn in list(self.synapses.values()):
             syn.inactive_steps += 1
             # Salience decays proportionally toward 1.0 — high salience fades
             # faster than low.  Never drops below 1.0.
@@ -2083,7 +2083,7 @@ class Graph:
             prop_timestep += 1
 
             # 1. Voltage decay
-            for node in self.nodes.values():
+            for node in list(self.nodes.values()):
                 node.voltage = node.voltage * decay + (1.0 - decay) * node.resting_potential
 
             # 2. Deliver delayed spikes from propagation buffer
@@ -3021,7 +3021,7 @@ class Graph:
         if len(self._reward_history) > 1000:
             self._reward_history = self._reward_history[-500:]
 
-        for syn in self.synapses.values():
+        for syn in list(self.synapses.values()):
             if abs(syn.eligibility_trace) < 1e-9:
                 continue
 
@@ -3526,7 +3526,7 @@ class Graph:
         """
         threshold_ceiling = self.config.get("threshold_ceiling", 5.0)
         boosted = 0
-        for node in self.nodes.values():
+        for node in list(self.nodes.values()):
             node.intrinsic_excitability = min(
                 node.intrinsic_excitability * 1.2, 5.0,
             )
