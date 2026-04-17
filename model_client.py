@@ -1,9 +1,9 @@
 # ---- Changelog ----
 # [2026-04-16] Claude (Sonnet 4.6) — Add HuggingFace Inference API as primary provider
-# What: "huggingface" provider added; auto-fallback to OpenRouter on 402 (credits exhausted)
+# What: "huggingface" provider added; auto-fallback to OpenRouter on 402/404/503
 # Why: Leverage HF more; OpenRouter stays as backup. Explicit user request.
-# How: Same OpenAI-compat path as OpenRouter. _call_huggingface() catches 402 and retries
-#      via _call_openrouter(). HF_MODEL_ID env var for HF model name (format differs from OR).
+# How: Same OpenAI-compat path as OpenRouter. _call_huggingface() catches 402/404/503 and
+#      retries via _call_openrouter(). HF_MODEL_ID env var (format differs from OpenRouter).
 # [2026-03-29] Switchblade (TQB / Block E) — Anthropic model client
 # What: Claude API client with retry logic, replacing HuggingFace InferenceClient
 # Why: PRD Block E — swap from Kimi K2.5 (HF) to Claude (Anthropic SDK)
@@ -185,16 +185,19 @@ def _convert_messages_to_openai(messages: list) -> list:
     return converted
 
 
-def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_tokens):
+def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_tokens, model_id=None):
     """OpenRouter call via OpenAI-compatible SDK.
 
     OpenRouter supports tool_use for Claude and other models via the
     standard OpenAI tools format. We convert Anthropic-style tool defs
     to OpenAI format and wrap the response to match Anthropic's structure.
+
+    model_id: override for fallback callers (e.g. HF fallback needs OR model format).
     """
     from openai import APITimeoutError, APIConnectionError, APIStatusError
 
-    model_id = get_model_id()
+    if model_id is None:
+        model_id = get_model_id()
     last_error = None
 
     # Convert Anthropic tool format to OpenAI format
@@ -262,15 +265,17 @@ def _call_huggingface(client, system_prompt, messages, tools, max_retries, max_t
             return _wrap_openai_response(response)
 
         except APIStatusError as e:
-            if e.status_code == 402:
+            if e.status_code < 500:
                 logger.warning(
-                    "HF Inference API 402 (credits/quota). Falling back to OpenRouter."
+                    "HF Inference API %d (model unavailable/not on serverless/credits). Falling back to OpenRouter.",
+                    e.status_code,
                 )
                 or_client = OpenAI(
                     base_url="https://openrouter.ai/api/v1",
                     api_key=os.getenv("OPENROUTER_API_KEY"),
                 )
-                return _call_openrouter(or_client, system_prompt, messages, tools, max_retries, max_tokens)
+                or_model = os.getenv("CODEMINE_MODEL_ID", "qwen/qwen3-coder")
+                return _call_openrouter(or_client, system_prompt, messages, tools, max_retries, max_tokens, model_id=or_model)
             elif e.status_code >= 500:
                 last_error = e
                 logger.warning("HF %d error on attempt %d/%d: %s", e.status_code, attempt + 1, max_retries, e)
