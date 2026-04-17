@@ -1707,7 +1707,7 @@ class Graph:
         experience_threshold = self.config["he_experience_threshold"]
         ema_alpha = self.config["prediction_ema_alpha"]
         # Process by level so child hyperedges fire before parents
-        max_level = max((he.level for he in self.hyperedges.values()), default=0)
+        max_level = max((he.level for he in list(self.hyperedges.values())), default=0)
         for level in range(max_level + 1):
             for hid, he in self.hyperedges.items():
                 if he.level != level:
@@ -2140,7 +2140,7 @@ class Graph:
                     )
 
             # 6. Evaluate hyperedges (pattern completion, output injection)
-            max_level = max((he.level for he in self.hyperedges.values()), default=0)
+            max_level = max((he.level for he in list(self.hyperedges.values())), default=0)
             for level in range(max_level + 1):
                 for hid, he in self.hyperedges.items():
                     if he.level != level or he.is_archived:
@@ -2823,11 +2823,11 @@ class Graph:
         # Build a fast edge-existence index for fired nodes
         existing_pairs: Set[Tuple[str, str]] = set()
         for nid in fired_ids:
-            for sid in self._outgoing.get(nid, set()):
+            for sid in list(self._outgoing.get(nid, set())):
                 syn = self.synapses.get(sid)
                 if syn:
                     existing_pairs.add((nid, syn.post_node_id))
-            for sid in self._incoming.get(nid, set()):
+            for sid in list(self._incoming.get(nid, set())):
                 syn = self.synapses.get(sid)
                 if syn:
                     existing_pairs.add((syn.pre_node_id, nid))
@@ -2916,9 +2916,9 @@ class Graph:
             surprise_rate: surprises / total predictions (0 if none).
             hyperedge_experience_distribution: bucket histogram of activation_counts.
         """
-        weights = [s.weight for s in self.synapses.values()]
-        rates = [n.firing_rate_ema for n in self.nodes.values()]
-        he_counts = [he.activation_count for he in self.hyperedges.values()]
+        weights = [s.weight for s in list(self.synapses.values())]
+        rates = [n.firing_rate_ema for n in list(self.nodes.values())]
+        he_counts = [he.activation_count for he in list(self.hyperedges.values())]
 
         # Phase 2.5: Experience distribution buckets
         exp_dist: Dict[str, int] = {"0": 0, "1-9": 0, "10-99": 0, "100+": 0}
@@ -2976,7 +2976,7 @@ class Graph:
             he_adapt_candidate_count=self._he_adapt_candidate_count,
             he_by_state={
                 state.value: sum(
-                    1 for he in self.hyperedges.values()
+                    1 for he in list(self.hyperedges.values())
                     if not he.is_archived and he.consolidation_state == state
                 )
                 for state in ConsolidationState
@@ -3037,7 +3037,7 @@ class Graph:
                 syn.peak_weight = syn.weight
 
         # Hyperedge threshold learning (PRD §4.3)
-        for he in self.hyperedges.values():
+        for he in list(self.hyperedges.values()):
             if not he.is_learnable:
                 continue
             # Scope check for hyperedges
@@ -3165,7 +3165,7 @@ class Graph:
             fired_set = set(fired_node_ids)
             already_exists = any(
                 he.member_nodes == fired_set
-                for he in self.hyperedges.values()
+                for he in list(self.hyperedges.values())
             )
             if not already_exists and len(fired_set) >= min_nodes:
                 # Verify all nodes still exist
@@ -3678,12 +3678,12 @@ class Graph:
             "version": "0.4.2",
             "timestep": self.timestep,
             "config": self.config,
-            "nodes": {nid: self._serialize_node(n) for nid, n in self.nodes.items()},
-            "synapses": {sid: self._serialize_synapse(s) for sid, s in self.synapses.items()},
-            "hyperedges": {hid: self._serialize_hyperedge(h) for hid, h in self.hyperedges.items()},
+            "nodes": {nid: self._serialize_node(n) for nid, n in list(self.nodes.items())},
+            "synapses": {sid: self._serialize_synapse(s) for sid, s in list(self.synapses.items())},
+            "hyperedges": {hid: self._serialize_hyperedge(h) for hid, h in list(self.hyperedges.items())},
             "archived_hyperedges": {
                 hid: self._serialize_hyperedge(h)
-                for hid, h in self._archived_hyperedges.items()
+                for hid, h in list(self._archived_hyperedges.items())
             },
             # Phase 3: Active synapse-level predictions
             "active_predictions": {
@@ -3821,7 +3821,7 @@ class Graph:
 
         # Filter synapses — both endpoints must be in the extracted set
         extracted_synapses = {}
-        for sid, syn in self.synapses.items():
+        for sid, syn in list(self.synapses.items()):
             if syn.pre_node_id in node_ids and syn.post_node_id in node_ids:
                 extracted_synapses[sid] = self._serialize_synapse(syn)
 
