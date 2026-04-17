@@ -1,4 +1,9 @@
 # ---- Changelog ----
+# [2026-04-16] Claude (Sonnet 4.6) — Add HuggingFace Inference API as primary provider
+# What: "huggingface" provider added; auto-fallback to OpenRouter on 402 (credits exhausted)
+# Why: Leverage HF more; OpenRouter stays as backup. Explicit user request.
+# How: Same OpenAI-compat path as OpenRouter. _call_huggingface() catches 402 and retries
+#      via _call_openrouter(). HF_MODEL_ID env var for HF model name (format differs from OR).
 # [2026-03-29] Switchblade (TQB / Block E) — Anthropic model client
 # What: Claude API client with retry logic, replacing HuggingFace InferenceClient
 # Why: PRD Block E — swap from Kimi K2.5 (HF) to Claude (Anthropic SDK)
@@ -15,7 +20,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Provider selection: "anthropic" or "openrouter"
+# Provider selection: "anthropic", "openrouter", or "huggingface"
 PROVIDER = os.getenv("CODEMINE_PROVIDER", "anthropic").lower()
 
 
@@ -27,13 +32,26 @@ def get_client():
             base_url="https://openrouter.ai/api/v1",
             api_key=os.getenv("OPENROUTER_API_KEY"),
         )
+    elif PROVIDER == "huggingface":
+        from openai import OpenAI
+        return OpenAI(
+            base_url="https://api-inference.huggingface.co/v1",
+            api_key=os.getenv("HF_TOKEN"),
+        )
     else:
         from anthropic import Anthropic
         return Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
 def get_model_id() -> str:
-    """Return the model ID, configurable via env var."""
+    """Return the model ID, configurable via env var.
+
+    HF model IDs use HuggingFace hub format (e.g. Qwen/Qwen3-Coder-480B-A35B-Instruct).
+    OpenRouter uses its own slug format (e.g. qwen/qwen3-coder).
+    Use HF_MODEL_ID and CODEMINE_MODEL_ID to override each independently.
+    """
+    if PROVIDER == "huggingface":
+        return os.getenv("HF_MODEL_ID", "Qwen/Qwen3-Coder-480B-A35B-Instruct")
     if PROVIDER == "openrouter":
         return os.getenv("CODEMINE_MODEL_ID", "anthropic/claude-sonnet-4")
     return os.getenv("CLAUDE_MODEL_ID", "claude-sonnet-4-6")
@@ -52,6 +70,8 @@ def call_model(
     Dispatches to Anthropic or OpenRouter based on CODEMINE_PROVIDER.
     Both support tool_use — OpenRouter via OpenAI-compatible format.
     """
+    if PROVIDER == "huggingface":
+        return _call_huggingface(client, system_prompt, messages, tools, max_retries, max_tokens)
     if PROVIDER == "openrouter":
         return _call_openrouter(client, system_prompt, messages, tools, max_retries, max_tokens)
     return _call_anthropic(client, system_prompt, messages, tools, max_retries, max_tokens)
@@ -206,6 +226,60 @@ def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_to
                 logger.warning("OpenRouter %d error on attempt %d/%d: %s", e.status_code, attempt + 1, max_retries, e)
             else:
                 raise
+
+        if attempt < max_retries - 1:
+            backoff = 2 * (2 ** attempt)
+            logger.info("Retrying in %d seconds...", backoff)
+            time.sleep(backoff)
+
+    raise last_error
+
+
+def _call_huggingface(client, system_prompt, messages, tools, max_retries, max_tokens):
+    """HuggingFace Inference API call via OpenAI-compatible SDK.
+
+    Same interface as OpenRouter. On 402 (credits exhausted or model unavailable),
+    automatically falls back to OpenRouter so runs don't silently die.
+    """
+    from openai import OpenAI, APITimeoutError, APIConnectionError, APIStatusError
+
+    model_id = get_model_id()
+    openai_tools = _convert_tools_to_openai(tools) if tools else []
+    full_messages = [{"role": "system", "content": system_prompt}] + _convert_messages_to_openai(messages)
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            kwargs = {
+                "model": model_id,
+                "max_tokens": max_tokens,
+                "messages": full_messages,
+            }
+            if openai_tools:
+                kwargs["tools"] = openai_tools
+
+            response = client.chat.completions.create(**kwargs)
+            return _wrap_openai_response(response)
+
+        except APIStatusError as e:
+            if e.status_code == 402:
+                logger.warning(
+                    "HF Inference API 402 (credits/quota). Falling back to OpenRouter."
+                )
+                or_client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=os.getenv("OPENROUTER_API_KEY"),
+                )
+                return _call_openrouter(or_client, system_prompt, messages, tools, max_retries, max_tokens)
+            elif e.status_code >= 500:
+                last_error = e
+                logger.warning("HF %d error on attempt %d/%d: %s", e.status_code, attempt + 1, max_retries, e)
+            else:
+                raise
+
+        except (APITimeoutError, APIConnectionError) as e:
+            last_error = e
+            logger.warning("HF connection error on attempt %d/%d: %s", attempt + 1, max_retries, e)
 
         if attempt < max_retries - 1:
             backoff = 2 * (2 ** attempt)
