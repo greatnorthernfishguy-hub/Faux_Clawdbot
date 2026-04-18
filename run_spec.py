@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 # ---- Changelog ----
+# [2026-04-17] Claude Code (Sonnet 4.6) — Discord webhook notification (#15)
+#   What: Added _notify_discord() — posts pass/fail summary to QB_DISCORD_WEBHOOK after
+#         every spec run. Added load_dotenv() so .env in Faux_Clawdbot is picked up when
+#         .bashrc is not sourced (SSH MCP, systemd, etc.).
+#   Why:  QB_DISCORD_WEBHOOK was set in .bashrc but never reached the running process.
+#         QB First Blood produced zero notifications (#15). Silent on failure — a dead
+#         webhook must never interrupt a spec run.
+#   How:  dotenv loads .env before env-var substitution. _notify_discord() called before
+#         final exit in main(). Matches orchestrator.py notification style.
 # [2026-04-17] Claude Code (Sonnet 4.6) — Initial creation
 # What: CLI runner for WorkBlockSpec JSON files on the VPS.
 # Why:  Eliminates the inline python3 -c invocation mess used for #126 and #111.
@@ -32,6 +41,12 @@ import os
 import re
 import sys
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
 
 # ── Credential helpers ────────────────────────────────────────────────────────
 
@@ -72,6 +87,40 @@ def _substitute_env(spec: dict) -> dict:
                 return val
             step["params"]["command"] = re.sub(r"\$\{([^}]+)\}", _replace, cmd)
     return spec
+
+
+# ── Discord notification ─────────────────────────────────────────────────────
+
+def _notify_discord(report: dict) -> None:
+    """Post spec completion summary to Discord webhook. Silent on failure."""
+    try:
+        import requests as _requests
+    except ImportError:
+        return
+    webhook_url = os.environ.get("QB_DISCORD_WEBHOOK", "").strip()
+    if not webhook_url:
+        return
+    try:
+        status = report.get("status", "unknown")
+        summary = report.get("summary", {})
+        block_id = report.get("block_id", "unknown")
+        block_name = report.get("block_name", block_id)
+        passed = summary.get("passed", 0)
+        failed = summary.get("failed", 0)
+        elapsed = summary.get("elapsed_seconds", 0)
+        abort_reason = report.get("abort_reason", "")
+        status_emoji = {"completed": "✅", "aborted": "🚨", "rejected": "❌"}.get(status, "⚠️")
+        lines = [
+            f"{status_emoji} **Spec {status.upper()}** — `{block_id}`",
+            f"Steps: {passed} passed, {failed} failed | Elapsed: {elapsed:.1f}s",
+        ]
+        if abort_reason:
+            lines.append(f"Abort: {abort_reason}")
+        payload = {"content": "\n".join(lines), "username": "Codemine"}
+        _requests.post(webhook_url, json=payload, timeout=5)
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger("run_spec").warning("Discord webhook failed: %s", exc)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -150,6 +199,8 @@ def main() -> int:
     status = report.get("status", "unknown")
     summary = report.get("summary", {})
     failed = summary.get("failed", 0)
+
+    _notify_discord(report)
 
     if status == "completed" and failed == 0:
         print(f"\n✓ {report.get('block_id')} — {status} ({summary.get('passed', 0)} passed, {summary.get('elapsed_seconds', 0):.1f}s)", file=sys.stderr)
