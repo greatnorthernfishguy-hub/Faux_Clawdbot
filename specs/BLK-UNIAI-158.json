@@ -1,0 +1,94 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-UNIAI-158",
+    "name": "UniAI splat_poc: pin setuptools>=78.1.1 in requirements.txt (CVE GHSA-5rjg-fvgr-3xxf)",
+    "agent": "codemine",
+    "scope": "github_repo",
+    "acceptance_criteria": [
+      "setuptools>=78.1.1 present in /home/josh/UniAI/splat_poc/hf_space/requirements.txt",
+      "Changelog entry added to hf_space/app.py",
+      "Change committed and pushed to greatnorthernfishguy-hub/UniAI"
+    ],
+    "depends_on": []
+  },
+  "constraints": {
+    "never": [
+      "Do not modify any file other than requirements.txt and app.py",
+      "Do not change any pinned version other than adding setuptools",
+      "Do not run sudo"
+    ],
+    "anti_drift": [],
+    "tool_allowlist": ["shell_execute", "read_file", "edit_file"],
+    "shell_allowlist": ["git", "grep", "echo", "cat", "python3"],
+    "max_iterations": 15,
+    "timeout": 180
+  },
+  "steps": [
+    {
+      "id": "verify_setuptools_absent",
+      "type": "action",
+      "description": "Confirm setuptools not already pinned (idempotency check)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'setuptools' /home/josh/UniAI/splat_poc/hf_space/requirements.txt || echo 0"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "0"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_setuptools_pin",
+      "type": "action",
+      "description": "Append setuptools>=78.1.1 to requirements.txt",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo 'setuptools>=78.1.1' >> /home/josh/UniAI/splat_poc/hf_space/requirements.txt && echo ADDED"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "ADDED"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_setuptools_present",
+      "type": "action",
+      "description": "Verify the pin landed correctly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'setuptools>=78.1.1' /home/josh/UniAI/splat_poc/hf_space/requirements.txt"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "1"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit and push to GitHub",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/UniAI && git add splat_poc/hf_space/requirements.txt && git commit -m 'Punchlist #158: pin setuptools>=78.1.1, fix CVE GHSA-5rjg-fvgr-3xxf' && git push && echo PUSHED"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "PUSHED"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "final_summary",
+      "type": "action",
+      "description": "Print completion confirmation",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo 'BLK-UNIAI-158 COMPLETE. setuptools>=78.1.1 pinned. HF Space picks it up on next rebuild.'"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "BLK-UNIAI-158 COMPLETE"}]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}
