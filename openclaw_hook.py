@@ -1,4 +1,9 @@
 # ---- Changelog ----
+# [2026-04-20] Codemine (BLK-NG-193) — Wire SimpleVectorDB persistence into save/load
+#   What: _vector_db_path added; __init__ loads sidecar if exists; save() writes it.
+#   Why:  vector_db was recreated empty on every restart — recall() returned
+#         nothing after cold start. Fix: vector_db.npz sidecar alongside main.msgpack.
+#   How:  SimpleVectorDB.save/load added in universal_ingestor.py (same spec).
 # [2026-04-16] Claude (Sonnet 4.6) — Tonic wiring (heuristic mode)
 # What: TonicThread + TonicEngine wired into NeuroGraphMemory. _concurrent_lock added
 #       to graph. ouroboros_cycle() called on every on_message(). Tonic status in stats().
@@ -110,6 +115,7 @@ class NeuroGraphMemory:
         self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         self._checkpoint_path = self._checkpoint_dir / "main.msgpack"
+        self._vector_db_path = self._checkpoint_dir / "vector_db.npz"
 
         # Merge user config over OpenClaw defaults
         snn_config = {**OPENCLAW_SNN_CONFIG, **(config or {})}
@@ -135,6 +141,15 @@ class NeuroGraphMemory:
 
         # Vector DB for semantic search
         self.vector_db = SimpleVectorDB()
+        if self._vector_db_path.exists():
+            try:
+                self.vector_db.load(str(self._vector_db_path))
+                logger.info(
+                    "Restored vector DB from %s (%d entries)",
+                    self._vector_db_path, self.vector_db.count(),
+                )
+            except Exception as exc:
+                logger.warning("Failed to restore vector DB: %s", exc)
 
         # Ingestor with OpenClaw project config
         ingestor_config = get_ingestor_config("openclaw")
@@ -273,6 +288,10 @@ class NeuroGraphMemory:
     def save(self) -> str:
         """Save graph state to checkpoint. Returns the checkpoint path."""
         self.graph.checkpoint(str(self._checkpoint_path), mode=CheckpointMode.FULL)
+        try:
+            self.vector_db.save(str(self._vector_db_path))
+        except Exception as exc:
+            logger.warning("Vector DB save failed (non-fatal): %s", exc)
         logger.info("Checkpoint saved to %s", self._checkpoint_path)
         return str(self._checkpoint_path)
 

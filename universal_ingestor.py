@@ -224,6 +224,36 @@ class SimpleVectorDB:
         """Return all stored IDs."""
         return list(self.embeddings.keys())
 
+    def save(self, path: str) -> None:
+        """Persist vectors, content, and metadata to a compressed .npz file."""
+        import json as _json
+        ids = list(self.embeddings.keys())
+        if not ids:
+            return
+        np.savez_compressed(
+            path,
+            ids=np.array(ids, dtype=object),
+            embeddings=np.array([self.embeddings[i] for i in ids]),
+            content=np.array([self.content[i] for i in ids], dtype=object),
+            metadata=np.array([_json.dumps(self.metadata[i]) for i in ids], dtype=object),
+        )
+
+    def load(self, path: str) -> None:
+        """Restore vectors, content, and metadata from a .npz file."""
+        import json as _json
+        from pathlib import Path as _Path
+        if not _Path(path).exists():
+            return
+        data = np.load(path, allow_pickle=True)
+        ids = data["ids"].tolist()
+        embeddings = data["embeddings"]
+        content = data["content"].tolist()
+        metadata = data["metadata"].tolist()
+        for idx, id_ in enumerate(ids):
+            self.embeddings[id_] = embeddings[idx]
+            self.content[id_] = content[idx]
+            self.metadata[id_] = _json.loads(metadata[idx])
+
 
 # ---------------------------------------------------------------------------
 # Stage 1: Extractors (PRD Addendum §2, Stage 1)
@@ -836,6 +866,12 @@ class EmbeddingEngine:
     Same interface (embed, embed_text) so the rest of the ingestor is unaffected.
 
     # ---- Changelog ----
+# [2026-04-20] Codemine (BLK-NG-193) — Add SimpleVectorDB persistence
+#   What: Added save(path)/load(path) to SimpleVectorDB — .npz sidecar via numpy.
+#   Why:  vector_db was in-memory only; every restart wiped all semantic vectors,
+#         making recall() always return empty (vector_db_count=0 after cold start).
+#   How:  np.savez_compressed stores embeddings+content+metadata. load() restores.
+#         NeuroGraphMemory.save() hooks into both (openclaw_hook.py, BLK-NG-193).
     # [2026-03-30] Josh + Claude — Replaced sentence-transformers with ng_embed
     #   What: Swap EmbeddingEngine internals to use NGEmbed (Snowflake ONNX, dual-pass)
     #   Why:  Dual-pass embedding gives multi-resolution semantic search + outcome tracking.
