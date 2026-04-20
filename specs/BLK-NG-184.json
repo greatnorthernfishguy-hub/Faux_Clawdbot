@@ -15,11 +15,11 @@
   },
   "snap_interface": {
     "inputs": [
-      "/home/josh/NeuroGraph/neurograph_rpc.py",
-      "/home/josh/docs/punchlist/PUNCHLIST.md"
+      {"name": "neurograph_rpc.py", "type": "file", "source_block": "none", "path": "/home/josh/NeuroGraph/neurograph_rpc.py"},
+      {"name": "PUNCHLIST.md", "type": "file", "source_block": "none", "path": "/home/josh/docs/punchlist/PUNCHLIST.md"}
     ],
     "outputs": [
-      "/home/josh/NeuroGraph/neurograph_rpc.py patched at both peer_bridge call sites"
+      {"name": "neurograph_rpc.py", "type": "file", "path": "/home/josh/NeuroGraph/neurograph_rpc.py", "contract": "peer_bridge NameError fixed at both deposit sites"}
     ]
   },
   "constraints": {
