@@ -14,6 +14,8 @@
     ]
   },
   "constraints": {
+    "never": [],
+    "anti_drift": [],
     "tool_allowlist": ["shell_execute"],
     "shell_allowlist": ["python3", "git", "echo", "rm"]
   },
@@ -34,7 +36,7 @@
       "id": "apply_patch",
       "type": "condition",
       "description": "Apply patches if not already applied",
-      "check": { "variable": "$step_count", "operator": "equals", "value": "0" },
+      "check": { "target": "$step_count", "operator": "equals", "value": "0" },
       "if_true": [
         {
           "id": "write_patch_script",
