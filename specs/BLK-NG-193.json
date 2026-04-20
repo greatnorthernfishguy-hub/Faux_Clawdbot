@@ -14,8 +14,8 @@
     ]
   },
   "constraints": {
-    "never": [],
-    "anti_drift": [],
+    "never": ["Do not modify any file other than universal_ingestor.py and openclaw_hook.py", "Do not restart any running service", "Do not remove any existing SimpleVectorDB methods"],
+    "anti_drift": ["Only add save/load to SimpleVectorDB and wire them into NeuroGraphMemory save/init. Nothing else."],
     "tool_allowlist": ["shell_execute"],
     "shell_allowlist": ["python3", "git", "echo", "rm"]
   },
