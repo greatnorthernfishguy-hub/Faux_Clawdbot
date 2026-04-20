@@ -1,0 +1,241 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-155",
+    "name": "ng_tract_bridge.py: delete _peer_events dead code + re-vendor to all 8 modules (#155)",
+    "agent": "codemine",
+    "scope": "local_vps",
+    "acceptance_criteria": [
+      "self._peer_events no longer exists in canonical ng_tract_bridge.py",
+      "_enforce_window_limit() no longer exists in canonical ng_tract_bridge.py",
+      "python3 -m py_compile /home/josh/NeuroGraph/ng_tract_bridge.py exits 0",
+      "All 8 vendored copies match canonical (same _peer_events absence)",
+      "Punchlist #155 marked DONE in /home/josh/docs/punchlist/PUNCHLIST.md"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {
+        "name": "ng_tract_bridge.py",
+        "type": "file",
+        "source_block": "none",
+        "path": "/home/josh/NeuroGraph/ng_tract_bridge.py"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "ng_tract_bridge.py",
+        "type": "file",
+        "path": "/home/josh/NeuroGraph/ng_tract_bridge.py",
+        "contract": "_peer_events and _enforce_window_limit deleted; all dead code removed"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not modify neuro_foundation.py, openclaw_hook.py, or any protected NeuroGraph file",
+      "Do not change the signatures or docstrings of get_recommendations() or detect_novelty()",
+      "Do not restart any running service",
+      "Do not modify any file other than ng_tract_bridge.py copies and the punchlist"
+    ],
+    "anti_drift": [
+      "Only delete _peer_events infrastructure and its dead code. Do not refactor, rename, or restructure any other part of ng_tract_bridge.py."
+    ],
+    "tool_allowlist": [
+      "shell_execute",
+      "read_file"
+    ],
+    "shell_allowlist": [
+      "python3",
+      "grep",
+      "git",
+      "cp",
+      "echo",
+      "cat",
+      "wc"
+    ],
+    "max_iterations": 35,
+    "timeout_seconds": 600
+  },
+  "steps": [
+    {
+      "id": "idempotency_check",
+      "type": "action",
+      "description": "Check if _peer_events still exists in canonical — skip all edits if already clean",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'self._peer_events' /home/josh/NeuroGraph/ng_tract_bridge.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "result_is_not_error" }
+        ]
+      },
+      "on_failure": "abort",
+      "bind_result": "$peer_events_count"
+    },
+    {
+      "id": "apply_edits",
+      "type": "condition",
+      "description": "Apply all 8 edits only if _peer_events still present",
+      "check": {
+        "operator": "not_equals",
+        "value": "0",
+        "target": "$peer_events_count"
+      },
+      "if_true": [
+        {
+          "id": "write_patch_script",
+          "type": "action",
+          "description": "Write Python patch script to /tmp for all 8 edits",
+          "tool": "shell_execute",
+          "params": {
+            "command": "cat > /tmp/ng155_patch.py << 'PYEOF'\nimport sys\n\npath = '/home/josh/NeuroGraph/ng_tract_bridge.py'\nc = open(path, encoding='utf-8').read()\nerrors = []\n\n# Edit 1: Remove _peer_events init block (lines ~387-391)\nOLD1 = (\n    '\\n        # Cross-module event cache (for recommendations and novelty)\\n'\n    '        # Holds typed BTF entry objects (PyOutcomeEntry, PyTopologyEntry,\\n'\n    '        # PyExperienceEntry) and/or legacy dicts from JSONL fallback.\\n'\n    '        self._peer_events: List[Any] = []\\n'\n    '        self._peer_events_max = 50_000\\n'\n)\nif c.count(OLD1) != 1:\n    errors.append(f'edit1: found {c.count(OLD1)}x (expected 1)')\nelse:\n    c = c.replace(OLD1, '\\n', 1)\n    print('edit1_ok: removed _peer_events init block')\n\n# Edit 2: Simplify record_outcome() — remove peer_count block\nOLD2 = (\n    '        # Return cross-module insights from cached peer events\\n'\n    '        peer_count = len(self._peer_events)\\n'\n    '        if peer_count > 0:\\n'\n    '            return {\\n'\n    '                \"cross_module\": True,\\n'\n    '                \"peer_events_cached\": peer_count,\\n'\n    '                \"peer_modules\": list(set(\\n'\n    '                    self._get_module_id(e) for e in self._peer_events\\n'\n    '                    if self._get_module_id(e) != self.module_id\\n'\n    '                )),\\n'\n    '            }\\n'\n    '\\n'\n    '        return {\"cross_module\": True, \"peer_events_cached\": 0}'\n)\nNEW2 = '        return {\"cross_module\": True, \"peer_events_cached\": 0}'\nif c.count(OLD2) != 1:\n    errors.append(f'edit2: found {c.count(OLD2)}x (expected 1)')\nelse:\n    c = c.replace(OLD2, NEW2, 1)\n    print('edit2_ok: simplified record_outcome return')\n\n# Edit 3: Remove dead code in get_recommendations() after return None\nOLD3 = (\n    '        # (#155 test: returning None lets ng_lite.py fall through to _core.get_recommendations)\\n'\n    '        self._drain_all()\\n'\n    '        return None\\n'\n    '\\n'\n    '        emb = self._normalize(embedding)\\n'\n    '\\n'\n    '        scored: List[Tuple[str, float, str]] = []\\n'\n    '        for event in self._peer_events:\\n'\n    '            event_module = self._get_module_id(event)\\n'\n    '            if event_module == module_id:\\n'\n    '                continue\\n'\n    '\\n'\n    '            peer_emb = self._get_embedding(event)\\n'\n    '            if peer_emb is None or peer_emb.size == 0 or peer_emb.shape[0] != emb.shape[0]:\\n'\n    '                continue\\n'\n    '\\n'\n    '            peer_emb = self._normalize(peer_emb)\\n'\n    '            similarity = float(np.dot(emb, peer_emb))\\n'\n    '\\n'\n    '            if similarity >= self._relevance_threshold:\\n'\n    '                target = self._get_target_id(event)\\n'\n    '                reasoning = (\\n'\n    '                    f\"Cross-module recommendation from {event_module} \"\\n'\n    '                    f\"(similarity={similarity:.3f})\"\\n'\n    '                )\\n'\n    '                scored.append((target, similarity, reasoning))\\n'\n    '\\n'\n    '        if not scored:\\n'\n    '            return None\\n'\n    '\\n'\n    '        scored.sort(key=lambda x: x[1], reverse=True)\\n'\n    '        seen_targets: set = set()\\n'\n    '        deduped: List[Tuple[str, float, str]] = []\\n'\n    '        for target, sim, reason in scored:\\n'\n    '            if target not in seen_targets:\\n'\n    '                seen_targets.add(target)\\n'\n    '                deduped.append((target, sim, reason))\\n'\n    '                if len(deduped) >= top_k:\\n'\n    '                    break\\n'\n    '\\n'\n    '        return deduped\\n'\n)\nNEW3 = (\n    '        # Substrate handles cross-module similarity; drain River then defer to _core.\\n'\n    '        self._drain_all()\\n'\n    '        return None\\n'\n)\nif c.count(OLD3) != 1:\n    errors.append(f'edit3: found {c.count(OLD3)}x (expected 1)')\nelse:\n    c = c.replace(OLD3, NEW3, 1)\n    print('edit3_ok: removed dead code in get_recommendations')\n\n# Edit 4: Remove dead code in detect_novelty() after return None\nOLD4 = (\n    '        # (#155 test: returning None lets ng_lite.py fall through to _core.detect_novelty)\\n'\n    '        self._drain_all()\\n'\n    '        return None\\n'\n    '\\n'\n    '        emb = self._normalize(embedding)\\n'\n    '        max_similarity = 0.0\\n'\n    '\\n'\n    '        for event in self._peer_events:\\n'\n    '            peer_emb = self._get_embedding(event)\\n'\n    '            if peer_emb is None or peer_emb.size == 0 or peer_emb.shape[0] != emb.shape[0]:\\n'\n    '                continue\\n'\n    '\\n'\n    '            peer_emb = self._normalize(peer_emb)\\n'\n    '            similarity = float(np.dot(emb, peer_emb))\\n'\n    '            if similarity > max_similarity:\\n'\n    '                max_similarity = similarity\\n'\n    '\\n'\n    '        return max(0.0, 1.0 - max_similarity)\\n'\n)\nNEW4 = (\n    '        # Substrate handles cross-module novelty; drain River then defer to _core.\\n'\n    '        self._drain_all()\\n'\n    '        return None\\n'\n)\nif c.count(OLD4) != 1:\n    errors.append(f'edit4: found {c.count(OLD4)}x (expected 1)')\nelse:\n    c = c.replace(OLD4, NEW4, 1)\n    print('edit4_ok: removed dead code in detect_novelty')\n\n# Edit 5: Simplify sync_state() return — remove _peer_events refs\nOLD5 = (\n    '        return {\\n'\n    '            \"synced\": True,\\n'\n    '            \"drain_count\": self._drain_count,\\n'\n    '            \"peer_events_cached\": len(self._peer_events),\\n'\n    '            \"peer_modules\": list(set(\\n'\n    '                self._get_module_id(e) for e in self._peer_events\\n'\n    '                if self._get_module_id(e) != self.module_id\\n'\n    '            )),\\n'\n    '        }\\n'\n    '\\n'\n    '    # -------------------------------------------------------------------\\n'\n    '    # Connection management'\n)\nNEW5 = (\n    '        return {\\n'\n    '            \"synced\": True,\\n'\n    '            \"drain_count\": self._drain_count,\\n'\n    '            \"peer_events_cached\": 0,\\n'\n    '            \"peer_modules\": [],\\n'\n    '        }\\n'\n    '\\n'\n    '    # -------------------------------------------------------------------\\n'\n    '    # Connection management'\n)\nif c.count(OLD5) != 1:\n    errors.append(f'edit5: found {c.count(OLD5)}x (expected 1)')\nelse:\n    c = c.replace(OLD5, NEW5, 1)\n    print('edit5_ok: simplified sync_state return')\n\n# Edit 6: Remove _peer_events.extend + _enforce_window_limit call from _drain_all\nOLD6 = (\n    '        # Add to cache, maintaining bounded size\\n'\n    '        self._peer_events.extend(new_events)\\n'\n    '        self._enforce_window_limit()\\n'\n    '\\n'\n    '        if new_events:'\n)\nNEW6 = '        if new_events:'\nif c.count(OLD6) != 1:\n    errors.append(f'edit6: found {c.count(OLD6)}x (expected 1)')\nelse:\n    c = c.replace(OLD6, NEW6, 1)\n    print('edit6_ok: removed _peer_events.extend from _drain_all')\n\n# Edit 7: Delete _enforce_window_limit method\nOLD7 = (\n    '    def _enforce_window_limit(self) -> None:\\n'\n    '        \"\"\"Trim accumulated peer events to rolling-window max.\\n'\n    '\\n'\n    '        Absorb ALL events at drain time; evict oldest only after absorption\\n'\n    '        exceeds the window. Matches Darwin recorder._enforce_window_limit\\n'\n    '        (50k). Never cap mid-drain -- Law 7: no experience dropped at intake.\\n'\n    '        \"\"\"\\n'\n    '        if len(self._peer_events) > self._peer_events_max:\\n'\n    '            excess = len(self._peer_events) - self._peer_events_max\\n'\n    '            self._peer_events = self._peer_events[excess:]\\n'\n    '\\n'\n    '    def _drain_single_tract('\n)\nNEW7 = '    def _drain_single_tract('\nif c.count(OLD7) != 1:\n    errors.append(f'edit7: found {c.count(OLD7)}x (expected 1)')\nelse:\n    c = c.replace(OLD7, NEW7, 1)\n    print('edit7_ok: deleted _enforce_window_limit method')\n\n# Edit 8: Fix stats() peer_events_cached line\nOLD8 = '            \"peer_events_cached\": len(self._peer_events),'\nNEW8 = '            \"peer_events_cached\": 0,'\nif c.count(OLD8) != 1:\n    errors.append(f'edit8: found {c.count(OLD8)}x (expected 1)')\nelse:\n    c = c.replace(OLD8, NEW8, 1)\n    print('edit8_ok: fixed stats() peer_events_cached')\n\n# Edit 9: Add changelog entry\nCHANGELOG_MARKER = '# [2026-04-19] Claude Code (Sonnet 4.6) -- punchlist #155 test:'\nif CHANGELOG_MARKER in c:\n    NEW_ENTRY = (\n        '# [2026-04-20] Codemine (BLK-NG-155) -- delete _peer_events dead code (#155 cleanup)\\n'\n        '#   What: Removed _peer_events list, _peer_events_max, _enforce_window_limit(),\\n'\n        '#          dead code in get_recommendations() and detect_novelty(), and all\\n'\n        '#          _peer_events refs from record_outcome(), sync_state(), _drain_all(), stats().\\n'\n        '#   Why:  Test period (2026-04-19) confirmed no regressions. get_recommendations()\\n'\n        '#         and detect_novelty() now permanently defer to _core substrate (ng_lite.py).\\n'\n        '#         _peer_events was an ever-growing cache that shadowed Hebbian learning.\\n'\n        '#   How:  8 targeted replacements. All count==1 guards passed before apply.\\n'\n    )\n    if NEW_ENTRY[:40] not in c:\n        c = c.replace(CHANGELOG_MARKER, NEW_ENTRY + CHANGELOG_MARKER, 1)\n        print('edit9_ok: changelog entry added')\n    else:\n        print('edit9_skip: changelog already present')\nelse:\n    errors.append('edit9: changelog marker not found')\n\nif errors:\n    print('PATCH_ERRORS: ' + '; '.join(errors))\n    sys.exit(1)\n\nopen(path, 'w', encoding='utf-8').write(c)\nprint('PATCHES_APPLIED')\nPYEOF\necho SCRIPT_WRITTEN"
+          },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "SCRIPT_WRITTEN" }
+            ]
+          },
+          "on_failure": "abort"
+        },
+        {
+          "id": "run_patch_script",
+          "type": "action",
+          "description": "Execute the patch script against canonical ng_tract_bridge.py",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 /tmp/ng155_patch.py"
+          },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "PATCHES_APPLIED" },
+              { "operator": "not_contains", "value": "PATCH_ERRORS" }
+            ]
+          },
+          "on_failure": "abort"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "skip_edits",
+          "type": "action",
+          "description": "_peer_events already gone — edits already applied",
+          "tool": "shell_execute",
+          "params": { "command": "echo EDITS_ALREADY_APPLIED" },
+          "validation": {
+            "checks": [ { "operator": "contains", "value": "ALREADY_APPLIED" } ]
+          },
+          "on_failure": "continue"
+        }
+      ]
+    },
+    {
+      "id": "verify_clean",
+      "type": "action",
+      "description": "Confirm _peer_events and _enforce_window_limit are gone from canonical",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'self._peer_events\\|_enforce_window_limit' /home/josh/NeuroGraph/ng_tract_bridge.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "equals", "value": "0" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify canonical compiles clean after patches",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile /home/josh/NeuroGraph/ng_tract_bridge.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "SYNTAX_OK" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "revendor",
+      "type": "action",
+      "description": "Copy cleaned canonical to all 8 vendored module locations",
+      "tool": "shell_execute",
+      "params": {
+        "command": "SRC=/home/josh/NeuroGraph/ng_tract_bridge.py; for dest in /home/josh/The-Inference-Difference/ng_tract_bridge.py /home/josh/ecosystem-monitor/ng_tract_bridge.py /home/josh/Darwin/ng_tract_bridge.py /home/josh/Bunyan/ng_tract_bridge.py /home/josh/Elmer/ng_tract_bridge.py /home/josh/The-Healing-Collective/ng_tract_bridge.py /home/josh/Immunis/ng_tract_bridge.py /home/josh/TrollGuard/ng_tract_bridge.py; do cp \"$SRC\" \"$dest\" && echo \"VENDORED: $dest\"; done && echo REVENDOR_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "REVENDOR_DONE" },
+          { "operator": "not_contains", "value": "cannot" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_canonical",
+      "type": "action",
+      "description": "Commit canonical ng_tract_bridge.py to NeuroGraph repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/NeuroGraph && git add ng_tract_bridge.py && git diff --cached --stat && git commit -m 'Delete _peer_events dead code from ng_tract_bridge.py (#155 cleanup)' && git push && echo CANONICAL_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "CANONICAL_DONE" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_modules",
+      "type": "action",
+      "description": "Commit re-vendored ng_tract_bridge.py in each module repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "MSG='Re-vendor ng_tract_bridge.py: delete _peer_events dead code (#155)'; for dir in /home/josh/The-Inference-Difference /home/josh/ecosystem-monitor /home/josh/Darwin /home/josh/Bunyan /home/josh/Elmer /home/josh/The-Healing-Collective /home/josh/Immunis /home/josh/TrollGuard; do cd \"$dir\" && git add ng_tract_bridge.py && git diff --cached --stat && git commit -m \"$MSG\" && git push && echo \"COMMITTED: $dir\" || echo \"SKIP: $dir\"; done && echo MODULES_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "MODULES_DONE" }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "update_punchlist",
+      "type": "action",
+      "description": "Mark punchlist #155 DONE",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 << 'PYEOF'\nimport sys\npath = '/home/josh/docs/punchlist/PUNCHLIST.md'\nc = open(path, encoding='utf-8').read()\nif '| 155 |' not in c:\n    print('FAILED: #155 row not found'); sys.exit(1)\nrow_start = c.index('| 155 |')\nrow_end = c.index('\\n', row_start)\nrow = c[row_start:row_end]\nif '**DONE**' in row:\n    print('PUNCHLIST_ALREADY_DONE'); sys.exit(0)\nnew_row = row.replace('| **IN TEST** (2026-04-19) |', '| **DONE** (2026-04-20) — BLK-NG-155: _peer_events deleted, re-vendored to 8 modules |')\nif new_row == row:\n    new_row = row.replace('| OPEN |', '| **DONE** (2026-04-20) — BLK-NG-155: _peer_events deleted, re-vendored to 8 modules |')\nopen(path, 'w', encoding='utf-8').write(c[:row_start] + new_row + c[row_end:])\nprint('PUNCHLIST_UPDATED')\nPYEOF"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "PUNCHLIST" }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "commit_docs",
+      "type": "action",
+      "description": "Commit punchlist update to docs repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/docs && git add punchlist/PUNCHLIST.md && git commit -m '#155 DONE: _peer_events dead code deleted, re-vendored (BLK-NG-155)' && git push && echo DOCS_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "DOCS_DONE" }
+        ]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}
