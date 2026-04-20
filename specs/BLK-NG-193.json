@@ -1,0 +1,119 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-193",
+    "name": "Add SimpleVectorDB persistence — cold-restart recall (#193)",
+    "agent": "codemine",
+    "scope": "Faux_Clawdbot",
+    "acceptance_criteria": [
+      "SimpleVectorDB.save(path) and .load(path) present in universal_ingestor.py",
+      "NeuroGraphMemory.__init__ loads vector_db.npz sidecar on init if it exists",
+      "NeuroGraphMemory.save() writes vector_db.npz alongside main.msgpack",
+      "Smoke test: ingest -> save -> fresh NeuroGraphMemory instance -> vector_db.count() > 0",
+      "python3 -m py_compile passes on both modified files"
+    ]
+  },
+  "constraints": {
+    "tool_allowlist": ["shell_execute"],
+    "shell_allowlist": ["python3", "git", "echo", "rm"]
+  },
+  "steps": [
+    {
+      "id": "idempotency_check",
+      "type": "action",
+      "description": "Count save(self, path) in universal_ingestor.py — 0 means patch not yet applied",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"print(open('universal_ingestor.py').read().count('def save(self, path: str)'))\""
+      },
+      "bind_result": "$step_count",
+      "validation": { "checks": [{ "operator": "result_is_string" }] },
+      "on_failure": "abort"
+    },
+    {
+      "id": "apply_patch",
+      "type": "condition",
+      "description": "Apply patches if not already applied",
+      "check": { "variable": "$step_count", "operator": "equals", "value": "0" },
+      "if_true": [
+        {
+          "id": "write_patch_script",
+          "type": "action",
+          "description": "Write BLK-NG-193 patch script to /tmp",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 -c \"import base64; open('/tmp/ng193_patch.py','wb').write(base64.b64decode('IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJCTEstTkctMTkzOiBBZGQgU2ltcGxlVmVjdG9yREIgcGVyc2lzdGVuY2UuIiIiCmltcG9ydCBzeXMKCiMg4pSA4pSAIFBhdGNoIDE6IHVuaXZlcnNhbF9pbmdlc3Rvci5weSDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKClVJX1BBVEggPSAidW5pdmVyc2FsX2luZ2VzdG9yLnB5Igp1aSA9IG9wZW4oVUlfUEFUSCkucmVhZCgpCgpVSV9PTEQgPSAoCiAgICAnICAgIGRlZiBhbGxfaWRzKHNlbGYpIC0+IExpc3Rbc3RyXTpcbicKICAgICcgICAgICAgICIiIlJldHVybiBhbGwgc3RvcmVkIElEcy4iIiJcbicKICAgICcgICAgICAgIHJldHVybiBsaXN0KHNlbGYuZW1iZWRkaW5ncy5rZXlzKCkpXG4nCiAgICAnXG4nCiAgICAnXG4nCiAgICAnIyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS1cbicKICAgICcjIFN0YWdlIDE6IEV4dHJhY3RvcnMgKFBSRCBBZGRlbmR1bSDCpzIsIFN0YWdlIDEpJwopCgpVSV9ORVcgPSAoCiAgICAnICAgIGRlZiBhbGxfaWRzKHNlbGYpIC0+IExpc3Rbc3RyXTpcbicKICAgICcgICAgICAgICIiIlJldHVybiBhbGwgc3RvcmVkIElEcy4iIiJcbicKICAgICcgICAgICAgIHJldHVybiBsaXN0KHNlbGYuZW1iZWRkaW5ncy5rZXlzKCkpXG4nCiAgICAnXG4nCiAgICAnICAgIGRlZiBzYXZlKHNlbGYsIHBhdGg6IHN0cikgLT4gTm9uZTpcbicKICAgICcgICAgICAgICIiIlBlcnNpc3QgdmVjdG9ycywgY29udGVudCwgYW5kIG1ldGFkYXRhIHRvIGEgY29tcHJlc3NlZCAubnB6IGZpbGUuIiIiXG4nCiAgICAnICAgICAgICBpbXBvcnQganNvbiBhcyBfanNvblxuJwogICAgJyAgICAgICAgaWRzID0gbGlzdChzZWxmLmVtYmVkZGluZ3Mua2V5cygpKVxuJwogICAgJyAgICAgICAgaWYgbm90IGlkczpcbicKICAgICcgICAgICAgICAgICByZXR1cm5cbicKICAgICcgICAgICAgIG5wLnNhdmV6X2NvbXByZXNzZWQoXG4nCiAgICAnICAgICAgICAgICAgcGF0aCxcbicKICAgICcgICAgICAgICAgICBpZHM9bnAuYXJyYXkoaWRzLCBkdHlwZT1vYmplY3QpLFxuJwogICAgJyAgICAgICAgICAgIGVtYmVkZGluZ3M9bnAuYXJyYXkoW3NlbGYuZW1iZWRkaW5nc1tpXSBmb3IgaSBpbiBpZHNdKSxcbicKICAgICcgICAgICAgICAgICBjb250ZW50PW5wLmFycmF5KFtzZWxmLmNvbnRlbnRbaV0gZm9yIGkgaW4gaWRzXSwgZHR5cGU9b2JqZWN0KSxcbicKICAgICcgICAgICAgICAgICBtZXRhZGF0YT1ucC5hcnJheShbX2pzb24uZHVtcHMoc2VsZi5tZXRhZGF0YVtpXSkgZm9yIGkgaW4gaWRzXSwgZHR5cGU9b2JqZWN0KSxcbicKICAgICcgICAgICAgIClcbicKICAgICdcbicKICAgICcgICAgZGVmIGxvYWQoc2VsZiwgcGF0aDogc3RyKSAtPiBOb25lOlxuJwogICAgJyAgICAgICAgIiIiUmVzdG9yZSB2ZWN0b3JzLCBjb250ZW50LCBhbmQgbWV0YWRhdGEgZnJvbSBhIC5ucHogZmlsZS4iIiJcbicKICAgICcgICAgICAgIGltcG9ydCBqc29uIGFzIF9qc29uXG4nCiAgICAnICAgICAgICBmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGggYXMgX1BhdGhcbicKICAgICcgICAgICAgIGlmIG5vdCBfUGF0aChwYXRoKS5leGlzdHMoKTpcbicKICAgICcgICAgICAgICAgICByZXR1cm5cbicKICAgICcgICAgICAgIGRhdGEgPSBucC5sb2FkKHBhdGgsIGFsbG93X3BpY2tsZT1UcnVlKVxuJwogICAgJyAgICAgICAgaWRzID0gZGF0YVsiaWRzIl0udG9saXN0KClcbicKICAgICcgICAgICAgIGVtYmVkZGluZ3MgPSBkYXRhWyJlbWJlZGRpbmdzIl1cbicKICAgICcgICAgICAgIGNvbnRlbnQgPSBkYXRhWyJjb250ZW50Il0udG9saXN0KClcbicKICAgICcgICAgICAgIG1ldGFkYXRhID0gZGF0YVsibWV0YWRhdGEiXS50b2xpc3QoKVxuJwogICAgJyAgICAgICAgZm9yIGlkeCwgaWRfIGluIGVudW1lcmF0ZShpZHMpOlxuJwogICAgJyAgICAgICAgICAgIHNlbGYuZW1iZWRkaW5nc1tpZF9dID0gZW1iZWRkaW5nc1tpZHhdXG4nCiAgICAnICAgICAgICAgICAgc2VsZi5jb250ZW50W2lkX10gPSBjb250ZW50W2lkeF1cbicKICAgICcgICAgICAgICAgICBzZWxmLm1ldGFkYXRhW2lkX10gPSBfanNvbi5sb2FkcyhtZXRhZGF0YVtpZHhdKVxuJwogICAgJ1xuJwogICAgJ1xuJwogICAgJyMgLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tXG4nCiAgICAnIyBTdGFnZSAxOiBFeHRyYWN0b3JzIChQUkQgQWRkZW5kdW0gwqcyLCBTdGFnZSAxKScKKQoKaWYgVUlfT0xEIG5vdCBpbiB1aToKICAgIHByaW50KCJQQVRDSF9FUlJPUjogdW5pdmVyc2FsX2luZ2VzdG9yIGFuY2hvciBub3QgZm91bmQiLCBmaWxlPXN5cy5zdGRlcnIpCiAgICBzeXMuZXhpdCgxKQp1aSA9IHVpLnJlcGxhY2UoVUlfT0xELCBVSV9ORVcsIDEpCgpVSV9DTF9PTEQgPSAiIyAtLS0tIENoYW5nZWxvZyAtLS0tXG4iCmlmICJCTEstTkctMTkzIiBub3QgaW4gdWkgYW5kIFVJX0NMX09MRCBpbiB1aToKICAgIHVpID0gdWkucmVwbGFjZShVSV9DTF9PTEQsCiAgICAgICAgIiMgLS0tLSBDaGFuZ2Vsb2cgLS0tLVxuIgogICAgICAgICIjIFsyMDI2LTA0LTIwXSBDb2RlbWluZSAoQkxLLU5HLTE5Mykg4oCUIEFkZCBTaW1wbGVWZWN0b3JEQiBwZXJzaXN0ZW5jZVxuIgogICAgICAgICIjICAgV2hhdDogQWRkZWQgc2F2ZShwYXRoKS9sb2FkKHBhdGgpIHRvIFNpbXBsZVZlY3RvckRCIOKAlCAubnB6IHNpZGVjYXIgdmlhIG51bXB5LlxuIgogICAgICAgICIjICAgV2h5OiAgdmVjdG9yX2RiIHdhcyBpbi1tZW1vcnkgb25seTsgZXZlcnkgcmVzdGFydCB3aXBlZCBhbGwgc2VtYW50aWMgdmVjdG9ycyxcbiIKICAgICAgICAiIyAgICAgICAgIG1ha2luZyByZWNhbGwoKSBhbHdheXMgcmV0dXJuIGVtcHR5ICh2ZWN0b3JfZGJfY291bnQ9MCBhZnRlciBjb2xkIHN0YXJ0KS5cbiIKICAgICAgICAiIyAgIEhvdzogIG5wLnNhdmV6X2NvbXByZXNzZWQgc3RvcmVzIGVtYmVkZGluZ3MrY29udGVudCttZXRhZGF0YS4gbG9hZCgpIHJlc3RvcmVzLlxuIgogICAgICAgICIjICAgICAgICAgTmV1cm9HcmFwaE1lbW9yeS5zYXZlKCkgaG9va3MgaW50byBib3RoIChvcGVuY2xhd19ob29rLnB5LCBCTEstTkctMTkzKS5cbiIsCiAgICAgICAgMSkKCm9wZW4oVUlfUEFUSCwgInciKS53cml0ZSh1aSkKcHJpbnQoZiJQYXRjaGVkIHtVSV9QQVRIfSIpCgojIOKUgOKUgCBQYXRjaCAyOiBvcGVuY2xhd19ob29rLnB5IOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgAoKT0hfUEFUSCA9ICJvcGVuY2xhd19ob29rLnB5IgpvaCA9IG9wZW4oT0hfUEFUSCkucmVhZCgpCgojIEE6IGFkZCBfdmVjdG9yX2RiX3BhdGggYWZ0ZXIgX2NoZWNrcG9pbnRfcGF0aApPSF9BX09MRCA9ICgKICAgICcgICAgICAgIHNlbGYuX2NoZWNrcG9pbnRfcGF0aCA9IHNlbGYuX2NoZWNrcG9pbnRfZGlyIC8gIm1haW4ubXNncGFjayJcbicKICAgICdcbicKICAgICcgICAgICAgICMgTWVyZ2UgdXNlciBjb25maWcgb3ZlciBPcGVuQ2xhdyBkZWZhdWx0cycKKQpPSF9BX05FVyA9ICgKICAgICcgICAgICAgIHNlbGYuX2NoZWNrcG9pbnRfcGF0aCA9IHNlbGYuX2NoZWNrcG9pbnRfZGlyIC8gIm1haW4ubXNncGFjayJcbicKICAgICcgICAgICAgIHNlbGYuX3ZlY3Rvcl9kYl9wYXRoID0gc2VsZi5fY2hlY2twb2ludF9kaXIgLyAidmVjdG9yX2RiLm5weiJcbicKICAgICdcbicKICAgICcgICAgICAgICMgTWVyZ2UgdXNlciBjb25maWcgb3ZlciBPcGVuQ2xhdyBkZWZhdWx0cycKKQoKaWYgT0hfQV9PTEQgbm90IGluIG9oOgogICAgcHJpbnQoIlBBVENIX0VSUk9SOiBvcGVuY2xhd19ob29rIGFuY2hvciBBIG5vdCBmb3VuZCIsIGZpbGU9c3lzLnN0ZGVycikKICAgIHN5cy5leGl0KDEpCm9oID0gb2gucmVwbGFjZShPSF9BX09MRCwgT0hfQV9ORVcsIDEpCgojIEI6IGxvYWQgc2lkZWNhciBhZnRlciBTaW1wbGVWZWN0b3JEQigpCk9IX0JfT0xEID0gKAogICAgJyAgICAgICAgIyBWZWN0b3IgREIgZm9yIHNlbWFudGljIHNlYXJjaFxuJwogICAgJyAgICAgICAgc2VsZi52ZWN0b3JfZGIgPSBTaW1wbGVWZWN0b3JEQigpXG4nCiAgICAnXG4nCiAgICAnICAgICAgICAjIEluZ2VzdG9yIHdpdGggT3BlbkNsYXcgcHJvamVjdCBjb25maWcnCikKT0hfQl9ORVcgPSAoCiAgICAnICAgICAgICAjIFZlY3RvciBEQiBmb3Igc2VtYW50aWMgc2VhcmNoXG4nCiAgICAnICAgICAgICBzZWxmLnZlY3Rvcl9kYiA9IFNpbXBsZVZlY3RvckRCKClcbicKICAgICcgICAgICAgIGlmIHNlbGYuX3ZlY3Rvcl9kYl9wYXRoLmV4aXN0cygpOlxuJwogICAgJyAgICAgICAgICAgIHRyeTpcbicKICAgICcgICAgICAgICAgICAgICAgc2VsZi52ZWN0b3JfZGIubG9hZChzdHIoc2VsZi5fdmVjdG9yX2RiX3BhdGgpKVxuJwogICAgJyAgICAgICAgICAgICAgICBsb2dnZXIuaW5mbyhcbicKICAgICcgICAgICAgICAgICAgICAgICAgICJSZXN0b3JlZCB2ZWN0b3IgREIgZnJvbSAlcyAoJWQgZW50cmllcykiLFxuJwogICAgJyAgICAgICAgICAgICAgICAgICAgc2VsZi5fdmVjdG9yX2RiX3BhdGgsIHNlbGYudmVjdG9yX2RiLmNvdW50KCksXG4nCiAgICAnICAgICAgICAgICAgICAgIClcbicKICAgICcgICAgICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGV4YzpcbicKICAgICcgICAgICAgICAgICAgICAgbG9nZ2VyLndhcm5pbmcoIkZhaWxlZCB0byByZXN0b3JlIHZlY3RvciBEQjogJXMiLCBleGMpXG4nCiAgICAnXG4nCiAgICAnICAgICAgICAjIEluZ2VzdG9yIHdpdGggT3BlbkNsYXcgcHJvamVjdCBjb25maWcnCikKCmlmIE9IX0JfT0xEIG5vdCBpbiBvaDoKICAgIHByaW50KCJQQVRDSF9FUlJPUjogb3BlbmNsYXdfaG9vayBhbmNob3IgQiBub3QgZm91bmQiLCBmaWxlPXN5cy5zdGRlcnIpCiAgICBzeXMuZXhpdCgxKQpvaCA9IG9oLnJlcGxhY2UoT0hfQl9PTEQsIE9IX0JfTkVXLCAxKQoKIyBDOiBzYXZlIHNpZGVjYXIgaW4gc2F2ZSgpCk9IX0NfT0xEID0gKAogICAgJyAgICAgICAgc2VsZi5ncmFwaC5jaGVja3BvaW50KHN0cihzZWxmLl9jaGVja3BvaW50X3BhdGgpLCBtb2RlPUNoZWNrcG9pbnRNb2RlLkZVTEwpXG4nCiAgICAnICAgICAgICBsb2dnZXIuaW5mbygiQ2hlY2twb2ludCBzYXZlZCB0byAlcyIsIHNlbGYuX2NoZWNrcG9pbnRfcGF0aClcbicKICAgICcgICAgICAgIHJldHVybiBzdHIoc2VsZi5fY2hlY2twb2ludF9wYXRoKScKKQpPSF9DX05FVyA9ICgKICAgICcgICAgICAgIHNlbGYuZ3JhcGguY2hlY2twb2ludChzdHIoc2VsZi5fY2hlY2twb2ludF9wYXRoKSwgbW9kZT1DaGVja3BvaW50TW9kZS5GVUxMKVxuJwogICAgJyAgICAgICAgdHJ5OlxuJwogICAgJyAgICAgICAgICAgIHNlbGYudmVjdG9yX2RiLnNhdmUoc3RyKHNlbGYuX3ZlY3Rvcl9kYl9wYXRoKSlcbicKICAgICcgICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZXhjOlxuJwogICAgJyAgICAgICAgICAgIGxvZ2dlci53YXJuaW5nKCJWZWN0b3IgREIgc2F2ZSBmYWlsZWQgKG5vbi1mYXRhbCk6ICVzIiwgZXhjKVxuJwogICAgJyAgICAgICAgbG9nZ2VyLmluZm8oIkNoZWNrcG9pbnQgc2F2ZWQgdG8gJXMiLCBzZWxmLl9jaGVja3BvaW50X3BhdGgpXG4nCiAgICAnICAgICAgICByZXR1cm4gc3RyKHNlbGYuX2NoZWNrcG9pbnRfcGF0aCknCikKCmlmIE9IX0NfT0xEIG5vdCBpbiBvaDoKICAgIHByaW50KCJQQVRDSF9FUlJPUjogb3BlbmNsYXdfaG9vayBhbmNob3IgQyBub3QgZm91bmQiLCBmaWxlPXN5cy5zdGRlcnIpCiAgICBzeXMuZXhpdCgxKQpvaCA9IG9oLnJlcGxhY2UoT0hfQ19PTEQsIE9IX0NfTkVXLCAxKQoKT0hfQ0xfT0xEID0gIiMgLS0tLSBDaGFuZ2Vsb2cgLS0tLVxuIgppZiAiQkxLLU5HLTE5MyIgbm90IGluIG9oIGFuZCBPSF9DTF9PTEQgaW4gb2g6CiAgICBvaCA9IG9oLnJlcGxhY2UoT0hfQ0xfT0xELAogICAgICAgICIjIC0tLS0gQ2hhbmdlbG9nIC0tLS1cbiIKICAgICAgICAiIyBbMjAyNi0wNC0yMF0gQ29kZW1pbmUgKEJMSy1ORy0xOTMpIOKAlCBXaXJlIFNpbXBsZVZlY3RvckRCIHBlcnNpc3RlbmNlIGludG8gc2F2ZS9sb2FkXG4iCiAgICAgICAgIiMgICBXaGF0OiBfdmVjdG9yX2RiX3BhdGggYWRkZWQ7IF9faW5pdF9fIGxvYWRzIHNpZGVjYXIgaWYgZXhpc3RzOyBzYXZlKCkgd3JpdGVzIGl0LlxuIgogICAgICAgICIjICAgV2h5OiAgdmVjdG9yX2RiIHdhcyByZWNyZWF0ZWQgZW1wdHkgb24gZXZlcnkgcmVzdGFydCDigJQgcmVjYWxsKCkgcmV0dXJuZWRcbiIKICAgICAgICAiIyAgICAgICAgIG5vdGhpbmcgYWZ0ZXIgY29sZCBzdGFydC4gRml4OiB2ZWN0b3JfZGIubnB6IHNpZGVjYXIgYWxvbmdzaWRlIG1haW4ubXNncGFjay5cbiIKICAgICAgICAiIyAgIEhvdzogIFNpbXBsZVZlY3RvckRCLnNhdmUvbG9hZCBhZGRlZCBpbiB1bml2ZXJzYWxfaW5nZXN0b3IucHkgKHNhbWUgc3BlYykuXG4iLAogICAgICAgIDEpCgpvcGVuKE9IX1BBVEgsICJ3Iikud3JpdGUob2gpCnByaW50KGYiUGF0Y2hlZCB7T0hfUEFUSH0iKQoKcHJpbnQoIlBBVENIX0FQUExJRUQiKQo='))\" && echo SCRIPT_WRITTEN"
+          },
+          "validation": { "checks": [{ "operator": "contains", "value": "SCRIPT_WRITTEN" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "run_patch_script",
+          "type": "action",
+          "description": "Apply patches to universal_ingestor.py and openclaw_hook.py",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 /tmp/ng193_patch.py"
+          },
+          "validation": { "checks": [{ "operator": "contains", "value": "PATCH_APPLIED" }] },
+          "on_failure": "abort"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "already_applied",
+          "type": "action",
+          "description": "Patch already applied — skip to verification",
+          "tool": "shell_execute",
+          "params": { "command": "echo ALREADY_APPLIED" },
+          "validation": { "checks": [{ "operator": "contains", "value": "ALREADY_APPLIED" }] },
+          "on_failure": "abort"
+        }
+      ]
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify both patched files compile cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile universal_ingestor.py && python3 -m py_compile openclaw_hook.py && echo SYNTAX_OK"
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }] },
+      "on_failure": "abort"
+    },
+    {
+      "id": "smoke_test",
+      "type": "action",
+      "description": "Ingest a message, save, restore fresh instance — verify vectors survive cold restart",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os,sys,tempfile,shutil\nsys.path.insert(0,'.')\nfrom openclaw_hook import NeuroGraphMemory\ntmp=tempfile.mkdtemp()\ntry:\n    ng=NeuroGraphMemory(workspace_dir=tmp)\n    ng.on_message('test vector persistence BLK-NG-193')\n    ng.save()\n    c1=ng.vector_db.count()\n    ng2=NeuroGraphMemory(workspace_dir=tmp)\n    c2=ng2.vector_db.count()\n    if c1>0 and c2>0:\n        print(f'SMOKE_OK before={c1} restored={c2}')\n    else:\n        print(f'SMOKE_FAIL before={c1} restored={c2}',file=sys.stderr)\n        sys.exit(1)\nfinally:\n    shutil.rmtree(tmp,ignore_errors=True)\n\""
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "SMOKE_OK" }] },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_sentinels",
+      "type": "action",
+      "description": "Confirm all key strings present in both patched files",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import sys\nui=open('universal_ingestor.py').read()\noh=open('openclaw_hook.py').read()\nchecks=[('universal_ingestor.py','def save(self, path: str)',ui),('universal_ingestor.py','def load(self, path: str)',ui),('openclaw_hook.py','_vector_db_path',oh),('openclaw_hook.py','vector_db.save(',oh),('openclaw_hook.py','vector_db.load(',oh),('universal_ingestor.py','BLK-NG-193',ui),('openclaw_hook.py','BLK-NG-193',oh)]\nmissing=[(f,s) for f,s,src in checks if s not in src]\n[print(f'MISSING {f}: {s}',file=sys.stderr) for f,s in missing]\nif missing:sys.exit(1)\nprint('ALL_SENTINELS_PRESENT')\n\""
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "ALL_SENTINELS_PRESENT" }] },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit both patched files and push to GitHub",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/Faux_Clawdbot && git add universal_ingestor.py openclaw_hook.py && git diff --cached --quiet && echo ALREADY_COMMITTED || (git commit -m 'Add SimpleVectorDB persistence — vector_db.npz sidecar (BLK-NG-193)' && git push && echo COMMITTED)"
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "COMMIT" }] },
+      "on_failure": "abort"
+    }
+  ]
+}
