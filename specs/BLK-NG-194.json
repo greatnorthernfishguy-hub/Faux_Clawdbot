@@ -1,0 +1,104 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-194",
+    "name": "Wire Codemine into NG topology sync",
+    "agent": "QB",
+    "scope": "Faux_Clawdbot — create ng_topology_sync.py, wire into app.py startup",
+    "acceptance_criteria": [
+      "ng_topology_sync.py exists with run_sync(), _export(), _import() functions",
+      "app.py imports run_sync as _run_ng_topology_sync and calls it after get_worker_ng()",
+      "Both files pass python3 -m py_compile",
+      "Changes committed and pushed"
+    ],
+    "depends_on": ["BLK-NG-193"]
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "app.py", "type": "file", "source_block": "none", "path": "app.py"}
+    ],
+    "outputs": [
+      {"name": "ng_topology_sync.py", "type": "file", "path": "ng_topology_sync.py", "contract": "run_sync(worker_ng) exports vector_db + imports peer experiences via docs git repo"},
+      {"name": "app.py", "type": "file", "path": "app.py", "contract": "Calls _run_ng_topology_sync(worker_ng) after get_worker_ng() at module startup"}
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not modify any file other than app.py",
+      "Do not touch worker_ng.py, openclaw_hook.py, or any vendored file"
+    ],
+    "anti_drift": [
+      "ng_topology_sync.py is a brand new file — only app.py is edited alongside it",
+      "The sync call in app.py must be try/except wrapped so failures never break startup"
+    ],
+    "tool_allowlist": ["write_file", "edit_file", "shell_execute", "read_file"],
+    "shell_allowlist": ["python3", "git", "echo"]
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set (needed for docs repo clone at runtime)",
+      "tool": "shell_execute",
+      "params": {"command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""},
+      "validation": {"checks": [{"operator": "contains", "value": "TOKEN_OK"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "write_ng_topology_sync",
+      "type": "action",
+      "description": "Create ng_topology_sync.py — export/import NG topology via docs git repo",
+      "tool": "write_file",
+      "params": {
+        "path": "ng_topology_sync.py",
+        "content": "# ---- Changelog ----\n# [2026-04-20] Codemine (BLK-NG-194) -- NG topology sync: export + import via docs git repo\n# What: Exports Codemine's vector_db content to docs/ng_topology/codemine_export.jsonl;\n#       imports novel experiences from laptop/vps exports via on_message().\n# Why:  All three CC NG instances (laptop, VPS, Codemine) should share raw semantic\n#       experience -- same additive docs-repo transport as memory-sync.sh.\n# How:  Clone/pull greatnorthernfishguy-hub/docs via GITHUB_TOKEN. Export on startup\n#       if vector_db.npz exists. Import novel entries (deduplicated by SHA-256 hash\n#       stored in topology_seen_hashes.txt alongside the checkpoint).\n# -------------------\nimport hashlib\nimport json\nimport logging\nimport os\nimport subprocess\nfrom pathlib import Path\n\nlogger = logging.getLogger(\"ng_topology_sync\")\n\n_DOCS_REPO = \"https://{token}@github.com/greatnorthernfishguy-hub/docs.git\"\n_CLONE_DIR = Path(\"/tmp/ng_topology_docs\")\n_TOPO_SUBDIR = \"ng_topology\"\n_MY_EXPORT = \"codemine_export.jsonl\"\n_SEEN_FILE = \"topology_seen_hashes.txt\"\n\n\ndef _clone_or_pull() -> bool:\n    token = os.environ.get(\"GITHUB_TOKEN\", \"\")\n    if not token:\n        logger.warning(\"GITHUB_TOKEN not set -- topology sync skipped\")\n        return False\n    repo_url = _DOCS_REPO.format(token=token)\n    try:\n        if _CLONE_DIR.exists():\n            r = subprocess.run(\n                [\"git\", \"-C\", str(_CLONE_DIR), \"pull\", \"--rebase\", \"--quiet\"],\n                capture_output=True, text=True, timeout=60,\n            )\n        else:\n            r = subprocess.run(\n                [\"git\", \"clone\", \"--depth=1\", \"--quiet\", repo_url, str(_CLONE_DIR)],\n                capture_output=True, text=True, timeout=120,\n            )\n        if r.returncode != 0:\n            logger.warning(\"docs repo fetch failed: %s\", r.stderr[:200])\n            return False\n        return True\n    except Exception as e:\n        logger.warning(\"docs repo fetch failed (non-fatal): %s\", e)\n        return False\n\n\ndef _load_seen(workspace_dir: str) -> set:\n    p = Path(workspace_dir) / _SEEN_FILE\n    return set(p.read_text().splitlines()) if p.exists() else set()\n\n\ndef _save_seen(workspace_dir: str, hashes: set) -> None:\n    (Path(workspace_dir) / _SEEN_FILE).write_text(\"\\n\".join(sorted(hashes)))\n\n\ndef _export(workspace_dir: str) -> int:\n    import numpy as np\n    npz = Path(workspace_dir) / \"checkpoints\" / \"vector_db.npz\"\n    if not npz.exists():\n        logger.info(\"No vector_db.npz -- export skipped\")\n        return 0\n    try:\n        contents = np.load(npz, allow_pickle=True)[\"content\"].tolist()\n    except Exception as e:\n        logger.warning(\"vector_db.npz load failed: %s\", e)\n        return 0\n\n    topo = _CLONE_DIR / _TOPO_SUBDIR\n    topo.mkdir(parents=True, exist_ok=True)\n    out = topo / _MY_EXPORT\n    written = 0\n    try:\n        with open(out, \"w\") as f:\n            for c in contents:\n                h = hashlib.sha256(str(c).encode()).hexdigest()\n                f.write(json.dumps({\"hash\": h, \"content\": str(c)}) + \"\\n\")\n                written += 1\n    except Exception as e:\n        logger.warning(\"export write failed: %s\", e)\n        return 0\n\n    if not written:\n        return 0\n\n    try:\n        subprocess.run([\"git\", \"-C\", str(_CLONE_DIR), \"config\", \"user.email\", \"codemine@et-systems.ai\"], capture_output=True)\n        subprocess.run([\"git\", \"-C\", str(_CLONE_DIR), \"config\", \"user.name\", \"Codemine\"], capture_output=True)\n        subprocess.run([\"git\", \"-C\", str(_CLONE_DIR), \"add\", str(out)], capture_output=True, check=True)\n        diff = subprocess.run([\"git\", \"-C\", str(_CLONE_DIR), \"diff\", \"--cached\", \"--quiet\"], capture_output=True)\n        if diff.returncode != 0:\n            subprocess.run(\n                [\"git\", \"-C\", str(_CLONE_DIR), \"commit\", \"-m\",\n                 \"ng-topology-sync: codemine export ({} nodes)\".format(written)],\n                capture_output=True, check=True,\n            )\n            subprocess.run([\"git\", \"-C\", str(_CLONE_DIR), \"push\"], capture_output=True, check=True, timeout=60)\n            logger.info(\"Exported and pushed %d nodes\", written)\n        else:\n            logger.info(\"Export unchanged -- %d nodes already current\", written)\n    except Exception as e:\n        logger.warning(\"git push failed (export saved locally): %s\", e)\n\n    return written\n\n\ndef _import(worker_ng, workspace_dir: str) -> int:\n    topo = _CLONE_DIR / _TOPO_SUBDIR\n    if not topo.exists():\n        return 0\n    seen = _load_seen(workspace_dir)\n    imported = 0\n    for f in sorted(topo.glob(\"*_export.jsonl\")):\n        if f.name == _MY_EXPORT:\n            continue\n        try:\n            lines = f.read_text().splitlines()\n        except Exception:\n            continue\n        for line in lines:\n            if not line.strip():\n                continue\n            try:\n                entry = json.loads(line)\n                h = entry.get(\"hash\") or hashlib.sha256(entry[\"content\"].encode()).hexdigest()\n                if h in seen:\n                    continue\n                worker_ng.on_message(entry[\"content\"])\n                seen.add(h)\n                imported += 1\n            except Exception as e:\n                logger.debug(\"on_message skipped: %s\", e)\n    if imported:\n        _save_seen(workspace_dir, seen)\n        try:\n            worker_ng.save()\n        except Exception as e:\n            logger.warning(\"save after import failed: %s\", e)\n    logger.info(\"Imported %d novel experiences from peer instances\", imported)\n    return imported\n\n\ndef run_sync(worker_ng) -> None:\n    \"\"\"Export + import NG topology via docs git repo. Always silent on failure.\"\"\"\n    try:\n        from worker_ng import WORKER_NG_WORKSPACE\n        workspace_dir = WORKER_NG_WORKSPACE\n    except Exception:\n        logger.warning(\"Could not resolve WORKER_NG_WORKSPACE -- sync skipped\")\n        return\n    try:\n        if not _clone_or_pull():\n            return\n        exported = _export(workspace_dir)\n        imported = _import(worker_ng, workspace_dir)\n        logger.info(\"NG topology sync complete -- exported=%d imported=%d\", exported, imported)\n    except Exception as e:\n        logger.warning(\"NG topology sync failed (non-fatal): %s\", e)\n"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_app_import",
+      "type": "action",
+      "description": "Add ng_topology_sync import to app.py after the worker_ng import line",
+      "tool": "edit_file",
+      "params": {
+        "path": "app.py",
+        "old_text": "from worker_ng import get_worker_ng, ingest_tool_result, recall_context\nfrom spec_executor import SpecExecutor",
+        "new_text": "from worker_ng import get_worker_ng, ingest_tool_result, recall_context\nfrom ng_topology_sync import run_sync as _run_ng_topology_sync\nfrom spec_executor import SpecExecutor"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_app_call",
+      "type": "action",
+      "description": "Add _run_ng_topology_sync(worker_ng) call after get_worker_ng() in app.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "app.py",
+        "old_text": "worker_ng = get_worker_ng()          # NG singleton created first \u2014 worker owns it\nctx = RecursiveContextManager(str(REPO_PATH), ng=worker_ng)  # facade shares the same instance",
+        "new_text": "worker_ng = get_worker_ng()          # NG singleton created first \u2014 worker owns it\n_run_ng_topology_sync(worker_ng)\nctx = RecursiveContextManager(str(REPO_PATH), ng=worker_ng)  # facade shares the same instance"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify both files parse cleanly",
+      "tool": "shell_execute",
+      "params": {"command": "python3 -m py_compile ng_topology_sync.py && python3 -m py_compile app.py && echo SYNTAX_OK"},
+      "validation": {"checks": [{"operator": "contains", "value": "SYNTAX_OK"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Stage ng_topology_sync.py and app.py, commit, and push to origin",
+      "tool": "shell_execute",
+      "params": {"command": "git add ng_topology_sync.py app.py && git diff --cached --quiet && echo ALREADY_COMMITTED || (git commit -m 'feat: wire Codemine into NG topology sync (BLK-NG-194)' && git push origin main && echo COMMITTED)"},
+      "validation": {"checks": [{"operator": "contains", "value": "COMMIT"}]},
+      "on_failure": "abort"
+    }
+  ]
+}
