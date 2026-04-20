@@ -38,6 +38,7 @@ from model_client import get_client, call_model
 from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context
+from ng_topology_sync import run_sync as _run_ng_topology_sync
 from spec_executor import SpecExecutor
 from orchestrator import Orchestrator
 
@@ -80,6 +81,7 @@ _ECOSYSTEM_READ_PATHS: list[Path] = [
     Path("/home/josh/docs"),
 ]
 worker_ng = get_worker_ng()          # NG singleton created first — worker owns it
+_run_ng_topology_sync(worker_ng)
 ctx = RecursiveContextManager(str(REPO_PATH), ng=worker_ng)  # facade shares the same instance
 client = get_client()
 
