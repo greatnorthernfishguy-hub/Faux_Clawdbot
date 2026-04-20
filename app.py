@@ -1,15 +1,4 @@
 # ---- Changelog ----
-# [2026-04-20] Claude Code (Sonnet 4.6) — Wire full substrate loop into Chat tab (#192)
-#   What: Replaced single-pass ctx.ng.on_message() + flat recall with dual-pass ingest
-#         + worker_ng.step() + spreading activation recall + response deposit.
-#   Why:  #192 — Duck Ethics / non-zero emergence. User messages were single-pass only;
-#         worker_ng.step() was never called so topology never propagated before recall;
-#         response was never deposited back → signal loop never closed. Codemine was
-#         ingesting without learning from her own outputs.
-#   How:  ingest_tool_result(worker_ng, "user_message") replaces ctx.ng.on_message().
-#         worker_ng.step() propagates activation before recall.
-#         Recall reframed as "Substrate Context (What I have learned and experienced)".
-#         ingest_tool_result(worker_ng, "assistant_response") deposits response after turn.
 # [2026-04-06] Josh + Claude — Add edit_file to TOOL_REGISTRY
 # What: Wire edit_file tool through ctx facade and add to registry
 # Why: Gap 3 — targeted find-and-replace is safer than full overwrite for cross-repo work
@@ -388,30 +377,26 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
 
     safe_hist = safe_hist + [{"role": "user", "content": full_message}]
 
-    # Ingest user message as raw experience — dual-pass (gestalt + concepts, Law 7)
+    # Ingest user message into NeuroGraph
     try:
-        ingest_tool_result(worker_ng, "user_message", {}, full_message)
-        worker_ng.step()  # propagate activation through topology before recall
+        ctx.ng.on_message(full_message)
     except (OSError, ValueError) as e:
         logger.warning("NG ingestion failed: %s", e)
 
-    # Assemble substrate context — spreading activation recall
-    substrate_context = ""
+    # Inject semantically relevant memories
+    memory_context = ""
     try:
-        recalls = worker_ng.recall(full_message, k=8, threshold=0.30)
+        recalls = ctx.ng.recall(full_message, k=5, threshold=0.35)
         if recalls:
-            snippets = "\n---\n".join(r.get("content", "")[:400] for r in recalls[:6])
-            substrate_context = (
-                "\n\n## Substrate Context (What I have learned and experienced):\n"
-                + snippets + "\n"
-            )
+            snippets = "\n---\n".join(r.get("content", "")[:300] for r in recalls)
+            memory_context = f"\n\n## Relevant Memory (NeuroGraph):\n{snippets}\n"
     except (OSError, ValueError) as e:
         logger.warning("NG recall failed: %s", e)
 
     # Build system prompt
     stats = ctx.get_stats()
     notebook_text = ctx.notebook_read()
-    system_prompt = build_system_prompt(stats, notebook_text, TOOL_DEFINITIONS) + substrate_context
+    system_prompt = build_system_prompt(stats, notebook_text, TOOL_DEFINITIONS) + memory_context
 
     # Build token-aware message window
     api_messages = _build_api_messages(safe_hist, system_prompt)
@@ -526,12 +511,6 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
         final = "Processed request but have no text response."
 
     safe_hist.append({"role": "assistant", "content": final})
-
-    # Deposit response as raw experience — closes the signal loop (#192)
-    try:
-        ingest_tool_result(worker_ng, "assistant_response", {}, final)
-    except (OSError, ValueError) as e:
-        logger.warning("NG response deposit failed: %s", e)
 
     try:
         ctx.save_conversation_turn(full_message, final, len(safe_hist))
