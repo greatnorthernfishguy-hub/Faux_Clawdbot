@@ -15,11 +15,26 @@
   },
   "snap_interface": {
     "inputs": [
-      {"name": "neurograph_rpc.py", "type": "file", "source_block": "none", "path": "/home/josh/NeuroGraph/neurograph_rpc.py"},
-      {"name": "PUNCHLIST.md", "type": "file", "source_block": "none", "path": "/home/josh/docs/punchlist/PUNCHLIST.md"}
+      {
+        "name": "neurograph_rpc.py",
+        "type": "file",
+        "source_block": "none",
+        "path": "/home/josh/NeuroGraph/neurograph_rpc.py"
+      },
+      {
+        "name": "PUNCHLIST.md",
+        "type": "file",
+        "source_block": "none",
+        "path": "/home/josh/docs/punchlist/PUNCHLIST.md"
+      }
     ],
     "outputs": [
-      {"name": "neurograph_rpc.py", "type": "file", "path": "/home/josh/NeuroGraph/neurograph_rpc.py", "contract": "peer_bridge NameError fixed at both deposit sites"}
+      {
+        "name": "neurograph_rpc.py",
+        "type": "file",
+        "path": "/home/josh/NeuroGraph/neurograph_rpc.py",
+        "contract": "peer_bridge NameError fixed at both deposit sites"
+      }
     ]
   },
   "constraints": {
@@ -32,8 +47,16 @@
     "anti_drift": [
       "Only modify the two peer_bridge call sites. Do not refactor, rename, or clean up surrounding code."
     ],
-    "tool_allowlist": ["shell_execute", "read_file"],
-    "shell_allowlist": ["python3", "grep", "git", "echo"],
+    "tool_allowlist": [
+      "shell_execute",
+      "read_file"
+    ],
+    "shell_allowlist": [
+      "python3",
+      "grep",
+      "git",
+      "echo"
+    ],
     "max_iterations": 20,
     "timeout_seconds": 300
   },
@@ -41,23 +64,30 @@
     {
       "id": "check_idempotent",
       "type": "action",
-      "description": "Check if site1 is already patched — _pb = getattr sentinel",
+      "description": "Check if site1 is already patched \u2014 _pb = getattr sentinel",
       "tool": "shell_execute",
       "params": {
         "command": "grep -c '_pb = getattr(_memory' /home/josh/NeuroGraph/neurograph_rpc.py || echo 0"
       },
       "validation": {
         "checks": [
-          { "operator": "result_is_not_error" }
+          {
+            "operator": "result_is_not_error"
+          }
         ]
       },
-      "on_failure": "abort"
+      "on_failure": "abort",
+      "bind_result": "$site1_check"
     },
     {
       "id": "patch_site1",
       "type": "condition",
       "description": "Apply site1 patch only if not already applied",
-      "check": { "operator": "contains", "value": "0" },
+      "check": {
+        "operator": "contains",
+        "value": "0",
+        "target": "$site1_check"
+      },
       "if_true": [
         {
           "id": "run_site1_patch",
@@ -69,7 +99,10 @@
           },
           "validation": {
             "checks": [
-              { "operator": "contains", "value": "PATCHED_SITE1" }
+              {
+                "operator": "contains",
+                "value": "PATCHED_SITE1"
+              }
             ]
           },
           "on_failure": "abort"
@@ -79,10 +112,19 @@
         {
           "id": "skip_site1",
           "type": "action",
-          "description": "Site1 already patched — skip",
+          "description": "Site1 already patched \u2014 skip",
           "tool": "shell_execute",
-          "params": { "command": "echo 'SITE1_ALREADY_PATCHED'" },
-          "validation": { "checks": [{ "operator": "contains", "value": "ALREADY_PATCHED" }] },
+          "params": {
+            "command": "echo 'SITE1_ALREADY_PATCHED'"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "contains",
+                "value": "ALREADY_PATCHED"
+              }
+            ]
+          },
           "on_failure": "continue"
         }
       ]
@@ -97,7 +139,10 @@
       },
       "validation": {
         "checks": [
-          { "operator": "contains", "value": "1" }
+          {
+            "operator": "contains",
+            "value": "1"
+          }
         ]
       },
       "on_failure": "abort"
@@ -105,23 +150,30 @@
     {
       "id": "check_site2_idempotent",
       "type": "action",
-      "description": "Check if site2 is already patched — peer_bridge = getattr sentinel",
+      "description": "Check if site2 is already patched \u2014 peer_bridge = getattr sentinel",
       "tool": "shell_execute",
       "params": {
         "command": "grep -c 'peer_bridge = getattr(_memory' /home/josh/NeuroGraph/neurograph_rpc.py || echo 0"
       },
       "validation": {
         "checks": [
-          { "operator": "result_is_not_error" }
+          {
+            "operator": "result_is_not_error"
+          }
         ]
       },
-      "on_failure": "abort"
+      "on_failure": "abort",
+      "bind_result": "$site2_check"
     },
     {
       "id": "patch_site2",
       "type": "condition",
       "description": "Apply site2 patch only if not already applied",
-      "check": { "operator": "contains", "value": "0" },
+      "check": {
+        "operator": "contains",
+        "value": "0",
+        "target": "$site2_check"
+      },
       "if_true": [
         {
           "id": "run_site2_patch",
@@ -133,7 +185,10 @@
           },
           "validation": {
             "checks": [
-              { "operator": "contains", "value": "PATCHED_SITE2" }
+              {
+                "operator": "contains",
+                "value": "PATCHED_SITE2"
+              }
             ]
           },
           "on_failure": "abort"
@@ -143,10 +198,19 @@
         {
           "id": "skip_site2",
           "type": "action",
-          "description": "Site2 already patched — skip",
+          "description": "Site2 already patched \u2014 skip",
           "tool": "shell_execute",
-          "params": { "command": "echo 'SITE2_ALREADY_PATCHED'" },
-          "validation": { "checks": [{ "operator": "contains", "value": "ALREADY_PATCHED" }] },
+          "params": {
+            "command": "echo 'SITE2_ALREADY_PATCHED'"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "contains",
+                "value": "ALREADY_PATCHED"
+              }
+            ]
+          },
           "on_failure": "continue"
         }
       ]
@@ -161,7 +225,10 @@
       },
       "validation": {
         "checks": [
-          { "operator": "contains", "value": "1" }
+          {
+            "operator": "contains",
+            "value": "1"
+          }
         ]
       },
       "on_failure": "abort"
@@ -176,7 +243,10 @@
       },
       "validation": {
         "checks": [
-          { "operator": "contains", "value": "SYNTAX_OK" }
+          {
+            "operator": "contains",
+            "value": "SYNTAX_OK"
+          }
         ]
       },
       "on_failure": "abort"
@@ -187,11 +257,14 @@
       "description": "Add changelog entry for #184 to neurograph_rpc.py",
       "tool": "shell_execute",
       "params": {
-        "command": "python3 << 'PYEOF'\nimport sys\npath = '/home/josh/NeuroGraph/neurograph_rpc.py'\nc = open(path, encoding='utf-8').read()\nif 'punchlist #184' in c:\n    print('CHANGELOG_ALREADY_PRESENT')\n    sys.exit(0)\nentry = '# [2026-04-19] Codemine (BLK-NG-184) -- Fix peer_bridge NameError at both deposit sites\\n#   What: Added getattr(_memory, \\'_peer_bridge\\', None) guard at surfacing and self-observation sites\\n#   Why:  peer_bridge was never assigned in these scopes (punchlist #184); both deposits were silently\\n#          failing inside try/except with NameError. Surfacing and self-obs deposits never actually fired.\\n#   How:  Site1 (_deposit_surfacing_outcome): _pb = getattr guard wraps record_outcome call.\\n#          Site2 (handle_after_turn): peer_bridge assigned via getattr before if-guard.\\n'\nOLD_MARKER = '# [2026-04-19] Claude Code — RESTORE:'\nif OLD_MARKER not in c:\n    print('FAILED: changelog insertion point not found')\n    sys.exit(1)\nopen(path, 'w', encoding='utf-8').write(c.replace(OLD_MARKER, entry + OLD_MARKER, 1))\nprint('CHANGELOG_ADDED')\nPYEOF"
+        "command": "python3 << 'PYEOF'\nimport sys\npath = '/home/josh/NeuroGraph/neurograph_rpc.py'\nc = open(path, encoding='utf-8').read()\nif 'punchlist #184' in c:\n    print('CHANGELOG_ALREADY_PRESENT')\n    sys.exit(0)\nentry = '# [2026-04-19] Codemine (BLK-NG-184) -- Fix peer_bridge NameError at both deposit sites\\n#   What: Added getattr(_memory, \\'_peer_bridge\\', None) guard at surfacing and self-observation sites\\n#   Why:  peer_bridge was never assigned in these scopes (punchlist #184); both deposits were silently\\n#          failing inside try/except with NameError. Surfacing and self-obs deposits never actually fired.\\n#   How:  Site1 (_deposit_surfacing_outcome): _pb = getattr guard wraps record_outcome call.\\n#          Site2 (handle_after_turn): peer_bridge assigned via getattr before if-guard.\\n'\nOLD_MARKER = '# [2026-04-19] Claude Code \u2014 RESTORE:'\nif OLD_MARKER not in c:\n    print('FAILED: changelog insertion point not found')\n    sys.exit(1)\nopen(path, 'w', encoding='utf-8').write(c.replace(OLD_MARKER, entry + OLD_MARKER, 1))\nprint('CHANGELOG_ADDED')\nPYEOF"
       },
       "validation": {
         "checks": [
-          { "operator": "contains", "value": "CHANGELOG" }
+          {
+            "operator": "contains",
+            "value": "CHANGELOG"
+          }
         ]
       },
       "on_failure": "continue"
@@ -206,7 +279,10 @@
       },
       "validation": {
         "checks": [
-          { "operator": "contains", "value": "GIT_DONE" }
+          {
+            "operator": "contains",
+            "value": "GIT_DONE"
+          }
         ]
       },
       "on_failure": "abort"
@@ -221,7 +297,10 @@
       },
       "validation": {
         "checks": [
-          { "operator": "contains", "value": "PUNCHLIST" }
+          {
+            "operator": "contains",
+            "value": "PUNCHLIST"
+          }
         ]
       },
       "on_failure": "continue"
@@ -236,7 +315,10 @@
       },
       "validation": {
         "checks": [
-          { "operator": "contains", "value": "DOCS_DONE" }
+          {
+            "operator": "contains",
+            "value": "DOCS_DONE"
+          }
         ]
       },
       "on_failure": "continue"
