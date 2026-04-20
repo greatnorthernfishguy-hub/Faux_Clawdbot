@@ -1,0 +1,245 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-184",
+    "name": "neurograph_rpc.py: fix peer_bridge NameError at both deposit sites (#184)",
+    "agent": "codemine",
+    "scope": "local_vps",
+    "acceptance_criteria": [
+      "_deposit_surfacing_outcome now guards the record_outcome call via getattr(_memory, '_peer_bridge', None)",
+      "Self-observation block (line ~992) now assigns peer_bridge via getattr before using it",
+      "python3 -m py_compile /home/josh/NeuroGraph/neurograph_rpc.py exits 0",
+      "Punchlist #184 marked DONE in /home/josh/docs/punchlist/PUNCHLIST.md"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      "/home/josh/NeuroGraph/neurograph_rpc.py",
+      "/home/josh/docs/punchlist/PUNCHLIST.md"
+    ],
+    "outputs": [
+      "/home/josh/NeuroGraph/neurograph_rpc.py patched at both peer_bridge call sites"
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not edit any vendored file (ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, ng_autonomic.py, openclaw_adapter.py, ng_embed.py)",
+      "Do not modify neuro_foundation.py or openclaw_hook.py",
+      "Do not restart any running service",
+      "Do not touch any file in NeuroGraph other than neurograph_rpc.py"
+    ],
+    "anti_drift": [
+      "Only modify the two peer_bridge call sites. Do not refactor, rename, or clean up surrounding code."
+    ],
+    "tool_allowlist": ["shell_execute", "read_file"],
+    "shell_allowlist": ["python3", "grep", "git", "echo"],
+    "max_iterations": 20,
+    "timeout_seconds": 300
+  },
+  "steps": [
+    {
+      "id": "check_idempotent",
+      "type": "action",
+      "description": "Check if site1 is already patched — _pb = getattr sentinel",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c '_pb = getattr(_memory' /home/josh/NeuroGraph/neurograph_rpc.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "result_is_not_error" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_site1",
+      "type": "condition",
+      "description": "Apply site1 patch only if not already applied",
+      "check": { "operator": "contains", "value": "0" },
+      "if_true": [
+        {
+          "id": "run_site1_patch",
+          "type": "action",
+          "description": "Patch _deposit_surfacing_outcome: wrap peer_bridge.record_outcome with getattr guard",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 << 'PYEOF'\nimport sys, base64\npath = '/home/josh/NeuroGraph/neurograph_rpc.py'\nc = open(path, encoding='utf-8').read()\nOLD = base64.b64decode('ICAgICAgICAgICAgIyBEZXBvc2l0IHJhdyBleHBlcmllbmNlOiB0aGlzIG5vZGUgd2FzIHN1cmZhY2VkIGR1cmluZyB0aGlzIHR1cm4uCiAgICAgICAgICAgICMgdGFyZ2V0X2lkIGlzIG9wYXF1ZSDigJQganVzdCBtYXJrcyBpdCBhcyBhIHN1cmZhY2luZyBldmVudC4KICAgICAgICAgICAgIyBtZXRhZGF0YSBjYXJyaWVzIHRoZSByYXcgY29udGV4dCB3aXRob3V0IGNsYXNzaWZpY2F0aW9uLgogICAgICAgICAgICBwZWVyX2JyaWRnZS5yZWNvcmRfb3V0Y29tZSgKICAgICAgICAgICAgICAgIGVtYmVkZGluZz1ub2RlX2VtYmVkZGluZywKICAgICAgICAgICAgICAgIHRhcmdldF9pZD1mInN1cmZhY2luZzp7bm9kZV9pZH0iLAogICAgICAgICAgICAgICAgc3VjY2Vzcz1UcnVlLAogICAgICAgICAgICAgICAgbW9kdWxlX2lkPSJuZXVyb2dyYXBoIiwKICAgICAgICAgICAgICAgIG1ldGFkYXRhPXsKICAgICAgICAgICAgICAgICAgICAic3VyZmFjaW5nX3NvdXJjZSI6IG5vZGVfaW5mby5nZXQoInNvdXJjZSIsICJ1bmtub3duIiksCiAgICAgICAgICAgICAgICAgICAgInN1cmZhY2luZ19zdHJlbmd0aCI6IG5vZGVfaW5mby5nZXQoInN0cmVuZ3RoIiwgbm9kZV9pbmZvLmdldCgic2NvcmUiLCAwKSksCiAgICAgICAgICAgICAgICAgICAgInVzZXJfdGV4dF9wcmV2aWV3IjogKHVzZXJfdGV4dCBvciAiIilbOjIwMF0sCiAgICAgICAgICAgICAgICAgICAgInN5bF9yZXNwb25zZV9wcmV2aWV3Ijogc3lsX3RleHRbOjIwMF0sCiAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAp').decode()\nNEW = base64.b64decode('ICAgICAgICAgICAgIyBEZXBvc2l0IHJhdyBleHBlcmllbmNlOiB0aGlzIG5vZGUgd2FzIHN1cmZhY2VkIGR1cmluZyB0aGlzIHR1cm4uCiAgICAgICAgICAgICMgdGFyZ2V0X2lkIGlzIG9wYXF1ZSDigJQganVzdCBtYXJrcyBpdCBhcyBhIHN1cmZhY2luZyBldmVudC4KICAgICAgICAgICAgIyBtZXRhZGF0YSBjYXJyaWVzIHRoZSByYXcgY29udGV4dCB3aXRob3V0IGNsYXNzaWZpY2F0aW9uLgogICAgICAgICAgICBfcGIgPSBnZXRhdHRyKF9tZW1vcnksICdfcGVlcl9icmlkZ2UnLCBOb25lKQogICAgICAgICAgICBpZiBfcGIgaXMgbm90IE5vbmU6CiAgICAgICAgICAgICAgICBfcGIucmVjb3JkX291dGNvbWUoCiAgICAgICAgICAgICAgICAgICAgZW1iZWRkaW5nPW5vZGVfZW1iZWRkaW5nLAogICAgICAgICAgICAgICAgICAgIHRhcmdldF9pZD1mInN1cmZhY2luZzp7bm9kZV9pZH0iLAogICAgICAgICAgICAgICAgICAgIHN1Y2Nlc3M9VHJ1ZSwKICAgICAgICAgICAgICAgICAgICBtb2R1bGVfaWQ9Im5ldXJvZ3JhcGgiLAogICAgICAgICAgICAgICAgICAgIG1ldGFkYXRhPXsKICAgICAgICAgICAgICAgICAgICAgICAgInN1cmZhY2luZ19zb3VyY2UiOiBub2RlX2luZm8uZ2V0KCJzb3VyY2UiLCAidW5rbm93biIpLAogICAgICAgICAgICAgICAgICAgICAgICAic3VyZmFjaW5nX3N0cmVuZ3RoIjogbm9kZV9pbmZvLmdldCgic3RyZW5ndGgiLCBub2RlX2luZm8uZ2V0KCJzY29yZSIsIDApKSwKICAgICAgICAgICAgICAgICAgICAgICAgInVzZXJfdGV4dF9wcmV2aWV3IjogKHVzZXJfdGV4dCBvciAiIilbOjIwMF0sCiAgICAgICAgICAgICAgICAgICAgICAgICJzeWxfcmVzcG9uc2VfcHJldmlldyI6IHN5bF90ZXh0WzoyMDBdLAogICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAp').decode()\nn = c.count(OLD)\nif n != 1:\n    print(f'FAILED_SITE1: old_text found {n} times (expected 1)')\n    sys.exit(1)\nopen(path, 'w', encoding='utf-8').write(c.replace(OLD, NEW, 1))\nprint('PATCHED_SITE1')\nPYEOF"
+          },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "PATCHED_SITE1" }
+            ]
+          },
+          "on_failure": "abort"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "skip_site1",
+          "type": "action",
+          "description": "Site1 already patched — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo 'SITE1_ALREADY_PATCHED'" },
+          "validation": { "checks": [{ "operator": "contains", "value": "ALREADY_PATCHED" }] },
+          "on_failure": "continue"
+        }
+      ]
+    },
+    {
+      "id": "verify_site1",
+      "type": "action",
+      "description": "Confirm _pb = getattr sentinel is now in the file",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c '_pb = getattr(_memory' /home/josh/NeuroGraph/neurograph_rpc.py"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "1" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_site2_idempotent",
+      "type": "action",
+      "description": "Check if site2 is already patched — peer_bridge = getattr sentinel",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'peer_bridge = getattr(_memory' /home/josh/NeuroGraph/neurograph_rpc.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "result_is_not_error" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_site2",
+      "type": "condition",
+      "description": "Apply site2 patch only if not already applied",
+      "check": { "operator": "contains", "value": "0" },
+      "if_true": [
+        {
+          "id": "run_site2_patch",
+          "type": "action",
+          "description": "Patch self-observation block: add peer_bridge = getattr(...) before if guard",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 << 'PYEOF'\nimport sys, base64\npath = '/home/josh/NeuroGraph/neurograph_rpc.py'\nc = open(path, encoding='utf-8').read()\nOLD = base64.b64decode('ICAgIHRyeToKICAgICAgICBpZiBwZWVyX2JyaWRnZSBpcyBub3QgTm9uZToKICAgICAgICAgICAgX3N0YXRzID0gX21lbW9yeS5ncmFwaC5nZXRfc3RhdHMoKSBpZiBoYXNhdHRyKF9tZW1vcnkuZ3JhcGgsICdnZXRfc3RhdHMnKSBlbHNlIHt9CiAgICAgICAgICAgIF9zdGF0c1sidG90YWxfbm9kZXMiXSA9IGxlbihfbWVtb3J5LmdyYXBoLm5vZGVzKQogICAgICAgICAgICBfc3RhdHNfdGV4dCA9IHN0cihfc3RhdHMpCiAgICAgICAgICAgIGZyb20gbmdfZW1iZWQgaW1wb3J0IGVtYmVkIGFzIF9lbWJlZF9mbgogICAgICAgICAgICBfc3RhdHNfZW1iID0gX2VtYmVkX2ZuKF9zdGF0c190ZXh0KQogICAgICAgICAgICBwZWVyX2JyaWRnZS5yZWNvcmRfb3V0Y29tZSgKICAgICAgICAgICAgICAgIGVtYmVkZGluZz1fc3RhdHNfZW1iLAogICAgICAgICAgICAgICAgdGFyZ2V0X2lkPSJzdWJzdHJhdGU6c2VsZl9vYnNlcnZhdGlvbiIsCiAgICAgICAgICAgICAgICBzdWNjZXNzPVRydWUsCiAgICAgICAgICAgICAgICBtb2R1bGVfaWQ9Im5ldXJvZ3JhcGgiLAogICAgICAgICAgICAgICAgbWV0YWRhdGE9X3N0YXRzLAogICAgICAgICAgICApCiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGV4YzoKICAgICAgICBsb2dnZXIuZGVidWcoIlNlbGYtb2JzZXJ2YXRpb24gZGVwb3NpdCBmYWlsZWQgKG5vbi1mYXRhbCk6ICVzIiwgZXhjKQ==').decode()\nNEW = base64.b64decode('ICAgIHRyeToKICAgICAgICBwZWVyX2JyaWRnZSA9IGdldGF0dHIoX21lbW9yeSwgJ19wZWVyX2JyaWRnZScsIE5vbmUpCiAgICAgICAgaWYgcGVlcl9icmlkZ2UgaXMgbm90IE5vbmU6CiAgICAgICAgICAgIF9zdGF0cyA9IF9tZW1vcnkuZ3JhcGguZ2V0X3N0YXRzKCkgaWYgaGFzYXR0cihfbWVtb3J5LmdyYXBoLCAnZ2V0X3N0YXRzJykgZWxzZSB7fQogICAgICAgICAgICBfc3RhdHNbInRvdGFsX25vZGVzIl0gPSBsZW4oX21lbW9yeS5ncmFwaC5ub2RlcykKICAgICAgICAgICAgX3N0YXRzX3RleHQgPSBzdHIoX3N0YXRzKQogICAgICAgICAgICBmcm9tIG5nX2VtYmVkIGltcG9ydCBlbWJlZCBhcyBfZW1iZWRfZm4KICAgICAgICAgICAgX3N0YXRzX2VtYiA9IF9lbWJlZF9mbihfc3RhdHNfdGV4dCkKICAgICAgICAgICAgcGVlcl9icmlkZ2UucmVjb3JkX291dGNvbWUoCiAgICAgICAgICAgICAgICBlbWJlZGRpbmc9X3N0YXRzX2VtYiwKICAgICAgICAgICAgICAgIHRhcmdldF9pZD0ic3Vic3RyYXRlOnNlbGZfb2JzZXJ2YXRpb24iLAogICAgICAgICAgICAgICAgc3VjY2Vzcz1UcnVlLAogICAgICAgICAgICAgICAgbW9kdWxlX2lkPSJuZXVyb2dyYXBoIiwKICAgICAgICAgICAgICAgIG1ldGFkYXRhPV9zdGF0cywKICAgICAgICAgICAgKQogICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBleGM6CiAgICAgICAgbG9nZ2VyLmRlYnVnKCJTZWxmLW9ic2VydmF0aW9uIGRlcG9zaXQgZmFpbGVkIChub24tZmF0YWwpOiAlcyIsIGV4Yyk=').decode()\nn = c.count(OLD)\nif n != 1:\n    print(f'FAILED_SITE2: old_text found {n} times (expected 1)')\n    sys.exit(1)\nopen(path, 'w', encoding='utf-8').write(c.replace(OLD, NEW, 1))\nprint('PATCHED_SITE2')\nPYEOF"
+          },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "PATCHED_SITE2" }
+            ]
+          },
+          "on_failure": "abort"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "skip_site2",
+          "type": "action",
+          "description": "Site2 already patched — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo 'SITE2_ALREADY_PATCHED'" },
+          "validation": { "checks": [{ "operator": "contains", "value": "ALREADY_PATCHED" }] },
+          "on_failure": "continue"
+        }
+      ]
+    },
+    {
+      "id": "verify_site2",
+      "type": "action",
+      "description": "Confirm peer_bridge = getattr sentinel is now in the file",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'peer_bridge = getattr(_memory' /home/josh/NeuroGraph/neurograph_rpc.py"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "1" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify neurograph_rpc.py compiles clean after patches",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile /home/josh/NeuroGraph/neurograph_rpc.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "SYNTAX_OK" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_changelog",
+      "type": "action",
+      "description": "Add changelog entry for #184 to neurograph_rpc.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 << 'PYEOF'\nimport sys\npath = '/home/josh/NeuroGraph/neurograph_rpc.py'\nc = open(path, encoding='utf-8').read()\nif 'punchlist #184' in c:\n    print('CHANGELOG_ALREADY_PRESENT')\n    sys.exit(0)\nentry = '# [2026-04-19] Codemine (BLK-NG-184) -- Fix peer_bridge NameError at both deposit sites\\n#   What: Added getattr(_memory, \\'_peer_bridge\\', None) guard at surfacing and self-observation sites\\n#   Why:  peer_bridge was never assigned in these scopes (punchlist #184); both deposits were silently\\n#          failing inside try/except with NameError. Surfacing and self-obs deposits never actually fired.\\n#   How:  Site1 (_deposit_surfacing_outcome): _pb = getattr guard wraps record_outcome call.\\n#          Site2 (handle_after_turn): peer_bridge assigned via getattr before if-guard.\\n'\nOLD_MARKER = '# [2026-04-19] Claude Code — RESTORE:'\nif OLD_MARKER not in c:\n    print('FAILED: changelog insertion point not found')\n    sys.exit(1)\nopen(path, 'w', encoding='utf-8').write(c.replace(OLD_MARKER, entry + OLD_MARKER, 1))\nprint('CHANGELOG_ADDED')\nPYEOF"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "CHANGELOG" }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "git_commit_neurograph",
+      "type": "action",
+      "description": "Commit patched neurograph_rpc.py to NeuroGraph repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/NeuroGraph && git add neurograph_rpc.py && git commit -m 'Fix peer_bridge NameError at both deposit sites (#184)' && git push && echo GIT_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "GIT_DONE" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "update_punchlist",
+      "type": "action",
+      "description": "Mark punchlist #184 DONE",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 << 'PYEOF'\nimport sys\npath = '/home/josh/docs/punchlist/PUNCHLIST.md'\nc = open(path, encoding='utf-8').read()\nif '| 184 |' not in c:\n    print('FAILED: #184 row not found in punchlist')\n    sys.exit(1)\nif '**DONE**' in c[c.index('| 184 |'):c.index('| 184 |')+500]:\n    print('PUNCHLIST_ALREADY_DONE')\n    sys.exit(0)\n# Replace trailing | OPEN | with | **DONE** (2026-04-19) |\nold_row_suffix = 'or pass it as a parameter. Law 4: fix at the source, not consumer-side patches. | OPEN |'\nnew_row_suffix = 'or pass it as a parameter. Law 4: fix at the source, not consumer-side patches. **DONE (BLK-NG-184, 2026-04-19):** _pb = getattr guard in _deposit_surfacing_outcome; peer_bridge = getattr assignment in handle_after_turn self-observation block. Both sites now fire correctly. | **DONE** (2026-04-19) |'\nif old_row_suffix not in c:\n    print('FAILED: expected punchlist row suffix not found')\n    sys.exit(1)\nopen(path, 'w', encoding='utf-8').write(c.replace(old_row_suffix, new_row_suffix, 1))\nprint('PUNCHLIST_UPDATED')\nPYEOF"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "PUNCHLIST" }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "git_commit_docs",
+      "type": "action",
+      "description": "Commit punchlist update to docs repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/docs && git add punchlist/PUNCHLIST.md && git diff --cached --stat && git commit -m '#184 DONE: peer_bridge NameError fix (BLK-NG-184)' && git push && echo DOCS_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "DOCS_DONE" }
+        ]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}
