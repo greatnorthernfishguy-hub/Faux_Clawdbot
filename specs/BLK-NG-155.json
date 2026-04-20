@@ -137,7 +137,7 @@
       "description": "Confirm _peer_events and _enforce_window_limit are gone from canonical",
       "tool": "shell_execute",
       "params": {
-        "command": "grep -v '^\\s*#' /home/josh/NeuroGraph/ng_tract_bridge.py | grep -c 'self._peer_events\\|_enforce_window_limit' || echo 0"
+        "command": "python3 -c \"lines=[l for l in open('/home/josh/NeuroGraph/ng_tract_bridge.py') if not l.lstrip().startswith('#')]; code=''.join(lines); print(sum(1 for t in ['self._peer_events','_enforce_window_limit'] if t in code))\""
       },
       "validation": {
         "checks": [
