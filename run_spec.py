@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # ---- Changelog ----
+# [2026-04-20] Claude Code (Sonnet 4.6) — Wire Codemine's NeuroGraph into spec executor (#191)
+#   What: Replaced worker_ng=None with get_worker_ng() — Codemine's full NeuroGraph
+#         now receives every spec step result via dual-pass ingestion.
+#   Why:  #191 — substrate was getting nothing from spec runs. First run after this
+#         change is the bootstrap: she wires herself in blind, then she's present.
+#   How:  Import get_worker_ng from worker_ng.py; singleton pattern handles init.
 # [2026-04-17] Claude Code (Sonnet 4.6) — Discord webhook notification (#15)
 #   What: Added _notify_discord() — posts pass/fail summary to QB_DISCORD_WEBHOOK after
 #         every spec run. Added load_dotenv() so .env in Faux_Clawdbot is picked up when
@@ -185,10 +191,11 @@ def main() -> int:
     workspace = Path(workspace_override) if workspace_override else Path(__file__).parent
 
     from spec_executor import SpecExecutor
+    from worker_ng import get_worker_ng
     executor = SpecExecutor(
         tool_registry={},
         policy_check_fn=lambda *a, **kw: (True, "permitted by run_spec"),
-        worker_ng=None,
+        worker_ng=get_worker_ng(),
         workspace=workspace,
     )
 
