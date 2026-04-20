@@ -1,0 +1,208 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-131",
+    "name": "openclaw_hook.py: gate TonicEngine load on latent_engine_enabled (#131)",
+    "agent": "codemine",
+    "scope": "local_vps",
+    "acceptance_criteria": [
+      "TonicEngine block in openclaw_hook.py is wrapped in `if tonic_config.latent_engine_enabled:`",
+      "python3 -m py_compile /home/josh/NeuroGraph/openclaw_hook.py exits 0",
+      "latent_engine_enabled=True path: guard does not prevent engine load (default behavior unchanged)",
+      "Punchlist #131 marked DONE in /home/josh/docs/punchlist/PUNCHLIST.md"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {
+        "name": "openclaw_hook.py",
+        "type": "file",
+        "source_block": "none",
+        "path": "/home/josh/NeuroGraph/openclaw_hook.py"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "openclaw_hook.py",
+        "type": "file",
+        "path": "/home/josh/NeuroGraph/openclaw_hook.py",
+        "contract": "TonicEngine block gated on latent_engine_enabled; all other logic unchanged"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not modify neuro_foundation.py or any other protected NeuroGraph file",
+      "Do not change TonicThread initialization, _post_cycle_hook wiring, or any code outside the latent engine block",
+      "Do not restart any running service",
+      "Do not modify Syl's checkpoint files"
+    ],
+    "anti_drift": [
+      "Only add the latent_engine_enabled guard. Do not refactor, rename, or restructure any other part of openclaw_hook.py."
+    ],
+    "tool_allowlist": [
+      "shell_execute",
+      "read_file"
+    ],
+    "shell_allowlist": [
+      "python3",
+      "grep",
+      "git",
+      "echo",
+      "cat",
+      "wc"
+    ],
+    "max_iterations": 20,
+    "timeout_seconds": 300
+  },
+  "steps": [
+    {
+      "id": "idempotency_check",
+      "type": "action",
+      "description": "Count latent_engine_enabled occurrences in non-comment code lines",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"lines=[l for l in open('/home/josh/NeuroGraph/openclaw_hook.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'latent_engine_enabled' in l))\""
+      },
+      "validation": {
+        "checks": [
+          { "operator": "result_is_not_error" }
+        ]
+      },
+      "on_failure": "abort",
+      "bind_result": "$guard_count"
+    },
+    {
+      "id": "apply_guard",
+      "type": "condition",
+      "description": "Apply guard only if not already present",
+      "check": {
+        "operator": "equals",
+        "value": "0",
+        "target": "$guard_count"
+      },
+      "if_true": [
+        {
+          "id": "write_patch_script",
+          "type": "action",
+          "description": "Write Python patch script to /tmp",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 -c \"\nimport base64, os\nscript = base64.b64decode(b'''aW1wb3J0IHN5cwoKcGF0aCA9ICcvaG9tZS9qb3NoL05ldXJvR3JhcGgvb3BlbmNsYXdfaG9vay5weScKYyA9IG9wZW4ocGF0aCwgZW5jb2Rpbmc9J3V0Zi04JykucmVhZCgpCgojIEFuY2hvciB0byBpZGVudGlmeSB0aGUgbGF0ZW50IGVuZ2luZSBibG9jawpBTkNIT1IgPSAnICAgICAgICAgICAgICAgICMgTGF0ZW50IGVuZ2luZSAoc3VyZ2ljYWwgbW9kZWwpIFx1MjAxNCBwcm92aWRlcyB0aGUgcHVzaCcKCmlmIEFOQ0hPUiBub3QgaW4gYzoKICAgIHByaW50KCdQQVRDSF9FUlJPUjogYW5jaG9yIG5vdCBmb3VuZCcpCiAgICBzeXMuZXhpdCgxKQoKaWR4ID0gYy5pbmRleChBTkNIT1IpCgojIEZpbmQgdGhlIGVuZCBvZiB0aGUgYmxvY2sgLS0gdGhlIGxpbmUgYWZ0ZXIgdGhlIGZpbmFsIGV4Y2VwdCBoYW5kbGVyCkVORF9NQVJLRVI9ICcgICAgICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBleGM6XG4gICAgICAgICAgICAgICAgICAgIGxvZ2dlci5pbmZvKCJUb25pYyBlbmdpbmUgaW5pdCBlcnJvcjogJXMiLCBleGMpXG4nCgppZiBFTkRfTUFSS0VSIG5vdCBpbiBjW2lkeDpdOgogICAgcHJpbnQoJ1BBVENIX0VSUk9SOiBlbmQgbWFya2VyIG5vdCBmb3VuZCcpCiAgICBzeXMuZXhpdCgxKQoKZW5kX3BvcyA9IGMuaW5kZXgoRU5EX01BUktFUiwgaWR4KSArIGxlbihFTkRfTUFSS0VSKQoKb2xkX2Jsb2NrID0gY1tpZHg6ZW5kX3Bvc10KCiMgQnVpbGQgdGhlIG5ldyBibG9jazogYWRkIGd1YXJkIGxpbmUgKHNhbWUgaW5kZW50IGFzIGJsb2NrKSwgaW5kZW50IGlubmVyIGJ5IDQKbGluZXMgPSBvbGRfYmxvY2suc3BsaXRsaW5lcyhrZWVwZW5kcz1UcnVlKQoKIyBSZXBsYWNlIHRoZSBmaXJzdCBjb21tZW50IGxpbmUgd2l0aCBuZXcgY29tbWVudCArIGd1YXJkICsgaW5kZW50ZWQgYmxvY2sKIyBEZXRlY3QgYmFzZSBpbmRlbnQgZnJvbSB0aGUgZmlyc3QgbGluZQpiYXNlX2luZGVudCA9IGxlbihsaW5lc1swXSkgLSBsZW4obGluZXNbMF0ubHN0cmlwKCkpCmluZGVudCA9ICcgJyAqIGJhc2VfaW5kZW50CgpuZXdfYmxvY2sgPSAoCiAgICBpbmRlbnQgKyAnIyBMYXRlbnQgZW5naW5lIChzdXJnaWNhbCBtb2RlbCkgXHUyMDE0IHByb3ZpZGVzIHRoZSBwdXNoXG4nCiAgICArIGluZGVudCArICcjIGJldHdlZW4gY29udmVyc2F0aW9ucyB2aWEgYWN0dWFsIGluZmVyZW5jZSwgbm90IGEgdGltZXJcbicKICAgICsgaW5kZW50ICsgJyMgR2F0ZWQgb24gbGF0ZW50X2VuZ2luZV9lbmFibGVkIHNvIGNhbGxlcnMgbGlrZSBjYy1uZy1ob29rLnB5XG4nCiAgICArIGluZGVudCArICcjIGNhbiBkaXNhYmxlIGVuZ2luZSBsb2FkIHdpdGhvdXQgc3Bhd25pbmcgYSBkYWVtb24gdGhyZWFkICgjMTMxKS5cbicKICAgICsgaW5kZW50ICsgJ2lmIHRvbmljX2NvbmZpZy5sYXRlbnRfZW5naW5lX2VuYWJsZWQ6XG4nCikKCiMgSW5kZW50IGV2ZXJ5IHJlbWFpbmluZyBsaW5lIGJ5IDQgc3BhY2VzLCBza2lwcGluZyB0aGUgZmlyc3QgMiBjb21tZW50IGxpbmVzCmZvciBsaW5lIGluIGxpbmVzWzI6XToKICAgIGlmIGxpbmUuc3RyaXAoKToKICAgICAgICBuZXdfYmxvY2sgKz0gJyAgICAnICsgbGluZQogICAgZWxzZToKICAgICAgICBuZXdfYmxvY2sgKz0gbGluZSAgIyBrZWVwIGVtcHR5IGxpbmVzIGFzLWlzCgppZiBuZXdfYmxvY2suY291bnQoJ2xhdGVudF9lbmdpbmVfZW5hYmxlZCcpICE9IDE6CiAgICBwcmludCgnUEFUQ0hfRVJST1I6IGd1YXJkIG5vdCBpbiBuZXcgYmxvY2snKQogICAgc3lzLmV4aXQoMSkKCmMgPSBjWzppZHhdICsgbmV3X2Jsb2NrICsgY1tlbmRfcG9zOl0KCiMgQWRkIGNoYW5nZWxvZyBlbnRyeQpDSEFOR0VMT0dfTUFSS0VSID0gJyMgLS0tLSBDaGFuZ2Vsb2cgLS0tLScKaWYgQ0hBTkdFTE9HX01BUktFUiBub3QgaW4gYzoKICAgIHByaW50KCdQQVRDSF9FUlJPUjogY2hhbmdlbG9nIG1hcmtlciBub3QgZm91bmQnKQogICAgc3lzLmV4aXQoMSkKCk5FV19FTlRSWSA9ICgKICAgICcjIC0tLS0gQ2hhbmdlbG9nIC0tLS1cbicKICAgICsgJyMgWzIwMjYtMDQtMjBdIENvZGVtaW5lIChCTEstTkctMTMxKSBcdTIwMTQgR2F0ZSBUb25pY0VuZ2luZSBsb2FkIG9uIGxhdGVudF9lbmdpbmVfZW5hYmxlZCAoIzEzMSlcbicKICAgICsgJyMgICBXaGF0OiBXcmFwcGVkIFRvbmljRW5naW5lIGluaXQgYmxvY2sgaW4gYGlmIHRvbmljX2NvbmZpZy5sYXRlbnRfZW5naW5lX2VuYWJsZWQ6YFxuJwogICAgKyAnIyAgIFdoeTogIFRvbmljQ29uZmlnLmxhdGVudF9lbmdpbmVfZW5hYmxlZCBleGlzdGVkIGJ1dCB3YXMgbmV2ZXIgY2hlY2tlZC4gU2V0dGluZyBpdFxuJwogICAgKyAnIyAgICAgICAgIEZhbHNlIGhhZCBubyBlZmZlY3QgXHUyMDE0IGVuZ2luZSBsb2FkZWQgdW5jb25kaXRpb25hbGx5LCBkYWVtb24gdGhyZWFkXG4nCiAgICArICcjICAgICAgICAga2lsbGVkIG9uIGV4aXQgKGV4aXQgY29kZSAxMzQpIGluIGVwaGVtZXJhbCBzdWJwcm9jZXNzIGNvbnRleHRzLlxuJwogICAgKyAnIyAgICAgICAgIERlZmF1bHQgVHJ1ZSBcdTIwMTQgbm8gYmVoYXZpb3IgY2hhbmdlIGZvciBhbnkgaW5zdGFuY2UgdGhhdCBkb2VzIG5vdFxuJwogICAgKyAnIyAgICAgICAgIGV4cGxpY2l0bHkgc2V0IGxhdGVudF9lbmdpbmVfZW5hYmxlZDogRmFsc2UuXG4nCiAgICArICcjICAgSG93OiAgQWRkZWQgaWYgZ3VhcmQgYXQgYmFzZSBpbmRlbnQ7IGluZGVudGVkIGlubmVyIGJsb2NrIGJ5IDQgc3BhY2VzLlxuJwogICAgKyAnIyAgICAgICAgIEJvdGggSW1wb3J0RXJyb3IgYW5kIGdlbmVyYWwgZXhjZXB0IGJyYW5jaGVzIHN0YXkgaW5zaWRlIHRoZSBndWFyZC5cbicKKQpjID0gYy5yZXBsYWNlKENIQU5HRUxPR19NQVJLRVIsIE5FV19FTlRSWSwgMSkKCm9wZW4ocGF0aCwgJ3cnLCBlbmNvZGluZz0ndXRmLTgnKS53cml0ZShjKQpwcmludCgnUEFUQ0hfQVBQTElFRCcp''').decode()\nwith open('/tmp/ng131_patch.py', 'w') as f:\n    f.write(script)\nprint('SCRIPT_WRITTEN')\n\""
+          },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "SCRIPT_WRITTEN" }
+            ]
+          },
+          "on_failure": "abort"
+        },
+        {
+          "id": "run_patch_script",
+          "type": "action",
+          "description": "Apply the guard to openclaw_hook.py",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 /tmp/ng131_patch.py"
+          },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "PATCH_APPLIED" },
+              { "operator": "not_contains", "value": "PATCH_ERROR" }
+            ]
+          },
+          "on_failure": "abort"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "skip_patch",
+          "type": "action",
+          "description": "Guard already present — nothing to do",
+          "tool": "shell_execute",
+          "params": { "command": "echo ALREADY_APPLIED" },
+          "validation": {
+            "checks": [ { "operator": "contains", "value": "ALREADY_APPLIED" } ]
+          },
+          "on_failure": "continue"
+        }
+      ]
+    },
+    {
+      "id": "verify_guard",
+      "type": "action",
+      "description": "Confirm latent_engine_enabled guard is present in non-comment code",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"lines=[l for l in open('/home/josh/NeuroGraph/openclaw_hook.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'latent_engine_enabled' in l))\""
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "1" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify openclaw_hook.py compiles clean",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile /home/josh/NeuroGraph/openclaw_hook.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "SYNTAX_OK" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_canonical",
+      "type": "action",
+      "description": "Commit openclaw_hook.py to NeuroGraph repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/NeuroGraph && git add openclaw_hook.py && git diff --cached --stat && git commit -m 'Gate TonicEngine load on latent_engine_enabled in openclaw_hook.py (#131)' && git push && echo CANONICAL_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "CANONICAL_DONE" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "update_punchlist",
+      "type": "action",
+      "description": "Mark punchlist #131 DONE",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 << 'PYEOF'\nimport sys\npath = '/home/josh/docs/punchlist/PUNCHLIST.md'\nc = open(path, encoding='utf-8').read()\nif '| 131 |' not in c:\n    print('FAILED: #131 row not found'); sys.exit(1)\nrow_start = c.index('| 131 |')\nrow_end = c.index('\\n', row_start)\nrow = c[row_start:row_end]\nif '**DONE**' in row:\n    print('PUNCHLIST_ALREADY_DONE'); sys.exit(0)\nnew_row = row.replace('| OPEN |', '| **DONE** (2026-04-20) \u2014 BLK-NG-131: if tonic_config.latent_engine_enabled guard added; latent_engine_enabled: False now correctly skips engine load without affecting TonicThread |')\nif new_row == row:\n    print('FAILED: could not find OPEN status in row'); sys.exit(1)\nopen(path, 'w', encoding='utf-8').write(c[:row_start] + new_row + c[row_end:])\nprint('PUNCHLIST_UPDATED')\nPYEOF"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "PUNCHLIST" }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "commit_docs",
+      "type": "action",
+      "description": "Commit punchlist update to docs repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/docs && git add punchlist/PUNCHLIST.md && git commit -m '#131 DONE: gate TonicEngine on latent_engine_enabled (BLK-NG-131)' && git push && echo DOCS_DONE"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "DOCS_DONE" }
+        ]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}
