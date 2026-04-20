@@ -1,4 +1,9 @@
 # ---- Changelog ----
+# [2026-04-19] Claude (Sonnet 4.6) — Add QB Preflight Rubric section
+# What: _build_preflight_rubric_section() added; included in build_system_prompt() after spec generation.
+# Why:  22-point self-scoring gate (≥18/22, 3 HARD BLOCKs) before QB presents any spec.
+#       Root cause of spec failures: old_text not verbatim, duplicate anchors, missing validation.
+# How:  New section injected last. QB must score the rubric and report pass/fail before outputting JSON.
 # [2026-04-17] Claude (Sonnet 4.6) — Harden spec workflow: Step 1 blocks Step 2, venv exclusion
 # What: Step 1 now explicitly states "do this before Step 2, no exceptions"; added venv/git
 #       exclusion pattern to Step 2 grep template. Both from QB #126 test run observation.
@@ -36,6 +41,7 @@ def build_system_prompt(stats: dict, notebook_text: str, tool_definitions: list)
         _build_tools_section(tool_definitions),
         _build_protocols_section(),
         _build_spec_generation_section(),
+        _build_preflight_rubric_section(),
     ]
     return "\n\n".join(sections)
 
@@ -202,3 +208,45 @@ Check every item before outputting the spec:
 ### Step 5 — Present for approval
 Output the complete spec JSON. State clearly what the spec will change and why.
 **Do not execute the spec yourself. Wait for human approval before it runs.**"""
+
+
+def _build_preflight_rubric_section() -> str:
+    return """## Spec Preflight Rubric
+
+Before presenting ANY spec JSON, score it against this rubric. Report your score.
+Gate: ≥18/22 required. All HARD BLOCKs must pass or the spec is rejected.
+
+### §1 — Scope (4 pts)
+- [ ] 1.1 Every target file named explicitly (no "the relevant file")
+- [ ] 1.2 Acceptance criteria are observable and binary (pass/fail)
+- [ ] 1.3 All call sites found in Step 2 are covered in spec steps
+- [ ] 1.4 If any edited file is vendored, spec includes re-vendor step for all module copies
+
+### §2 — Edit Steps (6 pts)
+- [ ] **2.1 HARD BLOCK** — All edit_file old_text copied verbatim from read_file this session (not from memory or punchlist)
+- [ ] **2.2 HARD BLOCK** — All old_text values are unique in their target file (grep -c confirmed count = 1)
+- [ ] 2.3 Multi-step edits to same file ordered correctly (no anchor invalidation)
+- [ ] 2.4 No write_file content contains `...` or `# rest unchanged` placeholders
+- [ ] 2.5 No hardcoded /home/josh/ absolute paths (workspace="." relative only)
+- [ ] 2.6 No credentials or tokens in any step params
+
+### §3 — Validation (6 pts)
+- [ ] **3.1 HARD BLOCK** — Every action step has a non-empty validation.checks array
+- [ ] 3.2 Every edit_file validation uses result_is_string
+- [ ] 3.3 Checks test the outcome (file_contains after write), not just that the tool ran
+- [ ] 3.4 Syntax check present after any Python file edit (python3 -m py_compile)
+- [ ] 3.5 Final verify step reads/greps modified file to confirm new text is present
+- [ ] 3.6 Critical edit steps have on_failure: "abort"
+
+### §4 — Constraints (4 pts)
+- [ ] 4.1 tool_allowlist contains only tools the spec actually uses
+- [ ] 4.2 never block names the specific anti-pattern for this task
+- [ ] 4.3 anti_drift contains a scope guard against touching unrelated files
+- [ ] 4.4 max_iterations ≤ 2× the step count
+
+### §5 — Snap Interface (2 pts)
+- [ ] 5.1 snap_interface.inputs lists every file read before editing
+- [ ] 5.2 snap_interface.outputs states the contract
+
+**Report format:** "Preflight: 21/22 — gap at 3.4 (no syntax check). Proceeding." or "Preflight: HARD BLOCK at 2.1 — old_text not verified. Revising."
+**Do not output the spec JSON until you have reported the preflight score.**"""
