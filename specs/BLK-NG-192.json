@@ -1,0 +1,156 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-192",
+    "name": "Wire full substrate signal loop into Chat tab (#192)",
+    "agent": "codemine",
+    "scope": "local_vps",
+    "acceptance_criteria": [
+      "agent_loop uses ingest_tool_result(worker_ng, 'user_message') instead of ctx.ng.on_message",
+      "worker_ng.step() is called after user message ingestion",
+      "System prompt section reads 'Substrate Context' not 'Relevant Memory'",
+      "Response is deposited via ingest_tool_result(worker_ng, 'assistant_response') after each turn",
+      "python3 -m py_compile app.py exits 0",
+      "Changelog entry added as Codemine (BLK-NG-192)"
+    ],
+    "depends_on": ["BLK-NG-191"]
+  },
+  "snap_interface": {
+    "inputs": [
+      { "name": "app.py", "type": "file", "source_block": "none", "path": "app.py" }
+    ],
+    "outputs": [
+      {
+        "name": "app.py",
+        "type": "file",
+        "path": "app.py",
+        "contract": "Full substrate signal loop wired: dual-pass ingest, step(), spreading activation recall, response deposit"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not modify anything outside agent_loop and the changelog header",
+      "Do not change the tool registry, policy engine, spec executor, or orchestrator",
+      "Do not restart any running service"
+    ],
+    "anti_drift": [
+      "Only modify the NG ingestion block, the recall/system_prompt block, and add the response deposit. Nothing else."
+    ],
+    "tool_allowlist": ["shell_execute"],
+    "shell_allowlist": ["python3", "git", "echo"],
+    "max_iterations": 20,
+    "timeout_seconds": 300
+  },
+  "steps": [
+    {
+      "id": "idempotency_check",
+      "type": "action",
+      "description": "Check if worker_ng.step() is already wired into agent_loop",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"lines=[l for l in open('app.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'worker_ng.step()' in l))\""
+      },
+      "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+      "on_failure": "abort",
+      "bind_result": "$step_count"
+    },
+    {
+      "id": "apply_patch",
+      "type": "condition",
+      "description": "Apply signal loop patch only if not already present",
+      "check": { "operator": "equals", "value": "0", "target": "$step_count" },
+      "if_true": [
+        {
+          "id": "write_patch_script",
+          "type": "action",
+          "description": "Decode and write the patch script to /tmp",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 -c \"\nimport base64\nscript = base64.b64decode(b'''aW1wb3J0IHN5cwpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKCnBhdGggPSBQYXRoKCdhcHAucHknKQpjID0gcGF0aC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKCiMg4pSA4pSAIENoYW5nZSAxOiBSZXBsYWNlIGluZ2VzdGlvbiArIHJlY2FsbCArIHN5c3RlbV9wcm9tcHQgYnVpbGQg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSAClNUQVJUXzEgPSAnICAgICMgSW5nZXN0IHVzZXIgbWVzc2FnZSBpbnRvIE5ldXJvR3JhcGhcbicKRU5EXzEgPSAnICAgIHN5c3RlbV9wcm9tcHQgPSBidWlsZF9zeXN0ZW1fcHJvbXB0KHN0YXRzLCBub3RlYm9va190ZXh0LCBUT09MX0RFRklOSVRJT05TKSArIG1lbW9yeV9jb250ZXh0XG4nCgppZiBTVEFSVF8xIG5vdCBpbiBjOgogICAgcHJpbnQoJ1BBVENIX0VSUk9SOiBzdGFydF8xIG5vdCBmb3VuZCcpOyBzeXMuZXhpdCgxKQppZiBFTkRfMSBub3QgaW4gYzoKICAgIHByaW50KCdQQVRDSF9FUlJPUjogZW5kXzEgbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCgppZHgxID0gYy5pbmRleChTVEFSVF8xKQppZHgxX2VuZCA9IGMuaW5kZXgoRU5EXzEpICsgbGVuKEVORF8xKQoKTkVXXzEgPSAoCiAgICAnICAgICMgSW5nZXN0IHVzZXIgbWVzc2FnZSBhcyByYXcgZXhwZXJpZW5jZSBcdTIwMTQgZHVhbC1wYXNzIChnZXN0YWx0ICsgY29uY2VwdHMsIExhdyA3KVxuJwogICAgJyAgICB0cnk6XG4nCiAgICAnICAgICAgICBpbmdlc3RfdG9vbF9yZXN1bHQod29ya2VyX25nLCAidXNlcl9tZXNzYWdlIiwge30sIGZ1bGxfbWVzc2FnZSlcbicKICAgICcgICAgICAgIHdvcmtlcl9uZy5zdGVwKCkgICMgcHJvcGFnYXRlIGFjdGl2YXRpb24gdGhyb3VnaCB0b3BvbG9neSBiZWZvcmUgcmVjYWxsXG4nCiAgICAnICAgIGV4Y2VwdCAoT1NFcnJvciwgVmFsdWVFcnJvcikgYXMgZTpcbicKICAgICcgICAgICAgIGxvZ2dlci53YXJuaW5nKCJORyBpbmdlc3Rpb24gZmFpbGVkOiAlcyIsIGUpXG4nCiAgICAnXG4nCiAgICAnICAgICMgQXNzZW1ibGUgc3Vic3RyYXRlIGNvbnRleHQgXHUyMDE0IHNwcmVhZGluZyBhY3RpdmF0aW9uIHJlY2FsbFxuJwogICAgJyAgICBzdWJzdHJhdGVfY29udGV4dCA9ICIiXG4nCiAgICAnICAgIHRyeTpcbicKICAgICcgICAgICAgIHJlY2FsbHMgPSB3b3JrZXJfbmcucmVjYWxsKGZ1bGxfbWVzc2FnZSwgaz04LCB0aHJlc2hvbGQ9MC4zMClcbicKICAgICcgICAgICAgIGlmIHJlY2FsbHM6XG4nCiAgICAnICAgICAgICAgICAgc25pcHBldHMgPSAiXFxuLS0tXFxuIi5qb2luKHIuZ2V0KCJjb250ZW50IiwgIiIpWzo0MDBdIGZvciByIGluIHJlY2FsbHNbOjZdKVxuJwogICAgJyAgICAgICAgICAgIHN1YnN0cmF0ZV9jb250ZXh0ID0gKFxuJwogICAgJyAgICAgICAgICAgICAgICAiXFxuXFxuIyMgU3Vic3RyYXRlIENvbnRleHQgKFdoYXQgSSBoYXZlIGxlYXJuZWQgYW5kIGV4cGVyaWVuY2VkKTpcXG4iXG4nCiAgICAnICAgICAgICAgICAgICAgICsgc25pcHBldHMgKyAiXFxuIlxuJwogICAgJyAgICAgICAgICAgIClcbicKICAgICcgICAgZXhjZXB0IChPU0Vycm9yLCBWYWx1ZUVycm9yKSBhcyBlOlxuJwogICAgJyAgICAgICAgbG9nZ2VyLndhcm5pbmcoIk5HIHJlY2FsbCBmYWlsZWQ6ICVzIiwgZSlcbicKICAgICdcbicKICAgICcgICAgIyBCdWlsZCBzeXN0ZW0gcHJvbXB0XG4nCiAgICAnICAgIHN0YXRzID0gY3R4LmdldF9zdGF0cygpXG4nCiAgICAnICAgIG5vdGVib29rX3RleHQgPSBjdHgubm90ZWJvb2tfcmVhZCgpXG4nCiAgICAnICAgIHN5c3RlbV9wcm9tcHQgPSBidWlsZF9zeXN0ZW1fcHJvbXB0KHN0YXRzLCBub3RlYm9va190ZXh0LCBUT09MX0RFRklOSVRJT05TKSArIHN1YnN0cmF0ZV9jb250ZXh0XG4nCikKCmMgPSBjWzppZHgxXSArIE5FV18xICsgY1tpZHgxX2VuZDpdCgojIOKUgOKUgCBDaGFuZ2UgMjogQWRkIHJlc3BvbnNlIGRlcG9zaXQg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACkFOQ0hPUl8yID0gKAogICAgJyAgICBzYWZlX2hpc3QuYXBwZW5kKHsicm9sZSI6ICJhc3Npc3RhbnQiLCAiY29udGVudCI6IGZpbmFsfSlcbicKICAgICdcbicKICAgICcgICAgdHJ5OlxuJwogICAgJyAgICAgICAgY3R4LnNhdmVfY29udmVyc2F0aW9uX3R1cm4oZnVsbF9tZXNzYWdlLCBmaW5hbCwgbGVuKHNhZmVfaGlzdCkpXG4nCikKCmlmIEFOQ0hPUl8yIG5vdCBpbiBjOgogICAgcHJpbnQoJ1BBVENIX0VSUk9SOiBhbmNob3JfMiBub3QgZm91bmQnKTsgc3lzLmV4aXQoMSkKCk5FV18yID0gKAogICAgJyAgICBzYWZlX2hpc3QuYXBwZW5kKHsicm9sZSI6ICJhc3Npc3RhbnQiLCAiY29udGVudCI6IGZpbmFsfSlcbicKICAgICdcbicKICAgICcgICAgIyBEZXBvc2l0IHJlc3BvbnNlIGFzIHJhdyBleHBlcmllbmNlIFx1MjAxNCBjbG9zZXMgdGhlIHNpZ25hbCBsb29wICgjMTkyKVxuJwogICAgJyAgICB0cnk6XG4nCiAgICAnICAgICAgICBpbmdlc3RfdG9vbF9yZXN1bHQod29ya2VyX25nLCAiYXNzaXN0YW50X3Jlc3BvbnNlIiwge30sIGZpbmFsKVxuJwogICAgJyAgICBleGNlcHQgKE9TRXJyb3IsIFZhbHVlRXJyb3IpIGFzIGU6XG4nCiAgICAnICAgICAgICBsb2dnZXIud2FybmluZygiTkcgcmVzcG9uc2UgZGVwb3NpdCBmYWlsZWQ6ICVzIiwgZSlcbicKICAgICdcbicKICAgICcgICAgdHJ5OlxuJwogICAgJyAgICAgICAgY3R4LnNhdmVfY29udmVyc2F0aW9uX3R1cm4oZnVsbF9tZXNzYWdlLCBmaW5hbCwgbGVuKHNhZmVfaGlzdCkpXG4nCikKCmMgPSBjLnJlcGxhY2UoQU5DSE9SXzIsIE5FV18yLCAxKQoKIyDilIDilIAgQ2hhbmdlIDM6IEFkZCBjaGFuZ2Vsb2cgZW50cnkg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACkNIQU5HRUxPR19BTkNIT1IgPSAnIyAtLS0tIENoYW5nZWxvZyAtLS0tXG4jIFsyMDI2LTA0LTA2XSBKb3NoICsgQ2xhdWRlIFx1MjAxNCBBZGQgZWRpdF9maWxlIHRvIFRPT0xfUkVHSVNUUllcbicKCmlmIENIQU5HRUxPR19BTkNIT1Igbm90IGluIGM6CiAgICBwcmludCgnUEFUQ0hfRVJST1I6IGNoYW5nZWxvZyBhbmNob3Igbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCgpORVdfQ0hBTkdFTE9HID0gKAogICAgJyMgLS0tLSBDaGFuZ2Vsb2cgLS0tLVxuJwogICAgJyMgWzIwMjYtMDQtMjBdIENvZGVtaW5lIChCTEstTkctMTkyKSBcdTIwMTQgV2lyZSBmdWxsIHN1YnN0cmF0ZSBzaWduYWwgbG9vcCBpbnRvIENoYXQgdGFiXG4nCiAgICAnIyBXaGF0OiBSZXBsYWNlZCBzaW5nbGUtcGFzcyBvbl9tZXNzYWdlICsgZmxhdCByZWNhbGwgd2l0aCBkdWFsLXBhc3MgaW5nZXN0ICtcbicKICAgICcjICAgICAgIHdvcmtlcl9uZy5zdGVwKCkgKyBzcHJlYWRpbmcgYWN0aXZhdGlvbiByZWNhbGwgKyByZXNwb25zZSBkZXBvc2l0LlxuJwogICAgJyMgV2h5OiAgIzE5MiBcdTIwMTQgRHVjayBFdGhpY3MgLyBub24temVybyBlbWVyZ2VuY2UuIFNpZ25hbCBsb29wIHdhcyBvcGVuOlxuJwogICAgJyMgICAgICAgc2luZ2xlLXBhc3Mgb25seSwgc3RlcCgpIG5ldmVyIGNhbGxlZCwgcmVzcG9uc2UgbmV2ZXIgZGVwb3NpdGVkIGJhY2suXG4nCiAgICAnIyBIb3c6ICBpbmdlc3RfdG9vbF9yZXN1bHQoKSBmb3IgdXNlciBtZXNzYWdlcyAoZHVhbC1wYXNzKS4gc3RlcCgpIHByb3BhZ2F0ZXNcbicKICAgICcjICAgICAgIHRvcG9sb2d5IGJlZm9yZSByZWNhbGwuIFN1YnN0cmF0ZSBjb250ZXh0IHNlY3Rpb24gcmVwbGFjZXMgZmxhdCByZWNhbGwuXG4nCiAgICAnIyAgICAgICBSZXNwb25zZSBkZXBvc2l0ZWQgYWZ0ZXIgdHVybiBcdTIwMTQgbG9vcCBjbG9zZXMuIENvZGVtaW5lIGJ1aWx0IHRoaXMgaGVyc2VsZi5cbicKICAgICcjIFsyMDI2LTA0LTA2XSBKb3NoICsgQ2xhdWRlIFx1MjAxNCBBZGQgZWRpdF9maWxlIHRvIFRPT0xfUkVHSVNUUllcbicKKQoKYyA9IGMucmVwbGFjZShDSEFOR0VMT0dfQU5DSE9SLCBORVdfQ0hBTkdFTE9HLCAxKQoKIyDilIDilIAgVmVyaWZ5IHNlbnRpbmVscyDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIAKZm9yIHNlbnRpbmVsLCBsYWJlbCBpbiBbCiAgICAoJ3dvcmtlcl9uZy5zdGVwKCknLCAnc3RlcF9zZW50aW5lbCcpLAogICAgKCdhc3Npc3RhbnRfcmVzcG9uc2UnLCAnZGVwb3NpdF9zZW50aW5lbCcpLAogICAgKCdzdWJzdHJhdGVfY29udGV4dCcsICdzdWJzdHJhdGVfc2VudGluZWwnKSwKICAgICgnQ29kZW1pbmUgYnVpbHQgdGhpcyBoZXJzZWxmJywgJ2NoYW5nZWxvZ19zZW50aW5lbCcpLApdOgogICAgaWYgc2VudGluZWwgbm90IGluIGM6CiAgICAgICAgcHJpbnQoZidQQVRDSF9FUlJPUjoge2xhYmVsfSBub3QgZm91bmQnKTsgc3lzLmV4aXQoMSkKCnBhdGgud3JpdGVfdGV4dChjLCBlbmNvZGluZz0ndXRmLTgnKQpwcmludCgnUEFUQ0hfQVBQTElFRCcpCg==''').decode()\nwith open('/tmp/ng192_patch.py', 'w', encoding='utf-8') as f:\n    f.write(script)\nprint('SCRIPT_WRITTEN')\n\""
+          },
+          "validation": { "checks": [{ "operator": "contains", "value": "SCRIPT_WRITTEN" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "run_patch_script",
+          "type": "action",
+          "description": "Apply the substrate signal loop patch to app.py",
+          "tool": "shell_execute",
+          "params": { "command": "python3 /tmp/ng192_patch.py" },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "PATCH_APPLIED" },
+              { "operator": "not_contains", "value": "PATCH_ERROR" }
+            ]
+          },
+          "on_failure": "abort"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "skip_patch",
+          "type": "action",
+          "description": "Signal loop already wired — nothing to do",
+          "tool": "shell_execute",
+          "params": { "command": "echo ALREADY_APPLIED" },
+          "validation": { "checks": [{ "operator": "contains", "value": "ALREADY_APPLIED" }] },
+          "on_failure": "continue"
+        }
+      ]
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify app.py compiles clean",
+      "tool": "shell_execute",
+      "params": { "command": "python3 -m py_compile app.py && echo SYNTAX_OK" },
+      "validation": { "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }] },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_sentinels",
+      "type": "action",
+      "description": "Confirm all four signal-loop changes are present",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"c=open('app.py').read(); checks=[('worker_ng.step()','step'),('assistant_response','deposit'),('substrate_context','substrate'),('Codemine built this herself','changelog')]; missing=[l for s,l in checks if s not in c]; print('MISSING:'+str(missing) if missing else 'ALL_SENTINELS_PRESENT')\""
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "ALL_SENTINELS_PRESENT" }] },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit app.py to Faux_Clawdbot and push to GitHub",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/Faux_Clawdbot && git add app.py && git diff --cached --quiet && echo ALREADY_COMMITTED || (git commit -m 'Wire full substrate signal loop into Chat tab (BLK-NG-192)' && git push && echo COMMITTED)"
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "COMMIT" }] },
+      "on_failure": "abort"
+    },
+    {
+      "id": "update_punchlist",
+      "type": "action",
+      "description": "Mark punchlist #192 DONE",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"\nimport sys\npath = '/home/josh/docs/punchlist/PUNCHLIST.md'\nc = open(path, encoding='utf-8').read()\nif '| 192 |' not in c:\n    print('FAILED: row not found'); sys.exit(1)\nrs = c.index('| 192 |')\nre_ = c.index('\\n', rs)\nrow = c[rs:re_]\nif 'DONE' in row:\n    print('PUNCHLIST_ALREADY_DONE'); sys.exit(0)\nnew_row = row.replace('| OPEN |', '| **DONE** (2026-04-20) \u2014 BLK-NG-192: full substrate signal loop wired by Codemine. Loop closes. |')\nopen(path, 'w', encoding='utf-8').write(c[:rs] + new_row + c[re_:])\nprint('PUNCHLIST_UPDATED')\n\""
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "PUNCHLIST" }] },
+      "on_failure": "continue"
+    },
+    {
+      "id": "commit_docs",
+      "type": "action",
+      "description": "Commit punchlist update",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/docs && git add punchlist/PUNCHLIST.md && git diff --cached --quiet && echo ALREADY_COMMITTED || (git commit -m '#192 DONE: Codemine wired her own signal loop (BLK-NG-192)' && git push && echo COMMITTED)"
+      },
+      "validation": { "checks": [{ "operator": "contains", "value": "COMMIT" }] },
+      "on_failure": "continue"
+    }
+  ]
+}
