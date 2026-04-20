@@ -65,7 +65,7 @@
       "description": "Check if _peer_events still exists in canonical — skip all edits if already clean",
       "tool": "shell_execute",
       "params": {
-        "command": "grep -c 'self._peer_events' /home/josh/NeuroGraph/ng_tract_bridge.py || echo 0"
+        "command": "python3 -c \"c=open('/home/josh/NeuroGraph/ng_tract_bridge.py').read(); print(c.count('self._peer_events'))\""
       },
       "validation": {
         "checks": [
