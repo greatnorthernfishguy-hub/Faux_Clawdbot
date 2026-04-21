@@ -75,6 +75,7 @@ COPY report_evaluator.py .
 COPY risk_authority.py .
 COPY spec_generator.py .
 COPY orchestrator.py .
+COPY ng_topology_sync.py .
 
 # Copy tools directory
 COPY tools/ ./tools/
