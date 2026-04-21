@@ -1,0 +1,240 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-GUI-197",
+    "name": "NeuroGraph GUI 2.0 — Phase 1: Module Command Center",
+    "agent": "QB",
+    "scope": "NeuroGraph — add Modules tab to neurograph_gui.py and write apply_registry_update.py helper",
+    "acceptance_criteria": [
+      "Modules tab renders with Treeview listing all registry modules",
+      "'Restart Ecosystem' button present and wired to EcosystemRestarter",
+      "'Sync Vendored Files' action clickable per module row",
+      "ModuleRegistry, VendoredFileStalenessChecker, VendoredFileSyncer, EcosystemRestarter classes present in neurograph_gui.py",
+      "_sha256_file() extracted to module level; GitUpdater._file_sha256 delegates to it",
+      "_deploy_copy_fallback core_files includes ng_tract_bridge.py and ng_embed.py",
+      "DEFAULT_CONFIG has dashboard_refresh_seconds and topology_max_synapses keys",
+      "python3 -m py_compile neurograph_work/neurograph_gui.py passes with exit code 0",
+      "apply_registry_update.py committed alongside neurograph_gui.py changes",
+      "Changes committed and pushed to NeuroGraph repo"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "neurograph_gui.py", "type": "file", "source_block": "none", "path": "neurograph_work/neurograph_gui.py"}
+    ],
+    "outputs": [
+      {
+        "name": "neurograph_gui.py",
+        "type": "file",
+        "path": "neurograph_work/neurograph_gui.py",
+        "contract": "Modules tab added; 4 new classes present; _sha256_file module-level; dashboard/topology config keys added; py_compile passes"
+      },
+      {
+        "name": "apply_registry_update.py",
+        "type": "file",
+        "path": "neurograph_work/apply_registry_update.py",
+        "contract": "VPS helper script — Josh runs once: python3 ~/NeuroGraph/apply_registry_update.py — fixes trollguard port, darwin entry, adds neurograph entry"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not modify any vendored file: ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, openclaw_adapter.py, ng_autonomic.py, ng_embed.py",
+      "Do not touch data/checkpoints/ or any msgpack file",
+      "Do not write to ~/.et_modules/registry.json directly — only write the helper script"
+    ],
+    "anti_drift": [
+      "All new classes go inside neurograph_gui.py, not in new files",
+      "EcosystemRestarter.RESTART_SEQUENCE order is fixed: TID first, TrollGuard second, gateway last",
+      "No direct module imports in new GUI code — HTTP endpoints or file reads only (Law 1)",
+      "apply_registry_update.py is a helper for Josh to run on the VPS — do not execute it from the spec"
+    ],
+    "tool_allowlist": ["write_file", "edit_file", "shell_execute", "read_file"],
+    "shell_allowlist": ["rm", "echo"]
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set — needed for authenticated clone of private repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""
+      },
+      "validation": {"checks": [{"operator": "contains", "value": "TOKEN_OK"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone directories from any previous runs",
+      "tool": "shell_execute",
+      "params": {"command": "rm -rf neurograph_work && echo CLEANED"},
+      "validation": {"checks": [{"operator": "contains", "value": "CLEANED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_repo",
+      "type": "action",
+      "description": "Clone NeuroGraph repo for editing",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone --depth=1 https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/NeuroGraph.git neurograph_work && echo CLONE_OK"
+      },
+      "validation": {"checks": [{"operator": "contains", "value": "CLONE_OK"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_default_config",
+      "type": "action",
+      "description": "Add dashboard_refresh_seconds and topology_max_synapses keys to DEFAULT_CONFIG",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "    \"status_refresh_seconds\": 5,\n}",
+        "new_text": "    \"status_refresh_seconds\": 5,\n    \"dashboard_refresh_seconds\": 30,\n    \"topology_max_synapses\": 200,\n}"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_optional_imports_and_sha256",
+      "type": "action",
+      "description": "Add msgpack/sklearn/matplotlib optional import guards and extract _sha256_file() as module-level function",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "try:\n    import tkinterdnd2\n    _HAS_DND = True\nexcept ImportError:\n    _HAS_DND = False\n\n# ---------------------------------------------------------------------------\n# 1. GUIConfig",
+        "new_text": "try:\n    import tkinterdnd2\n    _HAS_DND = True\nexcept ImportError:\n    _HAS_DND = False\n\ntry:\n    import msgpack as _msgpack\n    _HAS_MSGPACK = True\nexcept ImportError:\n    _HAS_MSGPACK = False\n\ntry:\n    from sklearn.decomposition import PCA as _PCA\n    _HAS_SKLEARN = True\nexcept ImportError:\n    _HAS_SKLEARN = False\n\ntry:\n    import matplotlib\n    matplotlib.use(\"TkAgg\")\n    import matplotlib.pyplot as _plt\n    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FigureCanvasTkAgg\n    from mpl_toolkits.mplot3d import Axes3D as _Axes3D  # noqa: F401\n    _HAS_MATPLOTLIB = True\nexcept ImportError:\n    _HAS_MATPLOTLIB = False\n\n\ndef _sha256_file(path: Path) -> Optional[str]:\n    \"\"\"Return hex SHA-256 of *path*, or None if the file doesn't exist.\"\"\"\n    if not path.is_file():\n        return None\n    h = hashlib.sha256()\n    with open(path, \"rb\") as f:\n        for chunk in iter(lambda: f.read(8192), b\"\"):\n            h.update(chunk)\n    return h.hexdigest()\n\n\n# ---------------------------------------------------------------------------\n# 1. GUIConfig"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "update_sha256_method",
+      "type": "action",
+      "description": "Make GitUpdater._file_sha256 delegate to the new module-level _sha256_file()",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "    @staticmethod\n    def _file_sha256(path: Path) -> Optional[str]:\n        \"\"\"Return hex SHA-256 of *path*, or None if the file doesn't exist.\"\"\"\n        if not path.is_file():\n            return None\n        h = hashlib.sha256()\n        with open(path, \"rb\") as f:\n            for chunk in iter(lambda: f.read(8192), b\"\"):\n                h.update(chunk)\n        return h.hexdigest()",
+        "new_text": "    @staticmethod\n    def _file_sha256(path: Path) -> Optional[str]:\n        return _sha256_file(path)"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "fix_deploy_fallback",
+      "type": "action",
+      "description": "Add ng_tract_bridge.py and ng_embed.py to _deploy_copy_fallback core_files (missing since 2026-03-22)",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "            # Phase 7: Peer bridge + ET Module Manager\n            \"ng_peer_bridge.py\", \"et_module.json\",",
+        "new_text": "            # Phase 7: Peer bridge + ET Module Manager\n            \"ng_peer_bridge.py\", \"ng_tract_bridge.py\", \"ng_embed.py\", \"et_module.json\","
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_new_classes",
+      "type": "action",
+      "description": "Insert ModuleRegistry, VendoredFileStalenessChecker, VendoredFileSyncer, EcosystemRestarter before IngestionManager",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "# ---------------------------------------------------------------------------\n# 4. IngestionManager\n# ---------------------------------------------------------------------------\n\n\nclass IngestionManager:\n    \"\"\"Coordinates file ingestion and post-ingestion file movement.",
+        "new_text": "# ---------------------------------------------------------------------------\n# 4. ModuleRegistry, VendoredFileStalenessChecker, VendoredFileSyncer, EcosystemRestarter\n# ---------------------------------------------------------------------------\n\n_VENDORED_FILES: List[str] = [\n    \"ng_lite.py\",\n    \"ng_tract_bridge.py\",\n    \"ng_peer_bridge.py\",\n    \"ng_ecosystem.py\",\n    \"openclaw_adapter.py\",\n    \"ng_autonomic.py\",\n    \"ng_embed.py\",\n]\n\n_CANONICAL_ROOT = Path.home() / \"NeuroGraph\"\n\n\nclass ModuleRegistry:\n    \"\"\"Load ~/.et_modules/registry.json and expose the module list.\"\"\"\n\n    REGISTRY_PATH = Path.home() / \".et_modules\" / \"registry.json\"\n\n    def __init__(self) -> None:\n        self._modules: List[Dict[str, Any]] = []\n        self._load()\n\n    def _load(self) -> None:\n        try:\n            if not self.REGISTRY_PATH.exists():\n                _logger.warning(\"registry.json not found: %s\", self.REGISTRY_PATH)\n                return\n            data = json.loads(self.REGISTRY_PATH.read_text())\n            raw = data.get(\"modules\", {})\n            if isinstance(raw, dict):\n                self._modules = list(raw.values())\n            elif isinstance(raw, list):\n                self._modules = raw\n        except Exception as exc:\n            _logger.warning(\"Registry load failed: %s\", exc)\n\n    def get_modules(self) -> List[Dict[str, Any]]:\n        return list(self._modules)\n\n    def reload(self) -> None:\n        self._modules = []\n        self._load()\n\n\nclass VendoredFileStalenessChecker:\n    \"\"\"SHA-256 diff of each module's vendored files vs canonical ~/NeuroGraph/.\"\"\"\n\n    def check_module(self, module: Dict[str, Any]) -> int:\n        \"\"\"Return count of stale or missing vendored files for *module*.\"\"\"\n        install_path = module.get(\"install_path\", \"\")\n        if not install_path:\n            return 0\n        module_dir = Path(install_path)\n        stale = 0\n        for fname in _VENDORED_FILES:\n            canonical = _CANONICAL_ROOT / fname\n            if not canonical.exists():\n                continue\n            candidates = [\n                module_dir / fname,\n                module_dir / \"inference_difference\" / fname,\n            ]\n            found = next((p for p in candidates if p.exists()), None)\n            if found is None:\n                stale += 1\n            elif _sha256_file(canonical) != _sha256_file(found):\n                stale += 1\n        return stale\n\n\nclass VendoredFileSyncer:\n    \"\"\"Copy vendored files from canonical ~/NeuroGraph/ into a module directory.\"\"\"\n\n    def __init__(\n        self,\n        on_status: Callable[[str], None],\n        on_complete: Callable[[Dict[str, Any]], None],\n        on_error: Callable[[Exception], None],\n    ) -> None:\n        self._on_status = on_status\n        self._on_complete = on_complete\n        self._on_error = on_error\n\n    def sync_module(self, module: Dict[str, Any]) -> None:\n        threading.Thread(\n            target=self._sync_worker, args=(module,), daemon=True,\n        ).start()\n\n    def _sync_worker(self, module: Dict[str, Any]) -> None:\n        try:\n            install_path = module.get(\"install_path\", \"\")\n            if not install_path:\n                self._on_error(ValueError(\n                    f\"No install_path for {module.get('module_id')}\"\n                ))\n                return\n            module_dir = Path(install_path)\n            synced = 0\n            for fname in _VENDORED_FILES:\n                canonical = _CANONICAL_ROOT / fname\n                if not canonical.exists():\n                    continue\n                candidates = [\n                    module_dir / fname,\n                    module_dir / \"inference_difference\" / fname,\n                ]\n                dst = next((p for p in candidates if p.exists()), module_dir / fname)\n                dst.parent.mkdir(parents=True, exist_ok=True)\n                shutil.copy2(str(canonical), str(dst))\n                synced += 1\n                self._on_status(f\"  Synced {fname}\")\n            self._on_complete({\"success\": True, \"files_synced\": synced})\n        except Exception as exc:\n            self._on_error(exc)\n\n\nclass EcosystemRestarter:\n    \"\"\"Restart the full ecosystem in fixed sequence: TID \\u2192 TrollGuard \\u2192 gateway.\"\"\"\n\n    RESTART_SEQUENCE = [\n        (\"TID\", \"sudo systemctl restart inference-difference\"),\n        (\"TrollGuard\", \"sudo systemctl restart trollguard\"),\n        (\"OpenClaw Gateway\", \"openclaw gateway restart\"),\n    ]\n\n    def __init__(\n        self,\n        on_status: Callable[[str, str], None],\n        on_complete: Callable[[Dict[str, Any]], None],\n        on_error: Callable[[Exception], None],\n    ) -> None:\n        self._on_status = on_status\n        self._on_complete = on_complete\n        self._on_error = on_error\n        self._running = False\n\n    @property\n    def running(self) -> bool:\n        return self._running\n\n    def restart(self) -> None:\n        if self._running:\n            return\n        self._running = True\n        threading.Thread(target=self._restart_worker, daemon=True).start()\n\n    def _restart_worker(self) -> None:\n        results: List[Dict[str, Any]] = []\n        try:\n            for name, cmd in self.RESTART_SEQUENCE:\n                self._on_status(name, \"running\")\n                try:\n                    r = subprocess.run(\n                        cmd, shell=True,\n                        capture_output=True, text=True, timeout=60,\n                    )\n                    if r.returncode == 0:\n                        self._on_status(name, \"done\")\n                        results.append({\"step\": name, \"success\": True})\n                    else:\n                        stderr = r.stderr.strip()\n                        if \"sudo\" in cmd and (\n                            \"permission\" in stderr.lower()\n                            or \"password\" in stderr.lower()\n                        ):\n                            self._on_status(name, \"sudo_required\")\n                            results.append({\n                                \"step\": name, \"success\": False,\n                                \"cmd\": cmd, \"reason\": \"sudo_required\",\n                            })\n                        else:\n                            self._on_status(name, \"failed\")\n                            results.append({\n                                \"step\": name, \"success\": False,\n                                \"reason\": stderr[:200],\n                            })\n                except subprocess.TimeoutExpired:\n                    self._on_status(name, \"timeout\")\n                    results.append({\"step\": name, \"success\": False, \"reason\": \"timeout\"})\n                except Exception as exc:\n                    self._on_status(name, \"failed\")\n                    results.append({\"step\": name, \"success\": False, \"reason\": str(exc)})\n        finally:\n            self._running = False\n            self._on_complete({\"results\": results})\n\n\n# ---------------------------------------------------------------------------\n# 5. IngestionManager\n# ---------------------------------------------------------------------------\n\n\nclass IngestionManager:\n    \"\"\"Coordinates file ingestion and post-ingestion file movement."
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_geometry",
+      "type": "action",
+      "description": "Expand window geometry from 900x650 to 1100x750",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "        self.root.geometry(\"900x650\")\n        self.root.minsize(750, 520)",
+        "new_text": "        self.root.geometry(\"1100x750\")\n        self.root.minsize(900, 600)"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_gui_init",
+      "type": "action",
+      "description": "Add module_registry, vendored_file_syncer, ecosystem_restarter manager instances after git_updater in __init__",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "            on_error=lambda e: self.msg_queue.put(self._on_update_error, e),\n        )\n        self.file_watcher: Optional[FileWatcher] = None",
+        "new_text": "            on_error=lambda e: self.msg_queue.put(self._on_update_error, e),\n        )\n        self.module_registry = ModuleRegistry()\n        self.vendored_file_syncer = VendoredFileSyncer(\n            on_status=lambda s: self.msg_queue.put(self._on_update_status, s),\n            on_complete=lambda r: self.msg_queue.put(self._on_sync_complete, r),\n            on_error=lambda e: self.msg_queue.put(self._on_update_error, e),\n        )\n        self.ecosystem_restarter = EcosystemRestarter(\n            on_status=lambda step, status: self.msg_queue.put(\n                self._on_restart_step_status, step, status\n            ),\n            on_complete=lambda r: self.msg_queue.put(self._on_restart_complete, r),\n            on_error=lambda e: self.msg_queue.put(self._on_update_error, e),\n        )\n        self.file_watcher: Optional[FileWatcher] = None"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_build_tabs",
+      "type": "action",
+      "description": "Add _build_modules_tab() call in _build_tabs() between updates and logs tabs",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "        self._build_updates_tab()\n        self._build_logs_tab()",
+        "new_text": "        self._build_updates_tab()\n        self._build_modules_tab()\n        self._build_logs_tab()"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_modules_tab_methods",
+      "type": "action",
+      "description": "Insert _build_modules_tab and all handler methods into NeuroGraphGUI before the Logs Tab section",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "    def _append_update_log(self, text: str) -> None:\n        ts = datetime.now().strftime(\"%H:%M:%S\")\n        self._update_log.config(state=tk.NORMAL)\n        self._update_log.insert(tk.END, f\"[{ts}] {text}\\n\")\n        self._update_log.see(tk.END)\n        self._update_log.config(state=tk.DISABLED)\n\n    # ---- Logs Tab ----",
+        "new_text": "    def _append_update_log(self, text: str) -> None:\n        ts = datetime.now().strftime(\"%H:%M:%S\")\n        self._update_log.config(state=tk.NORMAL)\n        self._update_log.insert(tk.END, f\"[{ts}] {text}\\n\")\n        self._update_log.see(tk.END)\n        self._update_log.config(state=tk.DISABLED)\n\n    # ---- Modules Tab ----\n\n    def _build_modules_tab(self) -> None:\n        frame = ttk.Frame(self.notebook, padding=10)\n        self.notebook.add(frame, text=\" Modules \")\n\n        hdr = ttk.Frame(frame)\n        hdr.pack(fill=tk.X, pady=(0, 8))\n        ttk.Label(hdr, text=\"Ecosystem Command Center\", font=(\"\", 13, \"bold\")).pack(side=tk.LEFT)\n        ttk.Button(hdr, text=\"Refresh\", command=self._refresh_modules).pack(side=tk.RIGHT, padx=(0, 4))\n        self._restart_btn = ttk.Button(\n            hdr, text=\"Restart Ecosystem\", command=self._on_restart_ecosystem,\n        )\n        self._restart_btn.pack(side=tk.RIGHT, padx=(0, 4))\n\n        tree_frame = ttk.Frame(frame)\n        tree_frame.pack(fill=tk.BOTH, expand=True)\n        cols = (\"Name\", \"Version\", \"Service\", \"Stale Files\", \"Action\")\n        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)\n        self._module_tree = ttk.Treeview(\n            tree_frame, columns=cols, show=\"headings\",\n            yscrollcommand=scrollbar.set, selectmode=\"browse\",\n        )\n        scrollbar.config(command=self._module_tree.yview)\n        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)\n        self._module_tree.pack(fill=tk.BOTH, expand=True)\n        col_widths = {\"Name\": 180, \"Version\": 70, \"Service\": 90, \"Stale Files\": 80, \"Action\": 140}\n        for col in cols:\n            self._module_tree.heading(col, text=col)\n            self._module_tree.column(col, width=col_widths[col], anchor=tk.W)\n        self._module_tree.bind(\"<ButtonRelease-1>\", self._on_module_tree_click)\n\n        self._restart_progress_var = tk.StringVar(value=\"\")\n        ttk.Label(\n            frame, textvariable=self._restart_progress_var,\n            wraplength=750, justify=tk.LEFT,\n        ).pack(fill=tk.X, pady=(6, 0))\n\n        self._refresh_modules()\n\n    def _refresh_modules(self) -> None:\n        self.module_registry.reload()\n        checker = VendoredFileStalenessChecker()\n        for iid in self._module_tree.get_children():\n            self._module_tree.delete(iid)\n        for mod in self.module_registry.get_modules():\n            name = mod.get(\"display_name\") or mod.get(\"module_id\", \"?\")\n            version = mod.get(\"version\", \"?\")\n            svc = mod.get(\"service_name\") or \"plugin\"\n            stale = checker.check_module(mod)\n            stale_str = str(stale) if stale > 0 else \"\\u2014\"\n            self._module_tree.insert(\n                \"\", tk.END,\n                values=(name, version, svc, stale_str, \"Sync Vendored Files\"),\n                tags=(mod.get(\"module_id\", \"\"),),\n            )\n\n    def _on_module_tree_click(self, event: Any) -> None:\n        if self._module_tree.identify_region(event.x, event.y) != \"cell\":\n            return\n        if self._module_tree.identify_column(event.x) != \"#5\":\n            return\n        iid = self._module_tree.identify_row(event.y)\n        if not iid:\n            return\n        tags = self._module_tree.item(iid, \"tags\")\n        module_id = tags[0] if tags else None\n        mod = next(\n            (m for m in self.module_registry.get_modules() if m.get(\"module_id\") == module_id),\n            None,\n        )\n        if mod:\n            self._on_module_sync(mod)\n\n    def _on_module_sync(self, module: Dict[str, Any]) -> None:\n        name = module.get(\"display_name\") or module.get(\"module_id\", \"?\")\n        self._on_update_status(f\"Syncing vendored files for {name}\\u2026\")\n        self.vendored_file_syncer.sync_module(module)\n\n    def _on_sync_complete(self, result: Dict[str, Any]) -> None:\n        synced = result.get(\"files_synced\", 0)\n        self._on_update_status(f\"Sync complete: {synced} files copied.\")\n        self._refresh_modules()\n\n    def _on_restart_ecosystem(self) -> None:\n        if self.ecosystem_restarter.running:\n            return\n        self._restart_btn.configure(state=tk.DISABLED)\n        self._restart_progress_var.set(\"Starting ecosystem restart\\u2026\")\n        self.ecosystem_restarter.restart()\n\n    def _on_restart_step_status(self, step: str, status: str) -> None:\n        icons = {\"running\": \"\\u2026\", \"done\": \"\\u2713\", \"failed\": \"\\u2717\", \"timeout\": \"\\u2717\", \"sudo_required\": \"!\"}\n        icon = icons.get(status, \"?\")\n        current = self._restart_progress_var.get()\n        line = f\"{icon} {step}: {status}\"\n        self._restart_progress_var.set(f\"{current}\\n{line}\" if current else line)\n\n    def _on_restart_complete(self, result: Dict[str, Any]) -> None:\n        self._restart_btn.configure(state=tk.NORMAL)\n        sudo_cmds = [r[\"cmd\"] for r in result.get(\"results\", []) if r.get(\"reason\") == \"sudo_required\"]\n        if sudo_cmds:\n            cmds_text = \"\\n\".join(sudo_cmds)\n            current = self._restart_progress_var.get()\n            self._restart_progress_var.set(\n                f\"{current}\\n\\nRun these in terminal:\\n{cmds_text}\"\n            )\n\n    # ---- Logs Tab ----"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "write_registry_update_script",
+      "type": "action",
+      "description": "Write apply_registry_update.py — VPS helper script Josh runs once to fix registry.json entries",
+      "tool": "write_file",
+      "params": {
+        "path": "neurograph_work/apply_registry_update.py",
+        "content": "#!/usr/bin/env python3\n# ---- Changelog ----\n# [2026-04-20] CC (BLK-GUI-197) -- Registry fix helper script\n# What: Fixes trollguard api_port (0->7438), darwin module_id/display_name (empty->'darwin'/'Darwin'),\n#       adds neurograph entry if missing.\n# Why:  Registry was seeded before these entries were complete or available.\n# How:  Run once on VPS: python3 ~/NeuroGraph/apply_registry_update.py\n# -------------------\n\"\"\"VPS registry update helper. Run once: python3 ~/NeuroGraph/apply_registry_update.py\"\"\"\nimport json\nimport time\nfrom pathlib import Path\n\nregistry_path = Path.home() / \".et_modules\" / \"registry.json\"\n\nif not registry_path.exists():\n    print(f\"ERROR: {registry_path} not found\")\n    raise SystemExit(1)\n\ndata = json.loads(registry_path.read_text())\nmods = data.setdefault(\"modules\", {})\n\nif \"trollguard\" in mods:\n    mods[\"trollguard\"][\"api_port\"] = 7438\n    print(\"Fixed: trollguard api_port -> 7438\")\n\nif \"darwin\" in mods:\n    if not mods[\"darwin\"].get(\"module_id\"):\n        mods[\"darwin\"][\"module_id\"] = \"darwin\"\n        print(\"Fixed: darwin module_id -> darwin\")\n    if not mods[\"darwin\"].get(\"display_name\"):\n        mods[\"darwin\"][\"display_name\"] = \"Darwin\"\n        print(\"Fixed: darwin display_name -> Darwin\")\n    if not mods[\"darwin\"].get(\"description\"):\n        mods[\"darwin\"][\"description\"] = \"Evolution Engine \\u2014 evolutionary pressure for the NeuroGraph ecosystem.\"\n        print(\"Fixed: darwin description\")\n\nif \"neurograph\" not in mods:\n    mods[\"neurograph\"] = {\n        \"module_id\": \"neurograph\",\n        \"display_name\": \"NeuroGraph\",\n        \"description\": \"The cortex, limbic system, and hippocampus \\u2014 Syl's identity, memory, and continuity.\",\n        \"version\": \"0.6.0\",\n        \"install_path\": str(Path.home() / \"NeuroGraph\"),\n        \"git_remote\": \"https://github.com/greatnorthernfishguy-hub/NeuroGraph.git\",\n        \"service_name\": \"\",\n        \"api_port\": 8847,\n    }\n    print(\"Added: neurograph entry\")\nelse:\n    print(\"Skipped: neurograph entry already present\")\n\ndata[\"last_updated\"] = time.time()\nregistry_path.write_text(json.dumps(data, indent=2))\nprint(\"REGISTRY_OK\")\n"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify neurograph_gui.py parses cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile neurograph_work/neurograph_gui.py && echo SYNTAX_OK"
+      },
+      "validation": {"checks": [{"operator": "contains", "value": "SYNTAX_OK"}]},
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Stage neurograph_gui.py and apply_registry_update.py, commit with changelog message, and push",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C neurograph_work config user.email \"codemine@et-systems.ai\" && git -C neurograph_work config user.name \"Codemine\" && git -C neurograph_work add neurograph_gui.py apply_registry_update.py && git -C neurograph_work diff --cached --quiet && echo ALREADY_COMMITTED || (git -C neurograph_work commit -m \"feat: GUI 2.0 Phase 1 — Module Command Center tab (BLK-GUI-197)\" && git -C neurograph_work push origin HEAD && echo COMMITTED)"
+      },
+      "validation": {"checks": [{"operator": "contains", "value": "COMMIT"}]},
+      "on_failure": "abort"
+    }
+  ]
+}
