@@ -1,0 +1,211 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-GUI-199",
+    "name": "NeuroGraph GUI 2.0 — Phase 3: Topology Visualization Tab",
+    "agent": "QB",
+    "scope": "NeuroGraph — add Topology tab to neurograph_gui.py with on-demand 3D PCA scatter of main.msgpack",
+    "acceptance_criteria": [
+      "TopologySnapshot, TopologyLoader, TopologyRenderer classes present in neurograph_gui.py",
+      "_build_topology_tab() called in _build_tabs() after _build_dashboard_tab()",
+      "Topology tab renders with 'Load Snapshot' button and 5 methods: _build_topology_tab, _load_topology_snapshot, _on_topology_loaded, _on_topology_rendered, _on_topo_error",
+      "TopologyLoader opens main.msgpack with open(path, 'rb') — never instantiates NeuroGraphMemory",
+      "TopologyRenderer uses _PCA (_HAS_SKLEARN guard) with numpy SVD fallback",
+      "python3 -m py_compile neurograph_work/neurograph_gui.py passes with exit code 0",
+      "Changes committed and pushed to NeuroGraph repo"
+    ],
+    "depends_on": [
+      "BLK-GUI-198"
+    ]
+  },
+  "snap_interface": {
+    "inputs": [
+      {
+        "name": "neurograph_gui.py",
+        "type": "file",
+        "source_block": "BLK-GUI-198",
+        "path": "neurograph_work/neurograph_gui.py"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "neurograph_gui.py",
+        "type": "file",
+        "path": "neurograph_work/neurograph_gui.py",
+        "contract": "Topology tab added; 3 new classes present; read-only msgpack load; py_compile passes"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not instantiate NeuroGraphMemory or any module class — main.msgpack is opened directly with open(path, 'rb') only",
+      "Do not write to main.msgpack or any checkpoint file",
+      "Do not modify any vendored file: ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, openclaw_adapter.py, ng_autonomic.py, ng_embed.py"
+    ],
+    "anti_drift": [
+      "TopologyLoader must use _msgpack.unpackb() guarded by _HAS_MSGPACK — never import msgpack directly",
+      "TopologyRenderer must use _PCA guarded by _HAS_SKLEARN with numpy SVD fallback",
+      "All slow work (loading, rendering) on daemon threads via existing GUIMessageQueue pattern",
+      "No auto-refresh on Topology tab — PCA is expensive, snapshot is on-demand only"
+    ],
+    "tool_allowlist": [
+      "write_file",
+      "edit_file",
+      "shell_execute",
+      "read_file"
+    ],
+    "shell_allowlist": [
+      "rm",
+      "echo"
+    ]
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "TOKEN_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf neurograph_work && echo CLEANED"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "CLEANED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_repo",
+      "type": "action",
+      "description": "Clone NeuroGraph repo (includes Phase 1+2 changes)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone --depth=1 https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/NeuroGraph.git neurograph_work && echo CLONE_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "CLONE_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_topology_classes",
+      "type": "action",
+      "description": "Insert TopologySnapshot, TopologyLoader, TopologyRenderer classes before IngestionManager section",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "\n\n# ---------------------------------------------------------------------------\n# 5. IngestionManager\n# ---------------------------------------------------------------------------",
+        "new_text": "\n\n# ---------------------------------------------------------------------------\n# 4c. TopologySnapshot, TopologyLoader, TopologyRenderer\n# ---------------------------------------------------------------------------\n\n\nclass TopologySnapshot:\n    \"\"\"Immutable data bag for a read-only NeuroGraph topology snapshot.\"\"\"\n\n    def __init__(\n        self,\n        node_embeddings: List[Any],\n        node_ids: List[str],\n        node_voltages: List[float],\n        synapse_pairs: List[Any],\n        synapse_weights: List[float],\n    ) -> None:\n        self.node_embeddings = node_embeddings\n        self.node_ids = node_ids\n        self.node_voltages = node_voltages\n        self.synapse_pairs = synapse_pairs\n        self.synapse_weights = synapse_weights\n\n\nclass TopologyLoader:\n    \"\"\"Read-only loader for NeuroGraph checkpoints.\n\n    NEVER instantiates NeuroGraphMemory — reads main.msgpack directly\n    via msgpack.unpackb().  Runs on a daemon thread; results delivered\n    via callback through GUIMessageQueue.\n    \"\"\"\n\n    _DEFAULT_CHECKPOINT = Path.home() / \"NeuroGraph\" / \"data\" / \"main.msgpack\"\n\n    def __init__(\n        self,\n        on_result: Callable[[TopologySnapshot], None],\n        on_error: Callable[[Exception], None],\n    ) -> None:\n        self._on_result = on_result\n        self._on_error = on_error\n\n    def load(self, checkpoint_path: Optional[Path] = None) -> None:\n        path = checkpoint_path or self._DEFAULT_CHECKPOINT\n        threading.Thread(target=self._worker, args=(path,), daemon=True).start()\n\n    def _worker(self, path: Path) -> None:\n        try:\n            snapshot = self._read(path)\n            self._on_result(snapshot)\n        except Exception as exc:\n            self._on_error(exc)\n\n    def _read(self, path: Path) -> TopologySnapshot:\n        if not _HAS_MSGPACK:\n            raise RuntimeError(\"msgpack not installed — pip install msgpack\")\n        with open(path, \"rb\") as fh:\n            raw = _msgpack.unpackb(fh.read(), raw=False, strict_map_key=False)\n        nodes = raw.get(\"nodes\") or raw.get(\"node_map\") or {}\n        edges = raw.get(\"edges\") or raw.get(\"synapses\") or {}\n        node_ids = list(nodes.keys()) if isinstance(nodes, dict) else []\n        node_embeddings: List[Any] = []\n        node_voltages: List[float] = []\n        for nid in node_ids:\n            nd = nodes[nid] if isinstance(nodes, dict) else {}\n            emb = nd.get(\"embedding\") or nd.get(\"vector\") or []\n            node_embeddings.append(emb if emb else [0.0] * 768)\n            node_voltages.append(float(nd.get(\"voltage\", 0.0)))\n        synapse_pairs: List[Any] = []\n        synapse_weights: List[float] = []\n        if isinstance(edges, dict):\n            for _, edge in edges.items():\n                src = edge.get(\"src\") or edge.get(\"source\") or \"\"\n                tgt = edge.get(\"tgt\") or edge.get(\"target\") or \"\"\n                w = float(edge.get(\"weight\", 0.0))\n                if src and tgt:\n                    synapse_pairs.append((src, tgt))\n                    synapse_weights.append(w)\n        elif isinstance(edges, list):\n            for edge in edges:\n                if isinstance(edge, (list, tuple)) and len(edge) >= 2:\n                    synapse_pairs.append((str(edge[0]), str(edge[1])))\n                    synapse_weights.append(float(edge[2]) if len(edge) > 2 else 1.0)\n        return TopologySnapshot(\n            node_embeddings=node_embeddings,\n            node_ids=node_ids,\n            node_voltages=node_voltages,\n            synapse_pairs=synapse_pairs,\n            synapse_weights=synapse_weights,\n        )\n\n\nclass TopologyRenderer:\n    \"\"\"Projects topology to 3D via PCA and renders a matplotlib 3D scatter.\n\n    Uses sklearn PCA if available; falls back to numpy SVD.\n    Embeds result as FigureCanvasTkAgg into the provided parent frame.\n    \"\"\"\n\n    def __init__(\n        self,\n        on_result: Callable[[Any], None],\n        on_error: Callable[[Exception], None],\n        max_synapses: int = 200,\n    ) -> None:\n        self._on_result = on_result\n        self._on_error = on_error\n        self.max_synapses = max_synapses\n\n    def render(self, snapshot: TopologySnapshot, parent_frame: Any) -> None:\n        threading.Thread(\n            target=self._worker, args=(snapshot, parent_frame), daemon=True\n        ).start()\n\n    def _worker(self, snapshot: TopologySnapshot, parent_frame: Any) -> None:\n        try:\n            canvas = self._build(snapshot, parent_frame)\n            self._on_result(canvas)\n        except Exception as exc:\n            self._on_error(exc)\n\n    def _project(self, embeddings: List[Any]) -> Any:\n        import numpy as np\n        arr = np.array(embeddings, dtype=float)\n        if arr.ndim != 2 or arr.shape[0] < 3 or arr.shape[1] < 3:\n            return np.zeros((max(arr.shape[0], 1), 3))\n        if _HAS_SKLEARN:\n            pca = _PCA(n_components=3)\n            return pca.fit_transform(arr)\n        centered = arr - arr.mean(axis=0)\n        _, _, Vt = np.linalg.svd(centered, full_matrices=False)\n        return centered @ Vt[:3].T\n\n    def _build(self, snapshot: TopologySnapshot, parent_frame: Any) -> Any:\n        import numpy as np\n        if not _HAS_MATPLOTLIB:\n            raise RuntimeError(\"matplotlib not installed — pip install matplotlib\")\n        coords = self._project(snapshot.node_embeddings)\n        voltages = np.array(snapshot.node_voltages, dtype=float)\n        fig = _plt.Figure(figsize=(6, 5), tight_layout=True)\n        ax = fig.add_subplot(111, projection=\"3d\")\n        scatter = ax.scatter(\n            coords[:, 0], coords[:, 1], coords[:, 2],\n            c=voltages, cmap=\"plasma\", s=10, alpha=0.7,\n        )\n        fig.colorbar(scatter, ax=ax, shrink=0.5, label=\"Voltage\")\n        ax.set_title(f\"{len(snapshot.node_ids)} nodes — read-only snapshot\")\n        ax.set_xlabel(\"PC1\")\n        ax.set_ylabel(\"PC2\")\n        ax.set_zlabel(\"PC3\")\n        id_to_idx = {nid: i for i, nid in enumerate(snapshot.node_ids)}\n        pairs_w = list(zip(snapshot.synapse_pairs, snapshot.synapse_weights))\n        pairs_w.sort(key=lambda x: abs(x[1]), reverse=True)\n        for (src, tgt), _ in pairs_w[:self.max_synapses]:\n            si = id_to_idx.get(src)\n            ti = id_to_idx.get(tgt)\n            if si is not None and ti is not None:\n                ax.plot(\n                    [coords[si, 0], coords[ti, 0]],\n                    [coords[si, 1], coords[ti, 1]],\n                    [coords[si, 2], coords[ti, 2]],\n                    \"b-\", alpha=0.1, linewidth=0.3,\n                )\n        canvas = _FigureCanvasTkAgg(fig, master=parent_frame)\n        return canvas\n\n\n\n# ---------------------------------------------------------------------------\n# 5. IngestionManager\n# ---------------------------------------------------------------------------"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_topology_tab_call",
+      "type": "action",
+      "description": "Wire _build_topology_tab() into _build_tabs() after dashboard tab",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "        self._build_dashboard_tab()\n        self._build_logs_tab()",
+        "new_text": "        self._build_dashboard_tab()\n        self._build_topology_tab()\n        self._build_logs_tab()"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_topology_methods",
+      "type": "action",
+      "description": "Add _build_topology_tab and handlers to NeuroGraphGUI before Settings Dialog",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "    # ---- Settings Dialog ----",
+        "new_text": "    # ---- Topology Tab ----\n\n    def _build_topology_tab(self) -> None:\n        frame = ttk.Frame(self.notebook, padding=10)\n        self.notebook.add(frame, text=\" Topology \")\n\n        hdr = ttk.Frame(frame)\n        hdr.pack(fill=tk.X, pady=(0, 8))\n        ttk.Label(hdr, text=\"Topology Snapshot (Read-Only)\", font=(\"\", 13, \"bold\")).pack(side=tk.LEFT)\n        self._topo_load_btn = ttk.Button(\n            hdr, text=\"Load Snapshot\", command=self._load_topology_snapshot\n        )\n        self._topo_load_btn.pack(side=tk.RIGHT, padx=(4, 0))\n        ttk.Label(hdr, text=\"Max synapses:\").pack(side=tk.RIGHT)\n        self._topo_max_synapses_var = tk.StringVar(\n            value=str(self.config.get(\"topology_max_synapses\", 200))\n        )\n        ttk.Entry(\n            hdr, textvariable=self._topo_max_synapses_var, width=6\n        ).pack(side=tk.RIGHT, padx=(0, 4))\n\n        self._topo_status_var = tk.StringVar(\n            value=\"No snapshot loaded. Click 'Load Snapshot' to begin.\"\n        )\n        ttk.Label(frame, textvariable=self._topo_status_var, foreground=\"gray\").pack(anchor=tk.W)\n        self._topo_canvas_frame = ttk.Frame(frame)\n        self._topo_canvas_frame.pack(fill=tk.BOTH, expand=True)\n        self._topo_canvas: Optional[Any] = None\n\n    def _load_topology_snapshot(self) -> None:\n        try:\n            max_s = max(1, int(self._topo_max_synapses_var.get()))\n        except ValueError:\n            max_s = 200\n        self.config.set(\"topology_max_synapses\", max_s)\n        self._topo_load_btn.configure(state=tk.DISABLED)\n        self._topo_status_var.set(\"Loading checkpoint\\u2026\")\n        TopologyLoader(\n            on_result=lambda snap: self.msg_queue.put(\n                self._on_topology_loaded, snap, max_s\n            ),\n            on_error=lambda exc: self.msg_queue.put(self._on_topo_error, exc),\n        ).load()\n\n    def _on_topology_loaded(self, snapshot: Any, max_synapses: int) -> None:\n        n = len(snapshot.node_ids) if hasattr(snapshot, \"node_ids\") else 0\n        s = len(snapshot.synapse_pairs) if hasattr(snapshot, \"synapse_pairs\") else 0\n        self._topo_status_var.set(f\"{n} nodes, {s} synapses loaded \\u2014 rendering\\u2026\")\n        TopologyRenderer(\n            on_result=lambda canvas: self.msg_queue.put(\n                self._on_topology_rendered, canvas\n            ),\n            on_error=lambda exc: self.msg_queue.put(self._on_topo_error, exc),\n            max_synapses=max_synapses,\n        ).render(snapshot, self._topo_canvas_frame)\n\n    def _on_topology_rendered(self, canvas: Any) -> None:\n        if self._topo_canvas is not None:\n            self._topo_canvas.get_tk_widget().destroy()\n        self._topo_canvas = canvas\n        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)\n        canvas.draw()\n        self._topo_status_var.set(\"Rendered (read-only \\u2014 no writes to checkpoint).\")\n        self._topo_load_btn.configure(state=tk.NORMAL)\n\n    def _on_topo_error(self, exc: Exception) -> None:\n        self._topo_status_var.set(f\"Error: {exc}\")\n        self._topo_load_btn.configure(state=tk.NORMAL)\n\n    # ---- Settings Dialog ----"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify neurograph_gui.py has no syntax errors",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile neurograph_work/neurograph_gui.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "SYNTAX_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit Phase 3 changes and push to NeuroGraph main",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C neurograph_work config user.email \"codemine@et-systems.ai\" && git -C neurograph_work config user.name \"Codemine\" && git -C neurograph_work add neurograph_gui.py && git -C neurograph_work diff --cached --quiet && echo ALREADY_COMMITTED || (git -C neurograph_work commit -m \"feat: GUI 2.0 Phase 3 — Topology Visualization tab (BLK-GUI-199)\" && git -C neurograph_work push origin HEAD && echo PUSH_OK)"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "COMMIT"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    }
+  ]
+}
