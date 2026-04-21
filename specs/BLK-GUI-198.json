@@ -1,0 +1,230 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-GUI-198",
+    "name": "NeuroGraph GUI 2.0 — Phase 2: Ecosystem Dashboard Tab",
+    "agent": "QB",
+    "scope": "NeuroGraph — add Dashboard tab to neurograph_gui.py with 5 auto-refreshing ecosystem panels",
+    "acceptance_criteria": [
+      "EcosystemPoller class present in neurograph_gui.py",
+      "self.ecosystem_poller initialized in NeuroGraphGUI.__init__",
+      "_build_dashboard_tab() called in _build_tabs() after _build_modules_tab()",
+      "Dashboard tab renders with 5 LabelFrame panels: Syl/NeuroGraph, TID Routing, Bunyan Narrative, Elmer Health, THC Repairs",
+      "_refresh_dashboard(), _apply_dashboard_panel(), _format_panel_data(), _start_dashboard_autorefresh() methods present",
+      "python3 -m py_compile neurograph_work/neurograph_gui.py passes with exit code 0",
+      "Changes committed and pushed to NeuroGraph repo"
+    ],
+    "depends_on": [
+      "BLK-GUI-197"
+    ]
+  },
+  "snap_interface": {
+    "inputs": [
+      {
+        "name": "neurograph_gui.py",
+        "type": "file",
+        "source_block": "BLK-GUI-197",
+        "path": "neurograph_work/neurograph_gui.py"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "neurograph_gui.py",
+        "type": "file",
+        "path": "neurograph_work/neurograph_gui.py",
+        "contract": "Dashboard tab added; EcosystemPoller class present; 5 panels wired; py_compile passes"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not modify any vendored file: ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, openclaw_adapter.py, ng_autonomic.py, ng_embed.py",
+      "Do not instantiate NeuroGraphMemory or any module class directly — HTTP endpoints or file reads only (Law 1)",
+      "Do not touch data/checkpoints/ or any msgpack file"
+    ],
+    "anti_drift": [
+      "All new classes go inside neurograph_gui.py, not in new files",
+      "EcosystemPoller uses threading.Thread with daemon=True for each panel fetch",
+      "In-flight guard per panel: skip spawn if _in_flight[panel] is True",
+      "All panel fetches degrade gracefully with offline:True dict on any error"
+    ],
+    "tool_allowlist": [
+      "write_file",
+      "edit_file",
+      "shell_execute",
+      "read_file"
+    ],
+    "shell_allowlist": [
+      "rm",
+      "echo"
+    ]
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "TOKEN_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone from any previous run",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf neurograph_work && echo CLEANED"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "CLEANED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_repo",
+      "type": "action",
+      "description": "Clone NeuroGraph repo (includes Phase 1 changes from BLK-GUI-197)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone --depth=1 https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/NeuroGraph.git neurograph_work && echo CLONE_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "CLONE_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_ecosystem_poller_class",
+      "type": "action",
+      "description": "Insert EcosystemPoller class before the IngestionManager section separator",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "\n\n# ---------------------------------------------------------------------------\n# 5. IngestionManager\n# ---------------------------------------------------------------------------",
+        "new_text": "\n\n# ---------------------------------------------------------------------------\n# 4b. EcosystemPoller\n# ---------------------------------------------------------------------------\n\n\nclass EcosystemPoller:\n    \"\"\"Fetches live data for the 5 Dashboard panels.\n\n    Each panel runs its fetch on a daemon thread.  An in-flight guard\n    per panel prevents overlapping fetches when auto-refresh fires\n    faster than the fetch completes.\n    \"\"\"\n\n    PANELS = (\"neurograph\", \"bunyan\", \"tid\", \"elmer\", \"thc\")\n\n    def __init__(self, on_panel_ready: Callable[[str, Dict[str, Any]], None]) -> None:\n        self._on_panel_ready = on_panel_ready\n        self._in_flight: Dict[str, bool] = {p: False for p in self.PANELS}\n\n    def fetch_all(self) -> None:\n        for panel in self.PANELS:\n            self._fetch_panel(panel)\n\n    def _fetch_panel(self, panel: str) -> None:\n        if self._in_flight.get(panel):\n            return\n        self._in_flight[panel] = True\n        threading.Thread(target=self._worker, args=(panel,), daemon=True).start()\n\n    def _worker(self, panel: str) -> None:\n        try:\n            data = self._fetch(panel)\n        except Exception as exc:\n            data = {\"offline\": True, \"reason\": str(exc)}\n        finally:\n            self._in_flight[panel] = False\n        self._on_panel_ready(panel, data)\n\n    def _fetch(self, panel: str) -> Dict[str, Any]:\n        if panel == \"neurograph\":\n            return self._fetch_http(\"http://127.0.0.1:8847/stats\")\n        if panel == \"tid\":\n            return self._fetch_http(\"http://127.0.0.1:7437/stats\")\n        if panel == \"bunyan\":\n            return self._fetch_bunyan()\n        if panel == \"elmer\":\n            return self._fetch_json(\n                Path.home() / \".et_modules\" / \"elmer\" / \"ng_lite_state.json\"\n            )\n        if panel == \"thc\":\n            return self._fetch_json(\n                Path.home() / \".et_modules\" / \"healing_collective\" / \"detection_calibrator.json\"\n            )\n        return {\"offline\": True, \"reason\": \"unknown panel\"}\n\n    def _fetch_http(self, url: str) -> Dict[str, Any]:\n        import urllib.request\n        try:\n            with urllib.request.urlopen(url, timeout=5) as resp:\n                return json.loads(resp.read().decode())\n        except Exception as exc:\n            return {\"offline\": True, \"reason\": str(exc)}\n\n    def _fetch_bunyan(self) -> Dict[str, Any]:\n        import glob as _glob\n        pattern = str(Path.home() / \".et_modules\" / \"shared_learning\" / \"bunyan*.jsonl\")\n        files = sorted(_glob.glob(pattern))\n        if not files:\n            return {\"offline\": True, \"reason\": \"no bunyan files\"}\n        lines: List[str] = []\n        for fpath in reversed(files):\n            try:\n                with open(fpath, \"r\", encoding=\"utf-8\") as fh:\n                    chunk = [ln.strip() for ln in fh.readlines() if ln.strip()]\n                    lines = chunk + lines\n                    if len(lines) >= 5:\n                        break\n            except OSError:\n                continue\n        events: List[Any] = []\n        for ln in lines[-5:]:\n            try:\n                events.append(json.loads(ln))\n            except json.JSONDecodeError:\n                events.append({\"raw\": ln})\n        return {\"events\": events}\n\n    def _fetch_json(self, path: Path) -> Dict[str, Any]:\n        try:\n            with open(path, \"r\", encoding=\"utf-8\") as fh:\n                return json.load(fh)\n        except FileNotFoundError:\n            return {\"offline\": True, \"reason\": \"file not found\"}\n        except Exception as exc:\n            return {\"offline\": True, \"reason\": str(exc)}\n\n\n\n# ---------------------------------------------------------------------------\n# 5. IngestionManager\n# ---------------------------------------------------------------------------"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_dashboard_tab_call",
+      "type": "action",
+      "description": "Wire _build_dashboard_tab() into _build_tabs() after _build_modules_tab()",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "        self._build_modules_tab()\n        self._build_logs_tab()",
+        "new_text": "        self._build_modules_tab()\n        self._build_dashboard_tab()\n        self._build_logs_tab()"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "init_ecosystem_poller",
+      "type": "action",
+      "description": "Initialize self.ecosystem_poller in NeuroGraphGUI.__init__ before file_watcher",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "        self.file_watcher: Optional[FileWatcher] = None\n        self._ingest_history: List[Dict[str, Any]] = []",
+        "new_text": "        self.ecosystem_poller = EcosystemPoller(\n            on_panel_ready=lambda panel, data: self.msg_queue.put(\n                self._apply_dashboard_panel, panel, data\n            ),\n        )\n        self.file_watcher: Optional[FileWatcher] = None\n        self._ingest_history: List[Dict[str, Any]] = []"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_dashboard_methods",
+      "type": "action",
+      "description": "Add all Dashboard tab methods to NeuroGraphGUI before Settings Dialog section",
+      "tool": "edit_file",
+      "params": {
+        "path": "neurograph_work/neurograph_gui.py",
+        "old_text": "    # ---- Settings Dialog ----",
+        "new_text": "    # ---- Dashboard Tab ----\n\n    def _build_dashboard_tab(self) -> None:\n        frame = ttk.Frame(self.notebook, padding=10)\n        self.notebook.add(frame, text=\" Dashboard \")\n\n        hdr = ttk.Frame(frame)\n        hdr.pack(fill=tk.X, pady=(0, 8))\n        ttk.Label(hdr, text=\"Ecosystem Dashboard\", font=(\"\", 13, \"bold\")).pack(side=tk.LEFT)\n        ttk.Button(hdr, text=\"Refresh Now\", command=self._refresh_dashboard).pack(\n            side=tk.RIGHT, padx=(4, 0)\n        )\n        ttk.Label(hdr, text=\"Interval (s):\").pack(side=tk.RIGHT)\n        self._dashboard_interval_var = tk.StringVar(\n            value=str(self.config.get(\"dashboard_refresh_seconds\", 30))\n        )\n        ttk.Entry(\n            hdr, textvariable=self._dashboard_interval_var, width=5\n        ).pack(side=tk.RIGHT, padx=(0, 4))\n        ttk.Button(\n            hdr, text=\"Apply\", command=self._start_dashboard_autorefresh\n        ).pack(side=tk.RIGHT, padx=(0, 2))\n\n        grid = ttk.Frame(frame)\n        grid.pack(fill=tk.BOTH, expand=True)\n        grid.columnconfigure(0, weight=1)\n        grid.columnconfigure(1, weight=1)\n\n        panel_defs = [\n            (\"neurograph\", \"Syl / NeuroGraph\", 0, 0),\n            (\"tid\",        \"TID Routing\",      0, 1),\n            (\"bunyan\",     \"Bunyan Narrative\",  1, 0),\n            (\"elmer\",      \"Elmer Health\",      1, 1),\n            (\"thc\",        \"THC Repairs\",       2, 0),\n        ]\n        self._dashboard_texts: Dict[str, tk.Text] = {}\n        for panel_id, title, row, col in panel_defs:\n            lf = ttk.LabelFrame(grid, text=title, padding=6)\n            lf.grid(row=row, column=col, sticky=tk.NSEW, padx=4, pady=4)\n            grid.rowconfigure(row, weight=1)\n            txt = tk.Text(\n                lf, height=6, wrap=tk.WORD, state=tk.DISABLED, font=(\"Courier\", 9)\n            )\n            txt.pack(fill=tk.BOTH, expand=True)\n            self._dashboard_texts[panel_id] = txt\n\n        self._dashboard_after_id: Optional[str] = None\n        self._refresh_dashboard()\n        self._start_dashboard_autorefresh()\n\n    def _refresh_dashboard(self) -> None:\n        self.ecosystem_poller.fetch_all()\n\n    def _apply_dashboard_panel(self, panel: str, data: Dict[str, Any]) -> None:\n        txt = self._dashboard_texts.get(panel)\n        if txt is None:\n            return\n        txt.config(state=tk.NORMAL)\n        txt.delete(\"1.0\", tk.END)\n        if data.get(\"offline\"):\n            txt.insert(tk.END, f\"Offline \\u2014 {data.get('reason', 'unavailable')}\")\n        else:\n            txt.insert(tk.END, self._format_panel_data(panel, data))\n        txt.config(state=tk.DISABLED)\n\n    def _format_panel_data(self, panel: str, data: Dict[str, Any]) -> str:\n        if panel == \"neurograph\":\n            lines = []\n            for k in (\"total_nodes\", \"total_synapses\", \"firing_rate\",\n                      \"active_nodes\", \"avg_voltage\"):\n                if k in data:\n                    lines.append(f\"{k}: {data[k]}\")\n            return \"\\n\".join(lines) if lines else json.dumps(data, indent=2)[:400]\n        if panel == \"tid\":\n            lines = []\n            models = data.get(\"models\") or data.get(\"routing\") or {}\n            if isinstance(models, dict):\n                ranked = sorted(\n                    models.items(),\n                    key=lambda kv: kv[1].get(\"usage\", 0) if isinstance(kv[1], dict) else 0,\n                    reverse=True,\n                )[:3]\n                for name, stats in ranked:\n                    usage = stats.get(\"usage\", \"?\") if isinstance(stats, dict) else \"?\"\n                    quality = stats.get(\"quality\", \"?\") if isinstance(stats, dict) else \"?\"\n                    lines.append(f\"{name}: usage={usage} quality={quality}\")\n            return \"\\n\".join(lines) if lines else json.dumps(data, indent=2)[:400]\n        if panel == \"bunyan\":\n            events = data.get(\"events\", [])\n            lines = []\n            for ev in events[-5:]:\n                if isinstance(ev, dict):\n                    msg = ev.get(\"message\") or ev.get(\"event\") or ev.get(\"raw\") or str(ev)\n                    lines.append(str(msg)[:120])\n                else:\n                    lines.append(str(ev)[:120])\n            return \"\\n\".join(lines) if lines else \"No events\"\n        if panel == \"elmer\":\n            lines = []\n            for k in (\"health_score\", \"maintenance_target\", \"last_action\",\n                      \"coherence\", \"total_nodes\"):\n                if k in data:\n                    lines.append(f\"{k}: {data[k]}\")\n            return \"\\n\".join(lines) if lines else json.dumps(data, indent=2)[:400]\n        if panel == \"thc\":\n            repairs = (\n                data.get(\"repair_events\")\n                or data.get(\"events\")\n                or data.get(\"calibration_events\")\n                or []\n            )\n            if isinstance(repairs, list):\n                lines = []\n                for ev in repairs[-5:]:\n                    if isinstance(ev, dict):\n                        lines.append(\n                            str(ev.get(\"event\") or ev.get(\"action\") or ev)[:120]\n                        )\n                    else:\n                        lines.append(str(ev)[:120])\n                return \"\\n\".join(lines) if lines else json.dumps(data, indent=2)[:400]\n            return json.dumps(data, indent=2)[:400]\n        return json.dumps(data, indent=2)[:400]\n\n    def _start_dashboard_autorefresh(self) -> None:\n        if self._dashboard_after_id is not None:\n            self.root.after_cancel(self._dashboard_after_id)\n        try:\n            interval_s = max(5, int(self._dashboard_interval_var.get()))\n        except (ValueError, AttributeError):\n            interval_s = 30\n        self.config.set(\"dashboard_refresh_seconds\", interval_s)\n\n        def _tick() -> None:\n            self._refresh_dashboard()\n            self._dashboard_after_id = self.root.after(interval_s * 1000, _tick)\n\n        self._dashboard_after_id = self.root.after(interval_s * 1000, _tick)\n\n    # ---- Settings Dialog ----"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify neurograph_gui.py has no syntax errors",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile neurograph_work/neurograph_gui.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "SYNTAX_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit Phase 2 changes and push to NeuroGraph main",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C neurograph_work config user.email \"codemine@et-systems.ai\" && git -C neurograph_work config user.name \"Codemine\" && git -C neurograph_work add neurograph_gui.py && git -C neurograph_work diff --cached --quiet && echo ALREADY_COMMITTED || (git -C neurograph_work commit -m \"feat: GUI 2.0 Phase 2 — Ecosystem Dashboard tab (BLK-GUI-198)\" && git -C neurograph_work push origin HEAD && echo PUSH_OK)"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "COMMIT"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    }
+  ]
+}
