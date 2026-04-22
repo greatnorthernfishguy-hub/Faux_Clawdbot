@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
 # ---- Changelog ----
+# [2026-04-22] Claude Code (Sonnet 4.6) — Wire QB Reviewer evaluation into run_spec
+#   What: After executor finishes, call evaluate_report() with use_persona=True so
+#         QB's Reviewer persona reads the report and gives a verbal checkpoint
+#         response (DONE / ITERATE / ESCALATE). Her response and decision are printed
+#         to stdout and included in the Discord notification.
+#   Why:  run_spec.py was a bypass shortcut — it ran specs but skipped the
+#         orchestrator's Reviewer loop entirely. qb_checkpoint gates just logged
+#         "pending" with no QB response. Josh remembers getting QB's checkpoints
+#         when specs ran through the orchestrator; this restores that behaviour.
+#   How:  Import evaluate_report from report_evaluator. Call after executor.execute_block().
+#         Pass spec + report for full context. Print evaluation to stdout. Pass to
+#         _notify_discord() which appends QB's decision + first 300 chars of her
+#         response. evaluate_report() has its own exception fallback so it can never
+#         crash the run.
 # [2026-04-20] Claude Code (Sonnet 4.6) — Wire Codemine's NeuroGraph into spec executor (#191)
 #   What: Replaced worker_ng=None with get_worker_ng() — Codemine's full NeuroGraph
 #         now receives every spec step result via dual-pass ingestion.
@@ -19,7 +33,7 @@
 # What: CLI runner for WorkBlockSpec JSON files on the VPS.
 # Why:  Eliminates the inline python3 -c invocation mess used for #126 and #111.
 #       Handles credential injection, env var substitution, executor wiring, and
-#       exit codes in one reusable script.
+#       exit codes in one reusable spec runner.
 # How:  Reads GITHUB_TOKEN from ~/.git-credentials if not in env. Substitutes
 #       ${VAR} patterns in all shell_execute commands. Runs SpecExecutor with
 #       a no-op policy_check_fn (specs are pre-validated; executor policy is
@@ -97,8 +111,8 @@ def _substitute_env(spec: dict) -> dict:
 
 # ── Discord notification ─────────────────────────────────────────────────────
 
-def _notify_discord(report: dict) -> None:
-    """Post spec completion summary to Discord webhook. Silent on failure."""
+def _notify_discord(report: dict, evaluation: dict | None = None) -> None:
+    """Post spec completion summary + QB evaluation to Discord webhook. Silent on failure."""
     try:
         import requests as _requests
     except ImportError:
@@ -110,7 +124,6 @@ def _notify_discord(report: dict) -> None:
         status = report.get("status", "unknown")
         summary = report.get("summary", {})
         block_id = report.get("block_id", "unknown")
-        block_name = report.get("block_name", block_id)
         passed = summary.get("passed", 0)
         failed = summary.get("failed", 0)
         elapsed = summary.get("elapsed_seconds", 0)
@@ -122,6 +135,24 @@ def _notify_discord(report: dict) -> None:
         ]
         if abort_reason:
             lines.append(f"Abort: {abort_reason}")
+
+        if evaluation is not None:
+            decision = evaluation.get("decision", "unknown").upper()
+            decision_emoji = {"DONE": "✅", "ITERATE": "🔄", "ESCALATE": "⬆️"}.get(decision, "❓")
+            qualitative = evaluation.get("qualitative") or {}
+            qb_error = qualitative.get("error")
+            if qb_error:
+                lines.append(f"\n**QB Reviewer:** ⚠️ Evaluation unavailable — {qb_error}")
+            else:
+                response_text = qualitative.get("response", "").strip()
+                preview = response_text[:300] + ("…" if len(response_text) > 300 else "")
+                lines.append(f"\n**QB Reviewer:** {decision_emoji} {decision}")
+                if preview:
+                    lines.append(f"> {preview}")
+                hints = evaluation.get("iteration_hints", [])
+                if hints:
+                    lines.append("**Hints:** " + " | ".join(hints[:3]))
+
         payload = {"content": "\n".join(lines), "username": "Codemine"}
         _requests.post(webhook_url, json=payload, timeout=5)
     except Exception as exc:
@@ -207,9 +238,27 @@ def main() -> int:
     summary = report.get("summary", {})
     failed = summary.get("failed", 0)
 
-    _notify_discord(report)
+    # QB Reviewer evaluation — runs when spec completed with all steps passing.
+    # evaluate_report() has its own exception fallback; it can never crash the run.
+    # Her decision is advisory — a passing spec stays passing regardless of decision.
+    evaluation = None
+    if status in ("completed", "complete") and failed == 0:
+        try:
+            from report_evaluator import evaluate_report
+            print("\n--- QB Reviewer evaluating... ---", file=sys.stderr)
+            evaluation = evaluate_report(report, spec=spec, use_persona=True)
+            print(json.dumps(evaluation, indent=2))
+            decision = evaluation.get("decision", "unknown").upper()
+            qb_response = (evaluation.get("qualitative") or {}).get("response", "")
+            print(f"\n--- QB decision: {decision} ---", file=sys.stderr)
+            if qb_response:
+                print(qb_response, file=sys.stderr)
+        except Exception as exc:
+            print(f"WARNING: QB Reviewer evaluation failed: {exc}", file=sys.stderr)
 
-    if status == "completed" and failed == 0:
+    _notify_discord(report, evaluation=evaluation)
+
+    if status in ("completed", "complete") and failed == 0:
         print(f"\n✓ {report.get('block_id')} — {status} ({summary.get('passed', 0)} passed, {summary.get('elapsed_seconds', 0):.1f}s)", file=sys.stderr)
         return 0
     else:

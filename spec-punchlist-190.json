@@ -1,0 +1,90 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-PUNCH-190",
+    "name": "Fix semgrep false positive — rename Latent token error log (#190)",
+    "agent": "codemine",
+    "scope": "tonic_engine.py (NeuroGraph + Faux_Clawdbot x2)",
+    "acceptance_criteria": [
+      "All three tonic_engine.py copies: 'Latent token error' renamed to 'Latent generation error'",
+      "py_compile passes on all three files",
+      "No remaining 'Latent token error' string in any tonic_engine.py"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "tonic_ng", "type": "file", "source_block": "none", "path": "tonic_engine.py"}
+    ],
+    "outputs": [
+      {"name": "tonic_ng_updated", "type": "file", "path": "tonic_engine.py", "contract": "log message renamed, no other changes"}
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do NOT change any logic, only rename the log message string",
+      "Do NOT touch any other file",
+      "Do NOT modify the exception variable or the logger.debug call structure"
+    ],
+    "anti_drift": ["Three identical one-line string replacements. Nothing else."],
+    "tool_allowlist": ["read_file", "edit_file", "shell_execute"],
+    "max_iterations": 15
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "verify-anchor-ng",
+      "description": "Confirm the target line exists in NeuroGraph tonic_engine.py before editing",
+      "tool": "shell_execute",
+      "params": {"command": "grep -n 'Latent token error' /home/josh/NeuroGraph/tonic_engine.py"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "Latent token error"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "edit-ng",
+      "description": "Rename log in NeuroGraph/tonic_engine.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "tonic_engine.py",
+        "old_text": "                logger.debug(\"Latent token error: %s\", exc)",
+        "new_text": "                logger.debug(\"Latent generation error: %s\", exc)"
+      },
+      "validation": {"checks": [{"operator": "result_is_string"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "edit-fcb-main",
+      "description": "Rename log in Faux_Clawdbot/tonic_engine.py",
+      "tool": "shell_execute",
+      "params": {"command": "python3 -c \"p='/home/josh/Faux_Clawdbot/tonic_engine.py'; s=open(p).read(); assert 'Latent token error' in s; open(p,'w').write(s.replace('Latent token error','Latent generation error',1)); print('UPDATED')\""},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "UPDATED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "edit-fcb-work",
+      "description": "Rename log in Faux_Clawdbot/neurograph_work/tonic_engine.py",
+      "tool": "shell_execute",
+      "params": {"command": "python3 -c \"p='/home/josh/Faux_Clawdbot/neurograph_work/tonic_engine.py'; s=open(p).read(); assert 'Latent token error' in s; open(p,'w').write(s.replace('Latent token error','Latent generation error',1)); print('UPDATED')\""},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "UPDATED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-all",
+      "description": "Confirm no 'Latent token error' remains and all three files compile clean",
+      "tool": "shell_execute",
+      "params": {"command": "python3 -m py_compile /home/josh/NeuroGraph/tonic_engine.py && python3 -m py_compile /home/josh/Faux_Clawdbot/tonic_engine.py && python3 -m py_compile /home/josh/Faux_Clawdbot/neurograph_work/tonic_engine.py && grep -rL 'Latent token error' /home/josh/NeuroGraph/tonic_engine.py /home/josh/Faux_Clawdbot/tonic_engine.py /home/josh/Faux_Clawdbot/neurograph_work/tonic_engine.py | wc -l | grep -q 3 && echo 'ALL CLEAN'"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "ALL CLEAN"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "All three tonic_engine.py files say 'Latent generation error'. No 'Latent token error' remains. py_compile passes all three."
+    }
+  ]
+}
