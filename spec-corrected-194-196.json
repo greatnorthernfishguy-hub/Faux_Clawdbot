@@ -2,7 +2,7 @@
   "spec_version": "1.0.0",
   "block": {
     "id": "BLK-CORRECTED-194-196",
-    "name": "Corrected verification — #194 (pytest-asyncio) + #196 (QuantumGraph _run_trials + tolerance) [training signal for bypass]",
+    "name": "Corrected verification — #194 pytest-asyncio + #196 QuantumGraph _run_trials + tolerance",
     "agent": "codemine",
     "scope": "agent-zero/requirements.txt + pytest.ini, QuantumGraph test_collapse.py + test_amplitude.py",
     "acceptance_criteria": [

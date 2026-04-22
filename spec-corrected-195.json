@@ -2,7 +2,7 @@
   "spec_version": "1.0.0",
   "block": {
     "id": "BLK-CORRECTED-195",
-    "name": "Corrected verification — #195 (Elmer test_hook.py rewrite — 4 stale tests against old ElmerHook API) [training signal for bypass]",
+    "name": "Corrected verification — #195 Elmer test_hook rewrite (4 stale tests against old API)",
     "agent": "codemine",
     "scope": "Elmer/tests/test_hook.py",
     "acceptance_criteria": [
