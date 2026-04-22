@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-04-22] Claude Code (Sonnet 4.6) — qb_checkpoint pending no longer blocks structural pass
+#   What: _structural_check() skips pending_qb_checkpoint when counting blocking pending gates.
+#   Why:  run_spec.py now calls evaluate_report() directly. pending_qb_checkpoint is the
+#         designed terminal state — treating it as structural failure caused qualitative=None,
+#         defeating the QB Reviewer loop wired into run_spec.py today.
+#   How:  Check 3 in _structural_check skips status == pending_qb_checkpoint.
 # [2026-04-07] Josh + Claude — Report evaluator with Reviewer persona (Phase 3)
 # What: Structural acceptance check + Reviewer persona qualitative evaluation
 # Why: The iteration loop needs a decision — done, iterate, or escalate
@@ -52,10 +58,13 @@ def _structural_check(report: dict) -> dict:
                 reasons.append(f"Step {sid} failed: {reason}")
 
     # Check 3: Any pending gates?
+    # pending_qb_checkpoint is the designed terminal state when running via run_spec.py —
+    # QB resolves it via the Reviewer loop. Only human_review blocks structural pass.
     pending_count = summary.get("pending_review", 0)
     if pending_count > 0:
         for sid, r in step_results.items():
-            if "pending" in r.get("status", ""):
+            status_val = r.get("status", "")
+            if "pending" in status_val and status_val != "pending_qb_checkpoint":
                 reasons.append(f"Step {sid} pending: {r.get('description', r.get('gate_type', 'review'))}")
 
     # Check 4: Were acceptance criteria addressed?
