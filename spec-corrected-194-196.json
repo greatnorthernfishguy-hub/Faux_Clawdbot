@@ -1,0 +1,177 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-CORRECTED-194-196",
+    "name": "Corrected verification — #194 (pytest-asyncio) + #196 (QuantumGraph _run_trials + tolerance) [training signal for bypass]",
+    "agent": "codemine",
+    "scope": "agent-zero/requirements.txt + pytest.ini, QuantumGraph test_collapse.py + test_amplitude.py",
+    "acceptance_criteria": [
+      "#194: pytest-asyncio>=0.23 confirmed in agent-zero/requirements.txt",
+      "#194: agent-zero/pytest.ini exists with asyncio_mode = auto",
+      "#196: _run_trials method confirmed present in TestCollapseEdgeCases (test_collapse.py)",
+      "#196: test_complex_amplitudes_same_magnitude uses pytest.approx(0.25, abs=0.05) — old abs=0.03 absent for that test",
+      "#196: test_many_random_phases_average uses abs(quantum - classical) < classical — old 0.5 * classical assert absent",
+      "#196: both previously-flaky tests pass on 3 consecutive runs"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "az_requirements", "type": "file", "source_block": "none", "path": "/home/josh/agent-zero/requirements.txt"},
+      {"name": "az_pytest_ini", "type": "file", "source_block": "none", "path": "/home/josh/agent-zero/pytest.ini"},
+      {"name": "qg_test_collapse", "type": "file", "source_block": "none", "path": "/home/josh/QuantumGraph/quantumgraph/tests/test_collapse.py"},
+      {"name": "qg_test_amplitude", "type": "file", "source_block": "none", "path": "/home/josh/QuantumGraph/quantumgraph/tests/test_amplitude.py"}
+    ],
+    "outputs": []
+  },
+  "constraints": {
+    "never": [
+      "Do NOT modify any files — this is a verification-only spec",
+      "Do NOT touch NeuroGraph, Praxis, Elmer, or any other repo"
+    ],
+    "anti_drift": [
+      "Read-only verification of already-applied fixes. No edits, no installs."
+    ],
+    "tool_allowlist": ["shell_execute"],
+    "max_iterations": 20
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "verify-194-requirements",
+      "description": "#194 — Confirm pytest-asyncio>=0.23 is present in agent-zero requirements.txt",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"s=open('/home/josh/agent-zero/requirements.txt').read(); assert 'pytest-asyncio' in s, 'MISSING: pytest-asyncio not in requirements.txt'; print('CONFIRMED: ' + [l.strip() for l in s.splitlines() if 'pytest-asyncio' in l][0])\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-194-pytest-ini",
+      "description": "#194 — Confirm agent-zero/pytest.ini exists with asyncio_mode = auto",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; p='/home/josh/agent-zero/pytest.ini'; assert os.path.exists(p), 'MISSING: pytest.ini not found'; s=open(p).read(); assert 'asyncio_mode = auto' in s, 'WRONG: asyncio_mode not set to auto'; print('CONFIRMED: asyncio_mode = auto present')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-196-run-trials",
+      "description": "#196 — Confirm _run_trials method exists in TestCollapseEdgeCases (must appear at least twice: once in TestAmplitudeCollapse, once in TestCollapseEdgeCases)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"s=open('/home/josh/QuantumGraph/quantumgraph/tests/test_collapse.py').read(); c=s.count('def _run_trials'); assert c >= 2, f'MISSING: only {c} _run_trials found, expected 2'; print(f'CONFIRMED: {c} _run_trials methods present')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-196-tolerance-absence",
+      "description": "#196 — Confirm the old pytest.approx(0.25, abs=0.03) pattern is absent (replaced by abs=0.05 in test_complex_amplitudes_same_magnitude)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"s=open('/home/josh/QuantumGraph/quantumgraph/tests/test_collapse.py').read(); old_count=s.count('approx(0.25, abs=0.03)'); assert old_count == 0, f'OLD PATTERN STILL PRESENT: approx(0.25, abs=0.03) found {old_count} times'; new_count=s.count('approx(0.25, abs=0.05)'); assert new_count >= 1, f'NEW PATTERN MISSING: approx(0.25, abs=0.05) not found'; print(f'CONFIRMED: old abs=0.03 absent, new abs=0.05 present {new_count} times')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-196-amplitude-absence",
+      "description": "#196 — Confirm the old '0.5 * classical' assert is absent in test_amplitude.py (replaced by '< classical')",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"s=open('/home/josh/QuantumGraph/quantumgraph/tests/test_amplitude.py').read(); old_count=sum(1 for l in s.splitlines() if '0.5 * classical' in l and 'assert' in l); assert old_count == 0, f'OLD PATTERN STILL IN ASSERT: 0.5 * classical assert found {old_count} times'; print('CONFIRMED: old 0.5 * classical assert absent')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-flaky-tests-run1",
+      "description": "#196 — Run 1 (of 3): both previously-flaky tests",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/QuantumGraph && python3 -m pytest quantumgraph/tests/test_amplitude.py::TestMixedInterference::test_many_random_phases_average quantumgraph/tests/test_collapse.py::TestCollapseEdgeCases::test_complex_amplitudes_same_magnitude -q 2>&1 | tail -5"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "2 passed"},
+          {"operator": "not_contains", "value": "FAILED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-flaky-tests-run2",
+      "description": "#196 — Run 2 (of 3): both previously-flaky tests",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/QuantumGraph && python3 -m pytest quantumgraph/tests/test_amplitude.py::TestMixedInterference::test_many_random_phases_average quantumgraph/tests/test_collapse.py::TestCollapseEdgeCases::test_complex_amplitudes_same_magnitude -q 2>&1 | tail -5"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "2 passed"},
+          {"operator": "not_contains", "value": "FAILED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-flaky-tests-run3",
+      "description": "#196 — Run 3 (of 3): both previously-flaky tests",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/QuantumGraph && python3 -m pytest quantumgraph/tests/test_amplitude.py::TestMixedInterference::test_many_random_phases_average quantumgraph/tests/test_collapse.py::TestCollapseEdgeCases::test_complex_amplitudes_same_magnitude -q 2>&1 | tail -5"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "2 passed"},
+          {"operator": "not_contains", "value": "FAILED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "Confirm: pytest-asyncio in agent-zero requirements.txt, asyncio_mode=auto in pytest.ini, _run_trials present twice in test_collapse.py, old abs=0.03 pattern absent for test_complex, old 0.5*classical assert absent in test_amplitude, both flaky tests passed 3 consecutive runs."
+    }
+  ]
+}

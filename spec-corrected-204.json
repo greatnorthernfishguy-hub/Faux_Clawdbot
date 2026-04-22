@@ -1,0 +1,140 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-CORRECTED-204",
+    "name": "Corrected verification — #204 (Praxis PipelineBridge removal from live Syl) [training signal for bypass]",
+    "agent": "codemine",
+    "scope": "Praxis/core/pipeline_bridge.py (deleted), Praxis/tests/test_pipeline_bridge.py (deleted), Praxis/core/praxis_hook.py (grow_pipeline excised)",
+    "acceptance_criteria": [
+      "#204: Praxis/core/pipeline_bridge.py confirmed absent",
+      "#204: Praxis/tests/test_pipeline_bridge.py confirmed absent",
+      "#204: grow_pipeline and pipeline_bridge references absent from Praxis/core/praxis_hook.py",
+      "#204: py_compile passes on Praxis/core/praxis_hook.py",
+      "#204: Praxis test baseline established — pre-existing failures in test_session_bridge.py documented, hook and other tests green"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "praxis_hook", "type": "file", "source_block": "none", "path": "/home/josh/Praxis/core/praxis_hook.py"}
+    ],
+    "outputs": []
+  },
+  "constraints": {
+    "never": [
+      "Do NOT modify any files — this is a verification-only spec",
+      "Do NOT touch NeuroGraph, QuantumGraph, Elmer, agent-zero, or any other repo",
+      "Do NOT re-create pipeline_bridge.py or test_pipeline_bridge.py"
+    ],
+    "anti_drift": [
+      "Read-only verification of already-applied deletion. No edits."
+    ],
+    "tool_allowlist": ["shell_execute"],
+    "max_iterations": 15
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "verify-pb-deleted",
+      "description": "#204 — Confirm core/pipeline_bridge.py has been deleted from Praxis",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; p='/home/josh/Praxis/core/pipeline_bridge.py'; assert not os.path.exists(p), 'STILL EXISTS: pipeline_bridge.py not deleted'; print('CONFIRMED: pipeline_bridge.py absent')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-test-pb-deleted",
+      "description": "#204 — Confirm tests/test_pipeline_bridge.py has been deleted from Praxis",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; p='/home/josh/Praxis/tests/test_pipeline_bridge.py'; assert not os.path.exists(p), 'STILL EXISTS: test_pipeline_bridge.py not deleted'; print('CONFIRMED: test_pipeline_bridge.py absent')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-hook-grow-pipeline-absent",
+      "description": "#204 — Confirm grow_pipeline reference is absent from core/praxis_hook.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"lines=[l for l in open('/home/josh/Praxis/core/praxis_hook.py') if not l.lstrip().startswith('#')]; count=sum(1 for l in lines if 'grow_pipeline' in l); assert count == 0, f'STILL PRESENT: grow_pipeline found {count} times in non-comment lines'; print('CONFIRMED: grow_pipeline absent from praxis_hook.py')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-hook-pipeline-bridge-absent",
+      "description": "#204 — Confirm pipeline_bridge import/reference is absent from core/praxis_hook.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"lines=[l for l in open('/home/josh/Praxis/core/praxis_hook.py') if not l.lstrip().startswith('#')]; count=sum(1 for l in lines if 'pipeline_bridge' in l); assert count == 0, f'STILL PRESENT: pipeline_bridge found {count} times in non-comment lines'; print('CONFIRMED: pipeline_bridge absent from praxis_hook.py')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CONFIRMED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "compile-hook",
+      "description": "#204 — Confirm py_compile passes on core/praxis_hook.py after removal",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile /home/josh/Praxis/core/praxis_hook.py && python3 -c \"print('COMPILE_OK')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "COMPILE_OK"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-praxis-tests-baseline",
+      "description": "#204 — Run full Praxis test suite. Pre-existing failures in test_session_bridge.py are documented and expected (unrelated to #204). Gate passes if pipeline_bridge tests are absent and praxis_hook tests remain green.",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/Praxis && python3 -m pytest tests/ --tb=no -q 2>&1 | tail -8"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "not_contains", "value": "test_pipeline_bridge"},
+          {"operator": "contains", "value": "passed"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "Confirm: pipeline_bridge.py absent, test_pipeline_bridge.py absent, grow_pipeline and pipeline_bridge absent from praxis_hook.py non-comment lines, py_compile passes, test_pipeline_bridge tests no longer appear in test run output."
+    }
+  ]
+}

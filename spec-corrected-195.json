@@ -1,0 +1,76 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-CORRECTED-195",
+    "name": "Corrected verification — #195 (Elmer test_hook.py rewrite — 4 stale tests against old ElmerHook API) [training signal for bypass]",
+    "agent": "codemine",
+    "scope": "Elmer/tests/test_hook.py",
+    "acceptance_criteria": [
+      "#195: Elmer baseline established — full test suite run documented before asserting hook tests",
+      "#195: test_hook.py runs 8 tests, all 8 pass",
+      "#195: No AttributeError or KeyError failures in hook tests (old API surface gone)"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "elmer_test_hook", "type": "file", "source_block": "none", "path": "/home/josh/Elmer/tests/test_hook.py"}
+    ],
+    "outputs": []
+  },
+  "constraints": {
+    "never": [
+      "Do NOT modify any files — this is a verification-only spec",
+      "Do NOT touch NeuroGraph, Praxis, QuantumGraph, agent-zero, or any other repo",
+      "Do NOT skip the baseline step — pre-existing failures must be documented before asserting hook test results"
+    ],
+    "anti_drift": [
+      "Two steps: baseline run then targeted hook test run. Nothing else."
+    ],
+    "tool_allowlist": ["shell_execute"],
+    "max_iterations": 15
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "baseline-full-suite",
+      "description": "#195 — Run full Elmer test suite to establish baseline. Documents any pre-existing failures (e.g. #205 SocketManager duplicate registration in test_start_stop) so they are not counted against the hook rewrite.",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/Elmer && python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "passed"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-hook-tests",
+      "description": "#195 — Run test_hook.py specifically. All 8 rewritten tests must pass. These tests were rewritten against the current ElmerHook API (nested module_results, removed get_context, current stats keys).",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/Elmer && python3 -m pytest tests/test_hook.py -v --tb=short 2>&1 | tail -15"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "8 passed"},
+          {"operator": "not_contains", "value": "FAILED"},
+          {"operator": "not_contains", "value": "AttributeError"},
+          {"operator": "not_contains", "value": "KeyError"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "Confirm: full Elmer suite baseline documented, test_hook.py runs 8 tests all passing, no AttributeError or KeyError in hook test output."
+    }
+  ]
+}
