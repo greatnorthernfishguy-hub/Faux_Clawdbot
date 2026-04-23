@@ -1,0 +1,252 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-THC-170",
+    "name": "Migrate THC DetectionCalibrator to continuous per-parameter competence",
+    "agent": "qwen3-coder",
+    "scope": "The-Healing-Collective — core/detection_calibrator.py",
+    "acceptance_criteria": [
+      "CompetenceTier enum is removed from detection_calibrator.py",
+      "_COMPETENCE_GAIN constant is present in detection_calibrator.py",
+      "_evaluate_graduation() method is removed",
+      "get_competence(key) method is present",
+      "python3 -m py_compile passes on detection_calibrator.py",
+      "python3 -m pytest tests/ passes (all tests that passed before still pass)",
+      "Change committed and pushed to GitHub"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "detection_calibrator.py",
+        "type": "file",
+        "path": "The-Healing-Collective/core/detection_calibrator.py",
+        "contract": "Continuous per-parameter competence [0,1], no CompetenceTier enum, no graduation gates"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Modify vendored files (ng_lite.py, ng_tract_bridge.py, ng_peer_bridge.py, ng_ecosystem.py, ng_autonomic.py, ng_embed.py, openclaw_adapter.py)",
+      "Modify any file outside core/detection_calibrator.py (unless a test file needs a trivial import fix)",
+      "Add features beyond the competence model migration",
+      "Import CompetenceTier or use discrete tier state anywhere in the new implementation"
+    ],
+    "anti_drift": [
+      "Keep the public API identical: get_thresholds(), record_outcome(), stats(), tier property",
+      "The tier property must still return a string (not an enum) for backwards-compatible telemetry",
+      "stats() must still include a 'tier' key — now a descriptive string computed from average competence",
+      "Keep _compute_optimal_threshold() logic unchanged — only the recalibration gating changes",
+      "Keep all persistence fields except 'tier' string — replace with 'competence' dict in saved state"
+    ],
+    "tool_allowlist": ["write_file", "edit_file", "shell_execute", "read_file"],
+    "shell_allowlist": ["echo", "rm", "find", "python3"],
+    "max_iterations": 30,
+    "timeout_seconds": 600
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo \"GITHUB_TOKEN length: ${#GITHUB_TOKEN}\""
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "GITHUB_TOKEN length: " },
+          { "operator": "not_contains", "value": "length: 0" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale clone directory from any previous runs",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf thc && echo \"CLEANED\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLEANED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_thc",
+      "type": "action",
+      "description": "Clone The-Healing-Collective repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/The-Healing-Collective.git thc"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "file_exists", "value": "thc/core/detection_calibrator.py" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "baseline_syntax",
+      "type": "action",
+      "description": "Confirm baseline syntax is clean before touching anything",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile thc/core/detection_calibrator.py && echo \"BASELINE_OK\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "BASELINE_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_external_competencetier_refs",
+      "type": "action",
+      "description": "Verify no file outside detection_calibrator.py imports or uses CompetenceTier",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import subprocess,sys; r=subprocess.run(['grep','-rn','CompetenceTier','thc/'],capture_output=True,text=True); hits=[l for l in r.stdout.splitlines() if 'detection_calibrator.py' not in l]; print('EXTERNAL_REFS:'+str(len(hits))); [print(h) for h in hits]\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "EXTERNAL_REFS:0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_graduation_gate_external_refs",
+      "type": "action",
+      "description": "Verify graduation gate config fields are not used outside detection_calibrator.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import subprocess; r=subprocess.run(['grep','-rn','journeyman_min_outcomes\\\\|master_min_outcomes\\\\|master_min_accuracy\\\\|journeyman_min_true_positives','thc/','--include=*.py'],capture_output=True,text=True); hits=[l for l in r.stdout.splitlines() if 'detection_calibrator.py' not in l]; print('GATE_REFS:'+str(len(hits)))\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "GATE_REFS:0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_sentinel",
+      "type": "condition",
+      "description": "Skip rewrite if already migrated (sentinel: _COMPETENCE_GAIN constant present)",
+      "check": {
+        "operator": "file_contains",
+        "target": "thc/core/detection_calibrator.py",
+        "value": "_COMPETENCE_GAIN"
+      },
+      "if_true": [
+        {
+          "id": "already_migrated",
+          "type": "action",
+          "description": "Migration already applied — skip rewrite",
+          "tool": "shell_execute",
+          "params": { "command": "echo \"ALREADY_MIGRATED\"" },
+          "validation": { "checks": [{ "operator": "contains", "value": "ALREADY_MIGRATED" }] },
+          "on_failure": "continue"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "write_detection_calibrator",
+          "type": "action",
+          "description": "Write new detection_calibrator.py with continuous per-parameter competence model",
+          "tool": "write_file",
+          "params": {
+            "path": "thc/core/detection_calibrator.py",
+            "content": "\"\"\"\nDetection Calibrator — Continuous Competence-Based Threshold Adaptation\n\nManages THC's failure detection thresholds using a continuous per-parameter\ncompetence model. Matches Elmer's TuningSocket pattern.\n\nCompetence is a continuous [0, 1] value per threshold parameter (\"similarity\"\nand \"novelty\"). It grows with accurate detection outcomes (gain=0.05) and\nshrinks with regressions (loss=0.10, asymmetric — trust is hard to build, easy\nto lose). Bootstrap bounds expand as competence rises — the substrate earns a\nwider operating envelope through demonstrated accuracy.\n\nTier names are descriptive regions only, for telemetry and logging:\n  Apprentice region  — competence near 0.0: bootstrap defaults dominate\n  Journeyman region  — competence 0.25–0.75: substrate drift begins\n  Master region      — competence near 1.0: substrate IS the expert\n\n# ---- Changelog ----\n# [2026-04-23] Claude (Sonnet 4.6) — Punchlist #170: migrate to continuous competence\n#   What: Replace discrete CompetenceTier enum + graduation gates with continuous\n#     per-parameter competence drift matching Elmer's TuningSocket.\n#   Why:  Josh directive — tier gates were a mistake. Continuous confidence-weighted\n#     drift is the ecosystem standard. Reference: Elmer/core/tuning.py.\n#   How:  _competence dict per threshold key (\"similarity\", \"novelty\"). Asymmetric\n#     gain=0.05/loss=0.10. Bootstrap bounds expand by _BOUNDS_EXPANSION_FACTOR at\n#     full competence. No tier state machine, no graduation check. Backwards-compat\n#     load: old \"tier\" field ignored; observations preserved; competence starts at 0.\n# [2026-03-18] Claude (CC) — Initial creation\n#   What: Three-tier competence model for failure detection thresholds.\n#   Why:  Static thresholds are bootstrap scaffolding. The substrate should learn\n#     what similarity/novelty scores actually predict real failures, with autonomy\n#     proportional to demonstrated competence.\n#   How:  Track (score, was_real_failure) observations. Compute optimal thresholds\n#     from score distributions. Graduate based on outcome count + accuracy metrics.\n# -------------------\n\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nimport logging\nimport time\nfrom dataclasses import dataclass\nfrom pathlib import Path\nfrom typing import Any, Dict, List, Optional, Tuple\n\nlogger = logging.getLogger(\"healing_collective.calibrator\")\n\n# Competence update rates. Asymmetric: trust is hard to earn, easy to lose.\n_COMPETENCE_GAIN = 0.05    # per accurate detection (true positive)\n_COMPETENCE_LOSS = 0.10    # per regression (false positive) — 2× gain\n\n# Minimum outcomes before competence can exceed 0.5.\n# Prevents early lucky outcomes from producing overconfidence.\n_MIN_OUTCOMES_FOR_CONFIDENCE = 5\n\n# How much bootstrap bounds expand at full competence (c=1.0).\n# E.g., similarity_bounds (0.25, 0.60) width=0.35 → expands ±0.175 at c=1:\n#   effective bounds (0.075, 0.775)\n_BOUNDS_EXPANSION_FACTOR = 0.5\n\n# Minimum trigger-type observations before adapting that threshold.\n_MIN_OBS_TO_ADAPT = 5\n\n\n@dataclass\nclass CalibrationConfig:\n    \"\"\"Configuration for the detection calibrator.\"\"\"\n\n    # Bootstrap defaults (static starting points)\n    default_similarity_threshold: float = 0.40\n    default_novelty_threshold: float = 0.85\n\n    # Bootstrap bounds — expanded by competence at runtime\n    similarity_bounds: Tuple[float, float] = (0.25, 0.60)\n    novelty_bounds: Tuple[float, float] = (0.70, 0.95)\n\n    # Recalibrate after this many new observations\n    recalibrate_every: int = 10\n\n\n@dataclass\nclass DetectionObservation:\n    \"\"\"A single observation for calibration learning.\"\"\"\n    similarity_score: float\n    novelty_score: float\n    trigger: str                # \"dvs_similarity\" or \"novelty\"\n    was_real_failure: bool\n    timestamp: float = 0.0\n\n    def __post_init__(self):\n        if self.timestamp == 0.0:\n            self.timestamp = time.time()\n\n\nclass DetectionCalibrator:\n    \"\"\"Adaptive threshold calibration with continuous per-parameter competence.\n\n    Competence is a continuous [0, 1] value per threshold parameter. It grows\n    with accurate detections and shrinks with false positives. Bootstrap bounds\n    expand as competence rises — no discrete tier gates.\n\n    Usage:\n        calibrator = DetectionCalibrator(config, persistence_path)\n        sim_thresh, nov_thresh = calibrator.get_thresholds()\n        calibrator.record_outcome(\n            similarity_score=0.45, novelty_score=0.30,\n            trigger=\"dvs_similarity\", was_real_failure=True,\n        )\n    \"\"\"\n\n    def __init__(\n        self,\n        config: Optional[CalibrationConfig] = None,\n        persistence_path: Optional[str] = None,\n    ) -> None:\n        self._config = config or CalibrationConfig()\n        self._persistence_path = persistence_path\n\n        self._observations: List[DetectionObservation] = []\n        self._similarity_threshold = self._config.default_similarity_threshold\n        self._novelty_threshold = self._config.default_novelty_threshold\n\n        # Per-parameter competence: continuous [0, 1], starts at 0 (no evidence).\n        self._competence: Dict[str, float] = {\"similarity\": 0.0, \"novelty\": 0.0}\n        self._outcome_counts: Dict[str, int] = {\"similarity\": 0, \"novelty\": 0}\n\n        self._observations_since_calibration = 0\n\n        if persistence_path:\n            self._load(persistence_path)\n\n    # -------------------------------------------------------------------\n    # Competence\n    # -------------------------------------------------------------------\n\n    def get_competence(self, key: str) -> float:\n        \"\"\"Return current competence for a parameter. 0 = no evidence.\"\"\"\n        raw = self._competence.get(key, 0.0)\n        outcomes = self._outcome_counts.get(key, 0)\n        if outcomes < _MIN_OUTCOMES_FOR_CONFIDENCE:\n            cap = outcomes / _MIN_OUTCOMES_FOR_CONFIDENCE * 0.5\n            return min(raw, cap)\n        return raw\n\n    def _update_competence(self, key: str, was_real_failure: bool) -> float:\n        \"\"\"Update competence based on detection accuracy.\n\n        True positive (real failure detected) → gain competence.\n        False positive (noise triggered) → lose competence.\n        \"\"\"\n        current = self._competence.get(key, 0.0)\n        self._outcome_counts[key] = self._outcome_counts.get(key, 0) + 1\n\n        if was_real_failure:\n            new = current + _COMPETENCE_GAIN * (1.0 - current)\n        else:\n            new = current - _COMPETENCE_LOSS * current\n\n        new = max(0.0, min(1.0, new))\n        self._competence[key] = new\n        logger.debug(\"Competence %s: %.3f → %.3f\", key, current, new)\n        return new\n\n    def _effective_bounds(self, key: str) -> Tuple[float, float]:\n        \"\"\"Bootstrap bounds expanded by competence.\n\n        At c=0 returns bootstrap bounds. At c=1 expands by\n        _BOUNDS_EXPANSION_FACTOR in each direction.\n        \"\"\"\n        c = self.get_competence(key)\n        lo, hi = (\n            self._config.similarity_bounds\n            if key == \"similarity\"\n            else self._config.novelty_bounds\n        )\n        width = hi - lo\n        expansion = width * _BOUNDS_EXPANSION_FACTOR * c\n        return (max(0.0, lo - expansion), min(1.0, hi + expansion))\n\n    # -------------------------------------------------------------------\n    # Public interface\n    # -------------------------------------------------------------------\n\n    @property\n    def tier(self) -> str:\n        \"\"\"Descriptive competence region — for telemetry only, not a gate.\"\"\"\n        avg_c = sum(self._competence.values()) / max(len(self._competence), 1)\n        if avg_c < 0.25:\n            return \"apprentice\"\n        elif avg_c < 0.75:\n            return \"journeyman\"\n        return \"master\"\n\n    def get_thresholds(self) -> Tuple[float, float]:\n        \"\"\"Return (similarity_threshold, novelty_threshold).\"\"\"\n        return self._similarity_threshold, self._novelty_threshold\n\n    def record_outcome(\n        self,\n        similarity_score: float,\n        novelty_score: float,\n        trigger: str,\n        was_real_failure: bool,\n    ) -> None:\n        \"\"\"Record a detection outcome and update competence.\"\"\"\n        obs = DetectionObservation(\n            similarity_score=similarity_score,\n            novelty_score=novelty_score,\n            trigger=trigger,\n            was_real_failure=was_real_failure,\n        )\n        self._observations.append(obs)\n        self._observations_since_calibration += 1\n\n        key = \"similarity\" if trigger == \"dvs_similarity\" else \"novelty\"\n        self._update_competence(key, was_real_failure)\n\n        if self._observations_since_calibration >= self._config.recalibrate_every:\n            self._recalibrate()\n            self._observations_since_calibration = 0\n\n        if self._persistence_path:\n            self._save(self._persistence_path)\n\n    def stats(self) -> Dict[str, Any]:\n        \"\"\"Calibrator statistics for telemetry.\"\"\"\n        total = len(self._observations)\n        true_positives = sum(1 for o in self._observations if o.was_real_failure)\n        return {\n            \"tier\": self.tier,\n            \"competence_similarity\": round(self.get_competence(\"similarity\"), 4),\n            \"competence_novelty\": round(self.get_competence(\"novelty\"), 4),\n            \"total_observations\": total,\n            \"true_positives\": true_positives,\n            \"false_positives\": total - true_positives,\n            \"accuracy\": true_positives / total if total > 0 else 0.0,\n            \"similarity_threshold\": round(self._similarity_threshold, 4),\n            \"novelty_threshold\": round(self._novelty_threshold, 4),\n            \"default_similarity\": self._config.default_similarity_threshold,\n            \"default_novelty\": self._config.default_novelty_threshold,\n        }\n\n    # -------------------------------------------------------------------\n    # Recalibration\n    # -------------------------------------------------------------------\n\n    def _recalibrate(self) -> None:\n        \"\"\"Recompute thresholds from observed score distributions.\n\n        Always runs (no APPRENTICE no-op). Stays at defaults when insufficient\n        observations for a trigger type. Bounds expand with competence.\n        \"\"\"\n        sim_obs = [o for o in self._observations if o.trigger == \"dvs_similarity\"]\n        nov_obs = [o for o in self._observations if o.trigger == \"novelty\"]\n\n        if len(sim_obs) >= _MIN_OBS_TO_ADAPT:\n            optimal = self._compute_optimal_threshold(\n                scores=[(o.similarity_score, o.was_real_failure) for o in sim_obs],\n                default=self._config.default_similarity_threshold,\n            )\n            lo, hi = self._effective_bounds(\"similarity\")\n            self._similarity_threshold = max(lo, min(hi, optimal))\n\n        if len(nov_obs) >= _MIN_OBS_TO_ADAPT:\n            optimal = self._compute_optimal_threshold(\n                scores=[(o.novelty_score, o.was_real_failure) for o in nov_obs],\n                default=self._config.default_novelty_threshold,\n            )\n            lo, hi = self._effective_bounds(\"novelty\")\n            self._novelty_threshold = max(lo, min(hi, optimal))\n\n        logger.info(\n            \"Recalibrated (sim_c=%.3f, nov_c=%.3f): sim=%.3f, nov=%.3f\",\n            self.get_competence(\"similarity\"),\n            self.get_competence(\"novelty\"),\n            self._similarity_threshold,\n            self._novelty_threshold,\n        )\n\n    @staticmethod\n    def _compute_optimal_threshold(\n        scores: List[Tuple[float, bool]],\n        default: float,\n    ) -> float:\n        \"\"\"Midpoint between true-positive and false-positive score distributions.\n\n        Returns default if distributions are too similar (gap < 0.05).\n        \"\"\"\n        true_scores = [s for s, is_real in scores if is_real]\n        false_scores = [s for s, is_real in scores if not is_real]\n\n        if not true_scores or not false_scores:\n            if true_scores:\n                return max(0.0, min(true_scores) - 0.05)\n            return default\n\n        true_mean = sum(true_scores) / len(true_scores)\n        false_mean = sum(false_scores) / len(false_scores)\n\n        if abs(true_mean - false_mean) < 0.05:\n            return default\n\n        return (true_mean + false_mean) / 2.0\n\n    # -------------------------------------------------------------------\n    # Persistence\n    # -------------------------------------------------------------------\n\n    def _save(self, path: str) -> None:\n        \"\"\"Persist calibration state.\"\"\"\n        try:\n            state = {\n                \"competence\": self._competence,\n                \"outcome_counts\": self._outcome_counts,\n                \"similarity_threshold\": self._similarity_threshold,\n                \"novelty_threshold\": self._novelty_threshold,\n                \"observations\": [\n                    {\n                        \"similarity_score\": o.similarity_score,\n                        \"novelty_score\": o.novelty_score,\n                        \"trigger\": o.trigger,\n                        \"was_real_failure\": o.was_real_failure,\n                        \"timestamp\": o.timestamp,\n                    }\n                    for o in self._observations\n                ],\n            }\n            p = Path(path)\n            p.parent.mkdir(parents=True, exist_ok=True)\n            tmp = p.with_suffix(\".tmp\")\n            tmp.write_text(json.dumps(state, indent=2))\n            tmp.replace(p)\n        except Exception as exc:\n            logger.debug(\"Calibration save failed: %s\", exc)\n\n    def _load(self, path: str) -> None:\n        \"\"\"Load persisted calibration state.\n\n        Backwards compatible: old \\\"tier\\\" field silently ignored.\n        Competence starts at 0.0 for migrated instances — conservative default.\n        \"\"\"\n        try:\n            p = Path(path)\n            if not p.exists():\n                return\n            state = json.loads(p.read_text())\n\n            if \"competence\" in state:\n                self._competence.update(state[\"competence\"])\n            # Old \"tier\" field silently dropped — competence starts at 0.0.\n\n            if \"outcome_counts\" in state:\n                self._outcome_counts.update(state[\"outcome_counts\"])\n\n            self._similarity_threshold = state.get(\n                \"similarity_threshold\",\n                self._config.default_similarity_threshold,\n            )\n            self._novelty_threshold = state.get(\n                \"novelty_threshold\",\n                self._config.default_novelty_threshold,\n            )\n\n            for obs_dict in state.get(\"observations\", []):\n                self._observations.append(DetectionObservation(\n                    similarity_score=obs_dict[\"similarity_score\"],\n                    novelty_score=obs_dict[\"novelty_score\"],\n                    trigger=obs_dict[\"trigger\"],\n                    was_real_failure=obs_dict[\"was_real_failure\"],\n                    timestamp=obs_dict.get(\"timestamp\", 0.0),\n                ))\n\n            logger.info(\n                \"Loaded calibration state: sim_c=%.3f, nov_c=%.3f, \"\n                \"%d observations, sim=%.3f, nov=%.3f\",\n                self.get_competence(\"similarity\"),\n                self.get_competence(\"novelty\"),\n                len(self._observations),\n                self._similarity_threshold,\n                self._novelty_threshold,\n            )\n        except Exception as exc:\n            logger.debug(\"Calibration load failed: %s\", exc)\n"
+          },
+          "validation": {
+            "checks": [{ "operator": "result_is_string" }]
+          },
+          "on_failure": "abort"
+        }
+      ]
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify new detection_calibrator.py has no syntax errors",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile thc/core/detection_calibrator.py && echo \"SYNTAX_OK\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_old_enum_absent",
+      "type": "action",
+      "description": "Verify CompetenceTier class definition is gone (enum removed)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"c=open('thc/core/detection_calibrator.py').read(); print(c.count('class CompetenceTier('))\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_graduation_method_absent",
+      "type": "action",
+      "description": "Verify _evaluate_graduation() method is gone",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"c=open('thc/core/detection_calibrator.py').read(); print(c.count('def _evaluate_graduation('))\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "run_tests",
+      "type": "action",
+      "description": "Run THC test suite — all tests that passed before must still pass",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd thc && python3 -m pytest tests/ -q --tb=short 2>&1 | tail -20"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "not_contains", "value": "error in " },
+          { "operator": "not_contains", "value": "FAILED" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "git_commit",
+      "type": "action",
+      "description": "Commit and push the migration",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd thc && git config user.email 'codemine@et-systems.ai' && git config user.name 'Codemine (QB)' && git add core/detection_calibrator.py && git diff --cached --quiet && echo ALREADY_COMMITTED || (git commit -m 'detection_calibrator: migrate to continuous per-parameter competence (#170)\n\nReplace discrete CompetenceTier enum + graduation gates with continuous\nper-parameter competence drift matching Elmer TuningSocket pattern.\n\nkey changes:\n- _COMPETENCE_GAIN=0.05 / _COMPETENCE_LOSS=0.10 (asymmetric, per-param)\n- _effective_bounds() expands bootstrap range with competence\n- _recalibrate() always runs; no APPRENTICE no-op gate\n- get_competence(key) public method\n- tier property: descriptive string only, not a state machine\n- persistence: saves competence dict; loads old tier field with silent drop\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>' && git push && echo COMMITTED)"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "COMMIT" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup",
+      "type": "action",
+      "description": "Remove clone directory",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf thc && echo \"CLEANED\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLEANED" }]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}
