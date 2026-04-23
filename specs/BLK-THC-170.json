@@ -212,7 +212,7 @@
       "description": "Run THC test suite — all tests that passed before must still pass",
       "tool": "shell_execute",
       "params": {
-        "command": "cd thc && python3 -m pytest tests/ -q --tb=short 2>&1 | tail -20"
+        "command": "python3 -m pytest thc/tests/ -q --tb=short 2>&1 | tail -20"
       },
       "validation": {
         "checks": [
@@ -228,7 +228,7 @@
       "description": "Commit and push the migration",
       "tool": "shell_execute",
       "params": {
-        "command": "cd thc && git config user.email 'codemine@et-systems.ai' && git config user.name 'Codemine (QB)' && git add core/detection_calibrator.py && git diff --cached --quiet && echo ALREADY_COMMITTED || (git commit -m 'detection_calibrator: migrate to continuous per-parameter competence (#170)\n\nReplace discrete CompetenceTier enum + graduation gates with continuous\nper-parameter competence drift matching Elmer TuningSocket pattern.\n\nkey changes:\n- _COMPETENCE_GAIN=0.05 / _COMPETENCE_LOSS=0.10 (asymmetric, per-param)\n- _effective_bounds() expands bootstrap range with competence\n- _recalibrate() always runs; no APPRENTICE no-op gate\n- get_competence(key) public method\n- tier property: descriptive string only, not a state machine\n- persistence: saves competence dict; loads old tier field with silent drop\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>' && git push && echo COMMITTED)"
+        "command": "git -C thc config user.email 'codemine@et-systems.ai' && git -C thc config user.name 'Codemine (QB)' && git -C thc add core/detection_calibrator.py && git -C thc diff --cached --quiet && echo ALREADY_COMMITTED || (git -C thc commit -m 'detection_calibrator: migrate to continuous per-parameter competence (#170)' && git -C thc push && echo COMMITTED)"
       },
       "validation": {
         "checks": [{ "operator": "contains", "value": "COMMIT" }]
