@@ -1,11 +1,99 @@
+"""
+NeuroGraph Foundation — Phase 4: Universal Ingestor System
+
+Five-stage pipeline for consuming arbitrary data sources and transforming them
+into fully integrated knowledge within the NeuroGraph Foundation.
+
+Pipeline stages (PRD Addendum §2):
+    1. Extract  — Convert raw input to structured text
+    2. Chunk    — Segment into semantically meaningful units
+    3. Embed    — Vector representations via sentence-transformers
+    4. Register — Insert into Vector DB, create SNN nodes with novelty dampening
+    5. Associate — Create synapses/hyperedges via similarity and structure
+
+Reference: NeuroGraph Foundation PRD Addendum v1.1-1.2 (Universal Ingestor).
+
+Grok Review Changelog (v0.7.1):
+    Accepted: Added outer try/except in embed() as defense-in-depth around
+        _encode_batch() — if something unexpected bypasses the inner catch,
+        the batch falls back to per-chunk hash embeddings rather than
+        propagating up to the caller.
+    Rejected: 'PDF extraction loses images/tables' — PyPDF2 is a text
+        extraction library by design. Image/table extraction would require
+        pdfplumber or similar, which is a feature request (not a bug).
+        Will consider for a future phase if demand warrants.
+    Rejected: 'No graceful degrade if model load fails' — _try_load_model()
+        already catches ImportError AND broad Exception, sets _model_available
+        = False, and falls back to hash. _encode_batch() additionally wraps
+        runtime model errors. Both paths were implemented since Phase 4.
+    Rejected: 'Cache uses SHA256 on vectors — why?' — Cache key is SHA256 of
+        the TEXT, not the vector (_cache_key hashes text.encode("utf-8")).
+        Text is the correct key: same text always maps to the same embedding
+        within a model session. Using text directly as key would consume more
+        memory for large chunks.
+    Rejected: 'Chunker OOM for >10k tokens' — Semantic chunker already splits
+        oversized paragraphs by sentence boundaries (lines 619-634).
+        Hierarchical chunker calls _split_large_section() for oversized
+        headings. Fixed-size chunker uses a sliding window. All paths are
+        bounded by max_chunk_tokens.
+
+# ---- Changelog ----
+# [2026-04-13] Claude (Sonnet 4.6) — Migrate embedding backend from fastembed to ng_embed
+#   What: Replaced _try_load_fastembed() with _try_load_ng_embed(). EmbeddingEngine
+#         now uses ng_embed.NGEmbed singleton (ONNX Runtime, Snowflake arctic-embed-m-v1.5,
+#         768-dim) instead of fastembed (BAAI/bge-base-en-v1.5, 384-dim, not installed).
+#   Why:  fastembed is not installed on the laptop CC instance; ng_embed.py is the
+#         ecosystem-wide ONNX embedding engine built specifically so no external
+#         embedding service (Ollama, HF Inference) is needed. Also unifies the
+#         embedding system — one ONNX backend, one model, everywhere. fastembed was
+#         always an intermediate solution after sentence-transformers was removed.
+#   How:  _try_load_fastembed() → _try_load_ng_embed() using NGEmbed.get_instance().
+#         Model lazy-loads on first embed() call (singleton, thread-safe).
+#         _encode_batch() updated to call self._ng_embed.embed_batch(texts).
+#         self.dimension set to 768 explicitly (ng_embed always produces 768-dim).
+# [2026-03-25] Claude Code (Opus 4.6) — Code def weight from config (SVG Phase 3)
+#   What: Hardcoded 0.4 dampening multiplier for code def→usage synapses now
+#         reads from config as code_def_weight (default 0.4).
+#   Why:  Static Value Graduation — the substrate's concern, not a developer's guess.
+#   How:  AssociationEngine.__init__ reads from self.config.get("code_def_weight", 0.4).
+# [2026-03-19] Claude Code (Opus 4.6) — Remove sentence-transformers from embedding pipeline
+# What: Removed _try_load_sentence_transformers() fallback and runtime torch
+#   encode fallback. Embedding pipeline is now fastembed → hash only.
+# Why: sentence-transformers broke (2026-03-16), degrading all modules to hash
+#   fallbacks. When it was partially restored with all-MiniLM-L6-v2, it deposited
+#   384-dim vectors into the 768-dim substrate. Removing the torch fallback
+#   eliminates the risk of dimension mismatches from a broken library loading
+#   a wrong model. Also removed stale all-MiniLM-L6-v2 entry from fe_model_map.
+#   Punchlist #45.
+# How: Load chain: fastembed → log warning + hash fallback. Runtime encode:
+#   fastembed → hash fallback. No torch path remains.
+# -------------------
+# [2026-03-10] Claude (Opus) — Harden _resolve_device() for "auto" mode
+# What: _resolve_device() now explicitly checks torch.cuda.is_available()
+#        for "auto" device instead of returning None for ST auto-detect.
+# Why: CUDA-built torch (e.g. 2.10.0+cu128) on systems without a GPU
+#       causes sentence-transformers auto-detect to hit meta-tensor errors
+#       ("Cannot copy out of meta tensor; no data!"), silently falling back
+#       to hash-based embeddings and degrading Syl's semantic quality.
+# How: Moved the torch.cuda.is_available() check above both "auto" and
+#       "cuda" branches. "auto" now resolves to "cuda" or "cpu" explicitly.
+#       Return type is always a concrete device string, never None.
+# -------------------
+"""
+
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import math
 import os
 import re
+import tempfile
 import textwrap
 import uuid
+import zipfile
+from pathlib import Path
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -33,6 +121,11 @@ class SourceType(Enum):
     CODE = auto()
     MARKDOWN = auto()
     TEXT = auto()
+    ZIP = auto()
+    JSON = auto()
+    CSV = auto()
+    HTML = auto()
+    MEDIA = auto()
 
 
 class ChunkStrategy(Enum):
@@ -224,35 +317,118 @@ class SimpleVectorDB:
         """Return all stored IDs."""
         return list(self.embeddings.keys())
 
-    def save(self, path: str) -> None:
-        """Persist vectors, content, and metadata to a compressed .npz file."""
-        import json as _json
-        ids = list(self.embeddings.keys())
-        if not ids:
-            return
-        np.savez_compressed(
-            path,
-            ids=np.array(ids, dtype=object),
-            embeddings=np.array([self.embeddings[i] for i in ids]),
-            content=np.array([self.content[i] for i in ids], dtype=object),
-            metadata=np.array([_json.dumps(self.metadata[i]) for i in ids], dtype=object),
-        )
+    def save(self, path: str) -> int:
+        """Persist vector DB state to disk (msgpack or JSON).
 
-    def load(self, path: str) -> None:
-        """Restore vectors, content, and metadata from a .npz file."""
-        import json as _json
-        from pathlib import Path as _Path
-        if not _Path(path).exists():
-            return
-        data = np.load(path, allow_pickle=True)
-        ids = data["ids"].tolist()
-        embeddings = data["embeddings"]
-        content = data["content"].tolist()
-        metadata = data["metadata"].tolist()
-        for idx, id_ in enumerate(ids):
-            self.embeddings[id_] = embeddings[idx]
-            self.content[id_] = content[idx]
-            self.metadata[id_] = _json.loads(metadata[idx])
+        Stores embeddings as raw bytes (float32), plus content and metadata
+        dicts. Format mirrors Graph checkpoint conventions.
+
+        Args:
+            path: File path. Extension determines format (.msgpack or .json).
+
+        Returns:
+            Number of entries saved.
+        """
+        import numpy as np
+
+        data = {
+            "version": "1.0.0",
+            "count": len(self.embeddings),
+            "entries": {},
+        }
+        for id in self.embeddings:
+            data["entries"][id] = {
+                "embedding": self.embeddings[id].astype(np.float32).tobytes(),
+                "content": self.content.get(id, ""),
+                "metadata": self.metadata.get(id, {}),
+            }
+
+        if path.endswith(".msgpack"):
+            try:
+                import msgpack
+            except ImportError:
+                raise ImportError("msgpack required for .msgpack serialization")
+            with open(path, "wb") as f:
+                msgpack.pack(data, f, use_bin_type=True)
+        else:
+            import json
+            import base64
+            # JSON fallback: base64-encode the binary embeddings
+            json_data = {
+                "version": data["version"],
+                "count": data["count"],
+                "entries": {},
+            }
+            for id, entry in data["entries"].items():
+                json_data["entries"][id] = {
+                    "embedding_b64": base64.b64encode(entry["embedding"]).decode("ascii"),
+                    "content": entry["content"],
+                    "metadata": entry["metadata"],
+                }
+            with open(path, "w") as f:
+                json.dump(json_data, f, indent=2, default=str)
+
+        return len(self.embeddings)
+
+    def load(self, path: str) -> int:
+        """Restore vector DB state from disk.
+
+        Clears existing state before loading. Embeddings are restored
+        as L2-normalized float32 numpy arrays.
+
+        Args:
+            path: File path to load from (.msgpack or .json).
+
+        Returns:
+            Number of entries loaded.
+        """
+        import numpy as np
+
+        if path.endswith(".msgpack"):
+            try:
+                import msgpack
+            except ImportError:
+                raise ImportError("msgpack required for .msgpack deserialization")
+            with open(path, "rb") as f:
+                data = msgpack.unpack(f, raw=False)
+        else:
+            import json
+            import base64
+            with open(path, "r") as f:
+                json_data = json.load(f)
+            # Convert base64 back to bytes
+            data = {
+                "version": json_data.get("version", "1.0.0"),
+                "count": json_data.get("count", 0),
+                "entries": {},
+            }
+            for id, entry in json_data.get("entries", {}).items():
+                data["entries"][id] = {
+                    "embedding": base64.b64decode(entry["embedding_b64"]),
+                    "content": entry.get("content", ""),
+                    "metadata": entry.get("metadata", {}),
+                }
+
+        # Clear existing state
+        self.embeddings.clear()
+        self.content.clear()
+        self.metadata.clear()
+
+        # Restore entries
+        for id, entry in data.get("entries", {}).items():
+            embedding_bytes = entry["embedding"]
+            vec = np.frombuffer(embedding_bytes, dtype=np.float32).copy()
+            # Vectors should already be normalized from when they were saved,
+            # but re-normalize to be safe
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            self.embeddings[id] = vec
+            self.content[id] = entry.get("content", "")
+            self.metadata[id] = entry.get("metadata", {})
+
+        return len(self.embeddings)
+
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +656,525 @@ class PDFExtractor(BaseExtractor):
             raise ValueError(f"Failed to extract PDF '{path}': {e}")
 
 
+class ZipExtractor(BaseExtractor):
+    """ZIP archive extractor that recursively processes contained files.
+
+    Extracts a ZIP archive to a temporary directory, then routes each
+    supported file inside through the appropriate extractor.  Unsupported
+    files (binaries, images, etc.) are silently skipped.
+
+    The combined output is a single ``ExtractedContent`` whose ``raw_text``
+    is the concatenation of all extracted file texts, separated by markers.
+    ``structure`` entries record each file's path, type, and offset within
+    the combined text.
+
+    Uses only stdlib ``zipfile`` — no extra dependencies.
+    """
+
+    # Extensions we know how to handle (mirrors SUPPORTED_EXTENSIONS + code types)
+    _SUPPORTED_EXTS = {
+        ".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".rb", ".php",
+        ".md", ".markdown", ".txt", ".html", ".htm", ".pdf",
+        ".json", ".csv", ".docx",
+        # Images — extract EXIF/metadata
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+        ".heic", ".heif",
+    }
+    _IMAGE_EXTS = {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+        ".heic", ".heif",
+    }
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        """Extract contents of a ZIP file.
+
+        Args:
+            source: Path to a ``.zip`` file on disk.
+
+        Returns:
+            ExtractedContent with combined text from all supported files.
+        """
+        if not zipfile.is_zipfile(source):
+            raise ValueError(f"Not a valid ZIP archive: {source}")
+
+        combined_texts: List[str] = []
+        structure: List[Dict[str, Any]] = []
+        file_count = 0
+        skipped_count = 0
+
+        with tempfile.TemporaryDirectory(prefix="neurograph_zip_") as tmp_dir:
+            with zipfile.ZipFile(source, "r") as zf:
+                # Security: skip entries with absolute paths or parent traversal
+                safe_members = [
+                    m for m in zf.namelist()
+                    if not os.path.isabs(m) and ".." not in m.split("/")
+                ]
+                zf.extractall(tmp_dir, members=safe_members)
+
+            # Walk the extracted tree and process each supported file
+            for root, _dirs, files in os.walk(tmp_dir):
+                for fname in sorted(files):
+                    fpath = os.path.join(root, fname)
+                    ext = os.path.splitext(fname)[1].lower()
+                    rel_path = os.path.relpath(fpath, tmp_dir)
+
+                    if ext not in self._SUPPORTED_EXTS:
+                        skipped_count += 1
+                        continue
+
+                    try:
+                        file_text = self._extract_single(fpath, ext)
+                    except Exception:
+                        skipped_count += 1
+                        continue
+
+                    if not file_text.strip():
+                        continue
+
+                    marker = f"--- {rel_path} ---"
+                    structure.append({
+                        "type": "zip_member",
+                        "path": rel_path,
+                        "extension": ext,
+                        "offset": sum(len(t) for t in combined_texts),
+                        "length": len(file_text),
+                    })
+                    combined_texts.append(f"{marker}\n{file_text}")
+                    file_count += 1
+
+        raw_text = "\n\n".join(combined_texts)
+
+        return ExtractedContent(
+            raw_text=raw_text,
+            metadata={
+                "source_type": "zip",
+                "path": source,
+                "files_extracted": file_count,
+                "files_skipped": skipped_count,
+                "length": len(raw_text),
+            },
+            structure=structure,
+            source_type=SourceType.ZIP,
+        )
+
+    def _extract_single(self, fpath: str, ext: str) -> str:
+        """Extract text from a single file within the archive."""
+        if ext == ".pdf":
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(fpath)
+                return "\n\n".join(
+                    page.extract_text() or "" for page in reader.pages
+                )
+            except Exception:
+                return ""
+        if ext in self._IMAGE_EXTS:
+            return self._extract_image_metadata(fpath)
+        # All other supported types: read as text
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+
+    @staticmethod
+    def _extract_image_metadata(fpath: str) -> str:
+        """Extract EXIF and basic metadata from an image file."""
+        parts: List[str] = []
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS, GPSTAGS
+            img = Image.open(fpath)
+            parts.append(f"Image: {os.path.basename(fpath)}")
+            parts.append(f"Format: {img.format}, Size: {img.size[0]}x{img.size[1]}, Mode: {img.mode}")
+            exif_data = img.getexif()
+            if exif_data:
+                for tag_id, value in exif_data.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    # Skip binary/bytes fields
+                    if isinstance(value, bytes):
+                        continue
+                    parts.append(f"{tag}: {value}")
+            img.close()
+        except Exception:
+            parts.append(f"Image: {os.path.basename(fpath)} (metadata extraction failed)")
+        return "\n".join(parts)
+class JSONExtractor(BaseExtractor):
+    """JSON file extractor that preserves structure as navigation hints.
+
+    Extracts all text content from JSON data (string values, keys) and
+    reports the top-level structure (keys, nesting depth) so that the
+    chunker can produce meaningful segments.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        try:
+            data = json.loads(source)
+        except (json.JSONDecodeError, ValueError):
+            # Not valid JSON — fall back to plain text
+            return TextExtractor().extract(source, **kwargs)
+
+        text_parts: List[str] = []
+        structure: List[Dict[str, Any]] = []
+        self._walk(data, text_parts, structure, depth=0, path="$")
+
+        raw_text = "\n".join(text_parts) if text_parts else source
+
+        return ExtractedContent(
+            raw_text=raw_text,
+            metadata={
+                "source_type": "json",
+                "length": len(source),
+                "top_level_type": type(data).__name__,
+                "top_level_keys": (
+                    list(data.keys())[:50] if isinstance(data, dict) else None
+                ),
+                "structure_entries": len(structure),
+            },
+            structure=structure,
+            source_type=SourceType.JSON,
+        )
+
+    def _walk(
+        self,
+        obj: Any,
+        text_parts: List[str],
+        structure: List[Dict[str, Any]],
+        depth: int,
+        path: str,
+    ) -> None:
+        if isinstance(obj, dict):
+            structure.append({
+                "type": "object",
+                "path": path,
+                "depth": depth,
+                "keys": list(obj.keys())[:50],
+            })
+            for key, value in obj.items():
+                text_parts.append(f"{key}: {self._value_repr(value)}")
+                if isinstance(value, (dict, list)):
+                    self._walk(value, text_parts, structure, depth + 1, f"{path}.{key}")
+        elif isinstance(obj, list):
+            structure.append({
+                "type": "array",
+                "path": path,
+                "depth": depth,
+                "length": len(obj),
+            })
+            for i, item in enumerate(obj[:200]):  # cap iteration
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, (dict, list)):
+                    self._walk(item, text_parts, structure, depth + 1, f"{path}[{i}]")
+                else:
+                    text_parts.append(str(item))
+        elif isinstance(obj, str):
+            text_parts.append(obj)
+        else:
+            text_parts.append(str(obj))
+
+    @staticmethod
+    def _value_repr(value: Any) -> str:
+        if isinstance(value, str):
+            return value[:500] if len(value) > 500 else value
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            return f"[...{len(value)} items]"
+        if isinstance(value, dict):
+            return f"{{...{len(value)} keys}}"
+        if value is None:
+            return "null"
+        return str(value)[:200]
+
+
+class CSVExtractor(BaseExtractor):
+    """CSV file extractor that preserves column structure.
+
+    Reads the CSV using the ``csv`` stdlib module and produces text
+    that represents each row as key-value pairs (using header column
+    names when available).  Structure entries record column names and
+    row count.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        import csv
+        import io
+
+        reader = csv.reader(io.StringIO(source))
+        rows = list(reader)
+
+        if not rows:
+            return ExtractedContent(
+                raw_text=source,
+                metadata={"source_type": "csv", "length": len(source), "rows": 0},
+                structure=[],
+                source_type=SourceType.CSV,
+            )
+
+        # Heuristic: first row is a header if it doesn't look numeric
+        header = rows[0]
+        has_header = not all(self._looks_numeric(cell) for cell in header if cell.strip())
+
+        if has_header:
+            data_rows = rows[1:]
+            columns = header
+        else:
+            data_rows = rows
+            columns = [f"col_{i}" for i in range(len(header))]
+
+        text_parts: List[str] = []
+        # Emit column names as a header line
+        text_parts.append("Columns: " + ", ".join(columns))
+
+        for row_idx, row in enumerate(data_rows[:5000]):  # cap to prevent OOM
+            pairs = []
+            for col_idx, cell in enumerate(row):
+                col_name = columns[col_idx] if col_idx < len(columns) else f"col_{col_idx}"
+                if cell.strip():
+                    pairs.append(f"{col_name}={cell.strip()}")
+            if pairs:
+                text_parts.append(f"Row {row_idx + 1}: " + "; ".join(pairs))
+
+        structure = [{
+            "type": "table",
+            "columns": columns,
+            "row_count": len(data_rows),
+            "has_header": has_header,
+        }]
+
+        return ExtractedContent(
+            raw_text="\n".join(text_parts),
+            metadata={
+                "source_type": "csv",
+                "length": len(source),
+                "columns": columns,
+                "rows": len(data_rows),
+                "has_header": has_header,
+            },
+            structure=structure,
+            source_type=SourceType.CSV,
+        )
+
+    @staticmethod
+    def _looks_numeric(value: str) -> bool:
+        try:
+            float(value.strip())
+            return True
+        except (ValueError, AttributeError):
+            return False
+
+
+class HTMLExtractor(BaseExtractor):
+    """Local HTML file extractor.
+
+    Unlike ``URLExtractor`` which fetches from a URL first, this extractor
+    operates directly on HTML content (typically read from a local file).
+    Uses BeautifulSoup when available, falls back to regex tag stripping.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        text = self._html_to_text(source)
+        title = self._extract_title(source)
+        headings = self._extract_headings(source)
+
+        return ExtractedContent(
+            raw_text=text,
+            metadata={
+                "source_type": "html",
+                "title": title,
+                "length": len(text),
+                "heading_count": len(headings),
+            },
+            structure=headings,
+            source_type=SourceType.HTML,
+        )
+
+    def _html_to_text(self, html: str) -> str:
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            for tag in soup(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            return soup.get_text(separator="\n", strip=True)
+        except ImportError:
+            text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+            text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+
+    def _extract_title(self, html: str) -> str:
+        match = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+    def _extract_headings(self, html: str) -> List[Dict[str, Any]]:
+        headings: List[Dict[str, Any]] = []
+        for match in re.finditer(r'<(h[1-6])[^>]*>(.*?)</\1>', html, re.DOTALL | re.IGNORECASE):
+            level = int(match.group(1)[1])
+            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+            if title:
+                headings.append({
+                    "type": "heading",
+                    "level": level,
+                    "title": title,
+                })
+        return headings
+
+
+# Media format registry
+MEDIA_EXTENSIONS: Dict[str, str] = {
+    # Video
+    ".mp4": "video", ".avi": "video", ".mkv": "video", ".mov": "video",
+    ".webm": "video", ".wmv": "video", ".flv": "video", ".m4v": "video",
+    ".mpg": "video", ".mpeg": "video", ".3gp": "video", ".ogv": "video",
+    # Audio
+    ".mp3": "audio", ".wav": "audio", ".flac": "audio", ".ogg": "audio",
+    ".m4a": "audio", ".aac": "audio", ".wma": "audio", ".opus": "audio",
+    ".aiff": "audio", ".alac": "audio",
+}
+
+
+class MediaReferenceExtractor(BaseExtractor):
+    """Creates reference nodes for audio/video media files.
+
+    Does NOT transcode or transcribe content.  Instead, creates a
+    metadata-rich reference node that can be linked to other knowledge
+    in the graph through synaptic associations.
+
+    Supports both local file paths and URLs.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        is_url = bool(re.match(r'^https?://', source, re.IGNORECASE))
+        is_file = os.path.isfile(source)
+
+        if is_file:
+            return self._extract_file(source)
+        elif is_url:
+            return self._extract_url(source)
+        else:
+            # Treat as a path reference even if file doesn't exist yet
+            return self._extract_reference(source)
+
+    def _extract_file(self, path: str) -> ExtractedContent:
+        p = Path(path)
+        ext = p.suffix.lower()
+        media_type = MEDIA_EXTENSIONS.get(ext, "unknown")
+
+        try:
+            stat = p.stat()
+            size_bytes = stat.st_size
+            size_human = self._human_size(size_bytes)
+        except OSError:
+            size_bytes = 0
+            size_human = "unknown"
+
+        # Build a textual description for the node
+        description = (
+            f"[Media Reference: {p.name}]\n"
+            f"Type: {media_type}/{ext.lstrip('.')}\n"
+            f"Filename: {p.name}\n"
+            f"Size: {size_human}\n"
+            f"Path: {path}\n"
+        )
+
+        return ExtractedContent(
+            raw_text=description,
+            metadata={
+                "source_type": "media",
+                "media_type": media_type,
+                "format": ext.lstrip("."),
+                "filename": p.name,
+                "file_path": str(p.resolve()),
+                "size_bytes": size_bytes,
+                "size_human": size_human,
+                "length": len(description),
+                "is_reference": True,
+            },
+            structure=[{
+                "type": "media_reference",
+                "media_type": media_type,
+                "format": ext.lstrip("."),
+                "filename": p.name,
+            }],
+            source_type=SourceType.MEDIA,
+        )
+
+    def _extract_url(self, url: str) -> ExtractedContent:
+        # Parse the URL to extract filename and extension
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        path_part = unquote(parsed.path)
+        filename = Path(path_part).name if path_part else url
+        ext = Path(path_part).suffix.lower() if path_part else ""
+        media_type = MEDIA_EXTENSIONS.get(ext, "media")
+
+        description = (
+            f"[Media Reference: {filename}]\n"
+            f"Type: {media_type}/{ext.lstrip('.') if ext else 'unknown'}\n"
+            f"Filename: {filename}\n"
+            f"URL: {url}\n"
+        )
+
+        return ExtractedContent(
+            raw_text=description,
+            metadata={
+                "source_type": "media",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+                "filename": filename,
+                "url": url,
+                "length": len(description),
+                "is_reference": True,
+            },
+            structure=[{
+                "type": "media_reference",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+                "url": url,
+            }],
+            source_type=SourceType.MEDIA,
+        )
+
+    def _extract_reference(self, source: str) -> ExtractedContent:
+        """Handle a path that doesn't exist on disk (future/external reference)."""
+        p = Path(source)
+        ext = p.suffix.lower()
+        media_type = MEDIA_EXTENSIONS.get(ext, "unknown")
+
+        description = (
+            f"[Media Reference: {p.name}]\n"
+            f"Type: {media_type}/{ext.lstrip('.') if ext else 'unknown'}\n"
+            f"Filename: {p.name}\n"
+            f"Reference: {source}\n"
+        )
+
+        return ExtractedContent(
+            raw_text=description,
+            metadata={
+                "source_type": "media",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+                "filename": p.name,
+                "reference": source,
+                "length": len(description),
+                "is_reference": True,
+            },
+            structure=[{
+                "type": "media_reference",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+            }],
+            source_type=SourceType.MEDIA,
+        )
+
+    @staticmethod
+    def _human_size(size_bytes: int) -> str:
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if abs(size_bytes) < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0  # type: ignore[assignment]
+        return f"{size_bytes:.1f} PB"
+
+
 class ExtractorRouter:
     """Routes source input to the appropriate extractor (PRD Addendum §2).
 
@@ -495,17 +1190,29 @@ class ExtractorRouter:
             SourceType.CODE: CodeExtractor(),
             SourceType.URL: URLExtractor(),
             SourceType.PDF: PDFExtractor(),
+            SourceType.ZIP: ZipExtractor(),
+            SourceType.JSON: JSONExtractor(),
+            SourceType.CSV: CSVExtractor(),
+            SourceType.HTML: HTMLExtractor(),
+            SourceType.MEDIA: MediaReferenceExtractor(),
         }
 
     def detect_source_type(self, source: str) -> SourceType:
         """Auto-detect source type from content analysis."""
-        # URL detection
+        # URL detection — check for media URLs first
         if re.match(r'^https?://', source, re.IGNORECASE):
+            from urllib.parse import urlparse, unquote
+            parsed = urlparse(source)
+            url_ext = Path(unquote(parsed.path)).suffix.lower()
+            if url_ext in MEDIA_EXTENSIONS:
+                return SourceType.MEDIA
             return SourceType.URL
 
         # File path detection
         if os.path.isfile(source):
             ext = os.path.splitext(source)[1].lower()
+            if ext == ".zip":
+                return SourceType.ZIP
             if ext == ".pdf":
                 return SourceType.PDF
             if ext in (".py", ".js", ".ts", ".java", ".go", ".rs", ".c",
@@ -513,6 +1220,14 @@ class ExtractorRouter:
                 return SourceType.CODE
             if ext in (".md", ".markdown"):
                 return SourceType.MARKDOWN
+            if ext == ".json":
+                return SourceType.JSON
+            if ext == ".csv":
+                return SourceType.CSV
+            if ext in (".html", ".htm"):
+                return SourceType.HTML
+            if ext in MEDIA_EXTENSIONS:
+                return SourceType.MEDIA
 
         # Content-based detection
         if source.strip().startswith(("# ", "## ", "### ")):
@@ -520,7 +1235,15 @@ class ExtractorRouter:
         if re.search(r'^(def |class |import |from |function )', source, re.MULTILINE):
             return SourceType.CODE
         if source.strip().startswith(("<html", "<!DOCTYPE", "<head")):
-            return SourceType.URL
+            return SourceType.HTML
+        # JSON detection: starts with { or [
+        stripped = source.strip()
+        if stripped and stripped[0] in ('{', '['):
+            try:
+                json.loads(stripped[:1000] if len(stripped) > 1000 else stripped)
+                return SourceType.JSON
+            except (json.JSONDecodeError, ValueError):
+                pass
 
         return SourceType.TEXT
 
@@ -536,9 +1259,11 @@ class ExtractorRouter:
 
         extractor = self._extractors.get(source_type, self._extractors[SourceType.TEXT])
 
-        # For file paths, read the file first (except PDF which handles its own reading)
+        # For file paths, read the file first.
+        # Exceptions: PDF (handles its own reading), URL (fetches from network),
+        # ZIP (handles its own archive reading), MEDIA (handles its own file/URL detection).
         if (os.path.isfile(source)
-                and source_type not in (SourceType.PDF, SourceType.URL)):
+                and source_type not in (SourceType.PDF, SourceType.URL, SourceType.ZIP, SourceType.MEDIA)):
             with open(source, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             result = extractor.extract(content, **kwargs)
@@ -659,8 +1384,8 @@ class AdaptiveChunker:
         """Code-aware chunking: split by function/class definitions."""
         text = content.raw_text
         structure = content.structure
-        if not structure:
-            # Fallback to semantic if no structure detected
+        if not structure or "line" not in structure[0]:
+            # Fallback to semantic if no structure or no line numbers
             return self._chunk_semantic(content)
 
         lines = text.split("\n")
@@ -705,7 +1430,7 @@ class AdaptiveChunker:
         """Hierarchical chunking: follow heading structure."""
         text = content.raw_text
         structure = content.structure
-        if not structure:
+        if not structure or "line" not in structure[0]:
             return self._chunk_semantic(content)
 
         lines = text.split("\n")
@@ -857,73 +1582,301 @@ class AdaptiveChunker:
 # ---------------------------------------------------------------------------
 
 class EmbeddingEngine:
-    """Converts chunks into vector representations using ng_embed (dual-pass capable).
+    """Converts chunks into vector representations.
 
-    Uses NGEmbed singleton — Snowflake/snowflake-arctic-embed-m-v1.5 (ONNX, 768-dim).
-    Falls back to deterministic hash-based embedding when ONNX unavailable.
+    Uses sentence-transformers/all-MiniLM-L6-v2 when available.
+    Falls back to a deterministic hash-based embedding for environments
+    without the model installed (testing, lightweight deployments).
 
-    This replaces the old sentence-transformers/all-mpnet-base-v2 approach.
-    Same interface (embed, embed_text) so the rest of the ingestor is unaffected.
+    Supports explicit device control via the ``device`` config key:
+    - ``"auto"`` (default): let sentence-transformers pick the best device
+    - ``"cpu"``: force CPU inference (safe for CUDA-less environments)
+    - ``"cuda"``: request GPU; falls back to CPU if CUDA is unavailable
 
-    # ---- Changelog ----
-# [2026-04-20] Codemine (BLK-NG-193) — Add SimpleVectorDB persistence
-#   What: Added save(path)/load(path) to SimpleVectorDB — .npz sidecar via numpy.
-#   Why:  vector_db was in-memory only; every restart wiped all semantic vectors,
-#         making recall() always return empty (vector_db_count=0 after cold start).
-#   How:  np.savez_compressed stores embeddings+content+metadata. load() restores.
-#         NeuroGraphMemory.save() hooks into both (openclaw_hook.py, BLK-NG-193).
-    # [2026-03-30] Josh + Claude — Replaced sentence-transformers with ng_embed
-    #   What: Swap EmbeddingEngine internals to use NGEmbed (Snowflake ONNX, dual-pass)
-    #   Why:  Dual-pass embedding gives multi-resolution semantic search + outcome tracking.
-    #         Single-pass was operating with one eye closed.
-    #   How:  NGEmbed singleton handles model loading, embedding, hash fallback.
-    #         This class is a thin adapter preserving the embed()/embed_text() interface.
-    # -------------------
+    Caching avoids recomputation of identical text.
+
+    Args:
+        config: Embedding configuration with keys:
+            - model_name: Model identifier (default "BAAI/bge-base-en-v1.5")
+            - dimension: Embedding dimension (default 768)
+            - cache_size: Max cache entries (default 10000)
+            - use_model: Force model loading (default True, falls back if unavailable)
+            - device: Device selection — "auto", "cpu", or "cuda" (default "auto")
     """
+
+    _logger = logging.getLogger("neurograph.embedding")
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         self.config = config or {}
-        # Import here to avoid circular imports at module level
-        from ng_embed import NGEmbed
+        self.model_name = self.config.get("model_name", "BAAI/bge-base-en-v1.5")
+        self.dimension = self.config.get("dimension", 768)
+        self.cache_size = self.config.get("cache_size", 10000)
+        self.use_model = self.config.get("use_model", True)
+        self.device = self.config.get("device", "auto")
+        self._model = None
+        self._ng_embed = None  # NGEmbed singleton instance
+        self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._model_available = False
+        self._active_device: Optional[str] = None  # actual device after resolution
+        self._fallback_reason: Optional[str] = None
 
-        # Pass any ng_embed-specific config overrides
-        ng_config = {}
-        if self.config.get("extraction_endpoint"):
-            ng_config["tid_endpoint"] = self.config["extraction_endpoint"]
-        if self.config.get("extraction_model"):
-            ng_config["tid_model"] = self.config["extraction_model"]
+        if self.use_model:
+            self._try_load_model()
 
-        self._engine = NGEmbed.get_instance(ng_config if ng_config else None)
-        self.model_name = self._engine._config["model_id"]
-        self.dimension = self._engine._config["embedding_dim"]
-        self._cache_count = 0
+    def _resolve_device(self) -> str:
+        """Resolve the requested device to an actual device string.
+
+        Handles graceful degradation: if 'cuda' is requested but unavailable,
+        falls back to 'cpu' with a warning rather than hard-failing.
+
+        When device is 'auto', performs explicit CUDA availability detection
+        rather than delegating to sentence-transformers' auto-detect, which
+        can hit meta-tensor errors on CUDA-built torch without a GPU.
+
+        Returns:
+            Device string for SentenceTransformer — always explicit, never None.
+        """
+        try:
+            import torch
+            cuda_available = torch.cuda.is_available()
+        except ImportError:
+            cuda_available = False
+
+        if self.device == "auto":
+            if cuda_available:
+                self._logger.info("Auto-detected CUDA device.")
+                return "cuda"
+            return "cpu"
+        if self.device == "cuda":
+            if cuda_available:
+                return "cuda"
+            self._logger.warning(
+                "CUDA requested but not available (torch.cuda.is_available()=False). "
+                "Falling back to CPU."
+            )
+            return "cpu"
+        return self.device  # "cpu" or any explicit device string
+
+    @staticmethod
+    def _suppress_provider_warnings() -> None:
+        """Suppress API key warnings from HuggingFace inference providers.
+
+        sentence-transformers v5+ and transformers v5+ added inference provider
+        backends (OpenAI, Google, Voyage, etc.) that emit noisy warnings when
+        their API keys aren't set — even when we only use local torch models.
+        NeuroGraph uses ONLY local torch-based embeddings; TID controls all
+        external API calls.  No provider API keys are needed or used.
+
+        This sets environment variables and warning filters BEFORE import to
+        prevent those warnings from reaching the user.
+
+        Grok review v0.7.1: Broadened filters to catch all warning categories
+        (not just UserWarning) and plural "KEYS" patterns that were escaping.
+        """
+        import os
+        import warnings
+
+        # Tell transformers to only log errors, not provider-related warnings
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+        # Disable HuggingFace Hub telemetry and inference provider checks
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_EXPERIMENTAL_WARNING", "1")
+        # Prevent tokenizers parallelism warning
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+        # Filter out API key warnings that slip through from provider packages
+        # (openai, google-generativeai, voyageai) if they happen to be installed.
+        # Use no category restriction to catch UserWarning, FutureWarning,
+        # DeprecationWarning, RuntimeWarning — providers use various types.
+        # Use re.IGNORECASE-equivalent patterns for case-insensitive matching.
+        for pattern in [
+            r"(?i).*api.?keys?.*",
+            r"(?i).*set up your.*api.*",
+            r"(?i).*openai.*",
+            r"(?i).*google.*api.*",
+            r"(?i).*voyage.*",
+            r"(?i).*inference.?provider.*",
+            r"(?i).*provider.*backend.*",
+            r"(?i).*api.?key.*not.?set.*",
+        ]:
+            warnings.filterwarnings("ignore", message=pattern)
+
+    def _try_load_model(self) -> None:
+        """Load the embedding backend (ng_embed ONNX singleton).
+
+        ng_embed.py is the ecosystem-wide embedding engine — ONNX Runtime,
+        Snowflake arctic-embed-m-v1.5, 768-dim, no external service required.
+        Logs the outcome so silent failures are visible to operators.
+        """
+        if self._try_load_ng_embed():
+            return
+        self._model_available = False
+        self._fallback_reason = "ng_embed not available or failed to load"
+        self._logger.warning(
+            "No embedding backend available. "
+            "Using deterministic hash-based fallback embeddings."
+        )
+
+    def _try_load_ng_embed(self) -> bool:
+        """Load via ng_embed (NGEmbed ONNX singleton, 768-dim). Returns True on success."""
+        try:
+            from ng_embed import NGEmbed
+            self._ng_embed = NGEmbed.get_instance()
+            # Dimension is always 768 — ng_embed produces 768-dim in both ONNX and hash-fallback paths
+            self.dimension = 768
+            self.model_name = "Snowflake/snowflake-arctic-embed-m-v1.5"
+            self._model_available = True
+            self._active_device = "cpu/onnx"
+            self._logger.info(
+                "Loaded embedding engine via ng_embed (ONNX Runtime, dim=768)"
+            )
+            return True
+        except ImportError:
+            return False
+        except Exception as exc:
+            self._logger.info("ng_embed failed: %s", exc)
+            return False
+
+    # _try_load_fastembed removed 2026-04-13 — replaced by _try_load_ng_embed.
+    # fastembed (BAAI/bge-base-en-v1.5, 384-dim) was not installed on all instances
+    # and was always an intermediate solution after sentence-transformers was removed
+    # 2026-03-19. ng_embed.py is the canonical ecosystem embedding engine.
+    # _try_load_sentence_transformers removed 2026-03-19.
+    # sentence-transformers (torch) broke and degraded ecosystem to hash
+    # fallbacks, then deposited 384-dim vectors into the 768-dim substrate.
+    # fastembed (ONNX Runtime) is now the sole embedding backend.
 
     def embed(self, chunks: List[Chunk]) -> List[EmbeddedChunk]:
-        """Embed a list of chunks via NGEmbed.
+        """Embed a list of chunks, using cache where possible.
 
         Returns list of EmbeddedChunk with normalized vectors.
+        Individual chunk failures fall back to hash embedding rather than
+        failing the entire batch (Grok review: batch resilience).
         """
-        texts = [c.text for c in chunks]
-        vectors = self._engine.embed_batch(texts, normalize=True)
-        self._cache_count += len(texts)
+        results: List[EmbeddedChunk] = []
+        uncached: List[Tuple[int, Chunk]] = []
 
-        return [
-            EmbeddedChunk(
-                chunk=chunk,
-                vector=vec,
-                model_name=self.model_name,
-            )
-            for chunk, vec in zip(chunks, vectors)
-        ]
+        # Check cache first
+        for i, chunk in enumerate(chunks):
+            cache_key = self._cache_key(chunk.text)
+            if cache_key in self._cache:
+                vec = self._cache[cache_key]
+                # Move to end for LRU
+                self._cache.move_to_end(cache_key)
+                results.append(EmbeddedChunk(
+                    chunk=chunk,
+                    vector=vec,
+                    model_name=self.model_name if self._model_available else "hash_fallback",
+                ))
+            else:
+                results.append(None)  # type: ignore[arg-type]
+                uncached.append((i, chunk))
+
+        if uncached:
+            texts = [c.text for _, c in uncached]
+            try:
+                vectors = self._encode_batch(texts)
+            except Exception as exc:
+                self._logger.warning(
+                    "Batch embed failed (%s), falling back to per-chunk hash", exc,
+                )
+                vectors = [self._hash_embed(t) for t in texts]
+            for (idx, chunk), vec in zip(uncached, vectors):
+                # Normalize
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec = vec / norm
+                cache_key = self._cache_key(chunk.text)
+                self._update_cache(cache_key, vec)
+                results[idx] = EmbeddedChunk(
+                    chunk=chunk,
+                    vector=vec,
+                    model_name=self.model_name if self._model_available else "hash_fallback",
+                )
+
+        return results
 
     def embed_text(self, text: str) -> np.ndarray:
-        """Embed a single text string. Returns L2-normalized vector."""
-        return self._engine.embed(text, normalize=True)
+        """Embed a single text string. Returns normalized vector."""
+        cache_key = self._cache_key(text)
+        if cache_key in self._cache:
+            self._cache.move_to_end(cache_key)
+            return self._cache[cache_key]
+
+        vectors = self._encode_batch([text])
+        vec = vectors[0]
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        self._update_cache(cache_key, vec)
+        return vec
+
+    def _encode_batch(self, texts: List[str]) -> List[np.ndarray]:
+        """Encode a batch of texts into vectors.
+
+        If the model is loaded but encoding fails at runtime (e.g. CUDA
+        out-of-memory, driver error), falls back to hash embeddings for this
+        batch rather than crashing the entire pipeline.
+        """
+        if self._model_available and self._ng_embed is not None:
+            try:
+                return self._ng_embed.embed_batch(texts)
+            except Exception as exc:
+                self._logger.warning(
+                    "ng_embed encode failed (%s). Falling back to hash embeddings "
+                    "for this batch of %d texts.",
+                    exc, len(texts),
+                )
+        return [self._hash_embed(t) for t in texts]
+
+    def _hash_embed(self, text: str) -> np.ndarray:
+        """Deterministic hash-based embedding fallback.
+
+        Produces consistent vectors from text content using SHA-256 seeding.
+        Useful for testing without model dependencies.
+        """
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        seed = int.from_bytes(h[:4], "big")
+        rng = np.random.RandomState(seed)
+        vec = rng.randn(self.dimension).astype(np.float32)
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        return vec
+
+    def _cache_key(self, text: str) -> str:
+        """Create cache key from text content."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _update_cache(self, key: str, vec: np.ndarray) -> None:
+        """Add to cache with LRU eviction."""
+        self._cache[key] = vec
+        if len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
 
     @property
     def cache_hits(self) -> int:
-        """Approximate cache/embedding count."""
-        return self._cache_count
+        """Number of entries currently in cache."""
+        return len(self._cache)
+
+    @property
+    def status(self) -> Dict[str, Any]:
+        """Return embedding engine status for diagnostics.
+
+        Useful for OpenClaw and CLI tools to verify the embedding backend
+        without running a full ingestion cycle.
+        """
+        return {
+            "model_available": self._model_available,
+            "model_name": self.model_name if self._model_available else "hash_fallback",
+            "device_requested": self.device,
+            "device_active": self._active_device,
+            "dimension": self.dimension,
+            "cache_entries": len(self._cache),
+            "fallback_reason": self._fallback_reason,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1063,7 +2016,7 @@ class NodeRegistrar:
     def update_probation(self, node_ids: Optional[List[str]] = None) -> List[str]:
         """Advance probation for nodes, graduating those that complete it.
 
-        Call this each simulation step (or periodically) to fade novelty dampening.
+        Call this each simulation step (or periodically) to fade dampening.
         Returns list of node IDs that graduated this call.
         """
         graduated: List[str] = []
@@ -1116,6 +2069,7 @@ class HypergraphAssociator:
             - parent_child_weight: Weight for parent-child links (default 0.5)
             - min_cluster_size: Min nodes for hyperedge cluster (default 3)
             - cluster_similarity_threshold: Min avg similarity for cluster (default 0.6)
+            - code_def_weight: Base synapse weight for code def→usage links (default 0.4)
     """
 
     def __init__(
@@ -1133,6 +2087,7 @@ class HypergraphAssociator:
         self.cluster_sim_threshold = self.config.get(
             "cluster_similarity_threshold", 0.6
         )
+        self.code_def_weight = self.config.get("code_def_weight", 0.4)
 
     def associate(
         self,
@@ -1294,7 +2249,7 @@ class HypergraphAssociator:
                         self._get_node_dampening(def_nid),
                         self._get_node_dampening(nid),
                     )
-                    weight = 0.4 * dampening
+                    weight = self.code_def_weight * dampening
 
                     syn = self.graph.create_synapse(def_nid, nid, weight=weight)
                     syn.metadata["creation_mode"] = "code_def_usage"
@@ -1380,8 +2335,9 @@ OPENCLAW_INGESTOR_CONFIG = {
         "max_chunk_tokens": 500,
     },
     "embedding": {
-        "model_name": "all-mpnet-base-v2",
+        "model_name": "BAAI/bge-base-en-v1.5",
         "use_model": True,
+        "device": "auto",
     },
     "registration": {
         "novelty_dampening": 0.3,
@@ -1407,7 +2363,7 @@ DSM_INGESTOR_CONFIG = {
         "max_chunk_tokens": 500,
     },
     "embedding": {
-        "model_name": "all-mpnet-base-v2",
+        "model_name": "BAAI/bge-base-en-v1.5",
         "use_model": True,
     },
     "registration": {
@@ -1434,7 +2390,7 @@ CONSCIOUSNESS_INGESTOR_CONFIG = {
         "max_chunk_tokens": 500,
     },
     "embedding": {
-        "model_name": "all-mpnet-base-v2",
+        "model_name": "BAAI/bge-base-en-v1.5",
         "use_model": True,
     },
     "registration": {
