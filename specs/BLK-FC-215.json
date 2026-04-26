@@ -1,17 +1,55 @@
 {
-  "spec_id": "BLK-FC-215",
-  "title": "openclaw_hook.py: 3 targeted bug fixes — ingest error path, checkpoint config re-apply, tonic gate",
-  "punchlist_item": 215,
-  "workspace": ".",
-  "shell_allowlist": ["python3", "git", "echo"],
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-FC-215",
+    "name": "openclaw_hook.py: 3 targeted bug fixes — ingest error path, checkpoint config re-apply, tonic gate",
+    "agent": "QB",
+    "scope": "Faux_Clawdbot openclaw_hook.py — three independent bugs. (A) ingestor.ingest() inside _concurrent_lock has no try/except — result is unbound if ingest throws, causing NameError at nodes_created. (B) graph.restore() loads checkpoint config without re-applying snn_config — stale checkpoint values overwrite code defaults on every restart. (C) Unexpected TonicEngine init Exception silently swallowed at logger.info — _tonic_thread left in half-configured state.",
+    "acceptance_criteria": [
+      "ingestor.ingest() wrapped in try/except inside _concurrent_lock; result=None on exception; logger.warning logs the exception",
+      "Early-return guard added before nodes_created: if result is None: return {status: error, reason: ingest_failed, message_count: self._message_count}",
+      "self.graph.config.update(snn_config) added immediately after the restore logger.info line, inside the try block",
+      "logger.warning used for unexpected tonic engine init error (was logger.info); self._tonic_thread = None added after the warning",
+      "python3 -c non-comment line count for 'Ingest error:' outputs 1",
+      "python3 -c count of 'if result is None:' outputs 1",
+      "python3 -c count of 'self.graph.config.update(snn_config)' outputs 1",
+      "python3 -c non-comment line count for logger.warning + 'Tonic engine init error' on same line outputs 1",
+      "python3 -m py_compile Faux_Clawdbot/openclaw_hook.py passes",
+      "Faux_Clawdbot committed and pushed"
+    ]
+  },
+  "snap_interface": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "openclaw_hook.py",
+        "type": "file",
+        "path": "Faux_Clawdbot/openclaw_hook.py",
+        "contract": "Bug A ingest try/except + None return guard; Bug B config.update after restore; Bug C logger.warning + _tonic_thread=None; changelog entry prepended"
+      }
+    ]
+  },
   "constraints": {
-    "read_only_paths": []
+    "never": [
+      "Do not modify any vendored file: ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, openclaw_adapter.py, ng_autonomic.py, ng_embed.py",
+      "Do not use sed or awk on source files — use edit_file only",
+      "Do not restart any service",
+      "Do not change CES, River, or BrainSwitcher logic — targeted edits to on_message() and __init__ restore/tonic blocks only"
+    ],
+    "anti_drift": [
+      "Bug A: try/except wraps only the ingestor.ingest() call inside the lock — the step_result = self.graph.step() line remains outside and after the try block",
+      "Bug B: self.graph.config.update(snn_config) goes inside the try block, immediately after the logger.info restore log, before the except clause",
+      "Bug C: change logger.info to logger.warning for the 'Tonic engine init error' line only; add self._tonic_thread = None on the very next line; do not clear any other state",
+      "Changelog entry prepended at top of existing changelog block; anchor is the 2026-04-20 BLK-NG-193 line"
+    ],
+    "tool_allowlist": ["write_file", "edit_file", "shell_execute", "read_file"],
+    "shell_allowlist": ["python3", "git", "rm", "echo"]
   },
   "steps": [
     {
       "id": "check_token",
       "type": "action",
-      "description": "Verify GITHUB_TOKEN is available for push",
+      "description": "Verify GITHUB_TOKEN is set",
       "tool": "shell_execute",
       "params": {
         "command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""
@@ -22,25 +60,38 @@
       "on_failure": "abort"
     },
     {
-      "id": "idempotency_check",
+      "id": "cleanup_workspace",
       "type": "action",
-      "description": "Skip all patches if Bug A return guard already present (all three fixes travel together)",
+      "description": "Remove stale Faux_Clawdbot clone from any previous run",
       "tool": "shell_execute",
       "params": {
-        "command": "python3 -c \"c=open('openclaw_hook.py').read(); print('ALREADY_PATCHED' if 'if result is None:' in c else 'NEEDS_PATCH')\""
+        "command": "rm -rf Faux_Clawdbot && echo CLEANED"
       },
       "validation": {
-        "checks": [{"operator": "contains", "value": "NEEDS_PATCH"}]
+        "checks": [{"operator": "contains", "value": "CLEANED"}]
       },
-      "on_failure": "skip_all"
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_faux_clawdbot",
+      "type": "action",
+      "description": "Clone Faux_Clawdbot repo (depth 1)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone --depth 1 https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/Faux_Clawdbot Faux_Clawdbot && echo FC_CLONED"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "FC_CLONED"}]
+      },
+      "on_failure": "abort"
     },
     {
       "id": "add_changelog",
       "type": "action",
-      "description": "Prepend changelog entry for the three fixes",
+      "description": "Prepend changelog entry for the three fixes at top of existing changelog block",
       "tool": "edit_file",
       "params": {
-        "path": "openclaw_hook.py",
+        "path": "Faux_Clawdbot/openclaw_hook.py",
         "old_text": "# [2026-04-20] Codemine (BLK-NG-193) — Wire SimpleVectorDB persistence into save/load",
         "new_text": "# [2026-04-26] Codemine (BLK-FC-215) — Three targeted bug fixes\n# What: (A) on_message() wraps ingestor.ingest() in try/except; result=None on failure; return dict gated.\n#        (B) graph.config.update(snn_config) re-applied after restore() so checkpoint cannot overwrite code defaults.\n#        (C) Unexpected TonicEngine init Exception escalated to logger.warning; _tonic_thread cleared to None.\n# Why:  (A) Unbound NameError on result.nodes_created if ingest throws inside the concurrent lock.\n#        (B) Pre-tuning config values bleed in from checkpoint on every container restart.\n#        (C) Unexpected engine failures were silently swallowed at info level, leaving half-configured tonic state.\n# How:  Targeted edits only. Intentional scope differences (no CES, no River, no BrainSwitcher) preserved.\n# [2026-04-20] Codemine (BLK-NG-193) — Wire SimpleVectorDB persistence into save/load"
       },
@@ -55,7 +106,7 @@
       "description": "Bug A: wrap ingestor.ingest() in try/except inside the concurrent lock so result is never unbound",
       "tool": "edit_file",
       "params": {
-        "path": "openclaw_hook.py",
+        "path": "Faux_Clawdbot/openclaw_hook.py",
         "old_text": "        with self.graph._concurrent_lock:\n            result = self.ingestor.ingest(text, source_type=source_type)\n\n            # Run SNN learning step\n            step_result = self.graph.step()",
         "new_text": "        with self.graph._concurrent_lock:\n            try:\n                result = self.ingestor.ingest(text, source_type=source_type)\n            except Exception as exc:\n                logger.warning(\"Ingest error: %s\", exc)\n                result = None\n\n            # Run SNN learning step\n            step_result = self.graph.step()"
       },
@@ -70,7 +121,7 @@
       "description": "Bug A: add early-return guard before nodes_created so None result never reaches len()",
       "tool": "edit_file",
       "params": {
-        "path": "openclaw_hook.py",
+        "path": "Faux_Clawdbot/openclaw_hook.py",
         "old_text": "        return {\n            \"status\": \"ingested\",\n            \"nodes_created\": len(result.nodes_created),",
         "new_text": "        if result is None:\n            return {\"status\": \"error\", \"reason\": \"ingest_failed\", \"message_count\": self._message_count}\n\n        return {\n            \"status\": \"ingested\",\n            \"nodes_created\": len(result.nodes_created),"
       },
@@ -85,7 +136,7 @@
       "description": "Bug B: re-apply snn_config immediately after restore() so code defaults overwrite any stale checkpoint values",
       "tool": "edit_file",
       "params": {
-        "path": "openclaw_hook.py",
+        "path": "Faux_Clawdbot/openclaw_hook.py",
         "old_text": "                logger.info(\n                    \"Restored graph from %s (%d nodes, %d synapses)\",\n                    self._checkpoint_path,\n                    len(self.graph.nodes),\n                    len(self.graph.synapses),\n                )\n            except Exception as exc:\n                logger.warning(\"Failed to restore checkpoint: %s\", exc)",
         "new_text": "                logger.info(\n                    \"Restored graph from %s (%d nodes, %d synapses)\",\n                    self._checkpoint_path,\n                    len(self.graph.nodes),\n                    len(self.graph.synapses),\n                )\n                self.graph.config.update(snn_config)\n            except Exception as exc:\n                logger.warning(\"Failed to restore checkpoint: %s\", exc)"
       },
@@ -97,10 +148,10 @@
     {
       "id": "patch_bug_c_tonic_gate",
       "type": "action",
-      "description": "Bug C: escalate unexpected TonicEngine init Exception to warning and clear _tonic_thread to prevent half-configured state",
+      "description": "Bug C: escalate unexpected TonicEngine init Exception to warning and clear _tonic_thread",
       "tool": "edit_file",
       "params": {
-        "path": "openclaw_hook.py",
+        "path": "Faux_Clawdbot/openclaw_hook.py",
         "old_text": "                except Exception as exc:\n                    logger.info(\"Tonic engine init error: %s — ouroboros-only mode\", exc)",
         "new_text": "                except Exception as exc:\n                    logger.warning(\"Tonic engine init error: %s — ouroboros-only mode\", exc)\n                    self._tonic_thread = None"
       },
@@ -112,10 +163,10 @@
     {
       "id": "verify_bug_a_ingest_guard",
       "type": "action",
-      "description": "Verify Bug A: Ingest error warning message present exactly once (once in code, not in changelog)",
+      "description": "Verify Bug A: Ingest error warning present exactly once in non-comment lines",
       "tool": "shell_execute",
       "params": {
-        "command": "python3 -c \"lines=[l for l in open('openclaw_hook.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'Ingest error:' in l))\""
+        "command": "python3 -c \"lines=[l for l in open('Faux_Clawdbot/openclaw_hook.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'Ingest error:' in l))\""
       },
       "validation": {
         "checks": [{"operator": "contains", "value": "1"}]
@@ -125,10 +176,10 @@
     {
       "id": "verify_bug_a_return_guard",
       "type": "action",
-      "description": "Verify Bug A: result is None guard present in on_message return path",
+      "description": "Verify Bug A: result is None guard present exactly once",
       "tool": "shell_execute",
       "params": {
-        "command": "python3 -c \"c=open('openclaw_hook.py').read(); print(c.count('if result is None:'))\""
+        "command": "python3 -c \"c=open('Faux_Clawdbot/openclaw_hook.py').read(); print(c.count('if result is None:'))\""
       },
       "validation": {
         "checks": [{"operator": "contains", "value": "1"}]
@@ -138,10 +189,10 @@
     {
       "id": "verify_bug_b_config_update",
       "type": "action",
-      "description": "Verify Bug B: config.update(snn_config) present after restore",
+      "description": "Verify Bug B: config.update(snn_config) present exactly once",
       "tool": "shell_execute",
       "params": {
-        "command": "python3 -c \"c=open('openclaw_hook.py').read(); print(c.count('self.graph.config.update(snn_config)'))\""
+        "command": "python3 -c \"c=open('Faux_Clawdbot/openclaw_hook.py').read(); print(c.count('self.graph.config.update(snn_config)'))\""
       },
       "validation": {
         "checks": [{"operator": "contains", "value": "1"}]
@@ -151,10 +202,10 @@
     {
       "id": "verify_bug_c_warning",
       "type": "action",
-      "description": "Verify Bug C: logger.warning used for unexpected tonic engine init error (was logger.info)",
+      "description": "Verify Bug C: logger.warning used for tonic engine init error in non-comment lines",
       "tool": "shell_execute",
       "params": {
-        "command": "python3 -c \"lines=[l for l in open('openclaw_hook.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'logger.warning' in l and 'Tonic engine init error' in l))\""
+        "command": "python3 -c \"lines=[l for l in open('Faux_Clawdbot/openclaw_hook.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'logger.warning' in l and 'Tonic engine init error' in l))\""
       },
       "validation": {
         "checks": [{"operator": "contains", "value": "1"}]
@@ -167,7 +218,7 @@
       "description": "Verify openclaw_hook.py compiles cleanly after all patches",
       "tool": "shell_execute",
       "params": {
-        "command": "python3 -m py_compile openclaw_hook.py && echo COMPILE_OK"
+        "command": "python3 -m py_compile Faux_Clawdbot/openclaw_hook.py && echo COMPILE_OK"
       },
       "validation": {
         "checks": [{"operator": "contains", "value": "COMPILE_OK"}]
@@ -177,10 +228,10 @@
     {
       "id": "commit_push",
       "type": "action",
-      "description": "Commit and push to Faux_Clawdbot; treat already-committed as success",
+      "description": "Commit and push patched openclaw_hook.py; treat already-committed as success",
       "tool": "shell_execute",
       "params": {
-        "command": "git add openclaw_hook.py && git diff --cached --quiet && echo ALREADY_COMMITTED || (git commit -m 'fix(openclaw_hook): ingest error path, checkpoint config re-apply, tonic gate (#215)' && git push && echo COMMITTED)"
+        "command": "git -C Faux_Clawdbot config user.email 'codemine@et-systems.ai' && git -C Faux_Clawdbot config user.name 'Codemine (QB)' && git -C Faux_Clawdbot add openclaw_hook.py && git -C Faux_Clawdbot diff --cached --quiet && echo ALREADY_COMMITTED || (git -C Faux_Clawdbot commit -m 'fix(openclaw_hook): ingest error path, checkpoint config re-apply, tonic gate (#215)' && git -C Faux_Clawdbot push && echo COMMITTED)"
       },
       "validation": {
         "checks": [{"operator": "contains", "value": "COMMIT"}]
