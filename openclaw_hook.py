@@ -1,4 +1,12 @@
 # ---- Changelog ----
+# [2026-04-26] Codemine (BLK-FC-215) — Three targeted bug fixes
+# What: (A) on_message() wraps ingestor.ingest() in try/except; result=None on failure; return dict gated.
+#        (B) graph.config.update(snn_config) re-applied after restore() so checkpoint cannot overwrite code defaults.
+#        (C) Unexpected TonicEngine init Exception escalated to logger.warning; _tonic_thread cleared to None.
+# Why:  (A) Unbound NameError on result.nodes_created if ingest throws inside the concurrent lock.
+#        (B) Pre-tuning config values bleed in from checkpoint on every container restart.
+#        (C) Unexpected engine failures were silently swallowed at info level, leaving half-configured tonic state.
+# How:  Targeted edits only. Intentional scope differences (no CES, no River, no BrainSwitcher) preserved.
 # [2026-04-20] Codemine (BLK-NG-193) — Wire SimpleVectorDB persistence into save/load
 #   What: _vector_db_path added; __init__ loads sidecar if exists; save() writes it.
 #   Why:  vector_db was recreated empty on every restart — recall() returned
@@ -136,6 +144,7 @@ class NeuroGraphMemory:
                     len(self.graph.nodes),
                     len(self.graph.synapses),
                 )
+                self.graph.config.update(snn_config)
             except Exception as exc:
                 logger.warning("Failed to restore checkpoint: %s", exc)
 
@@ -191,7 +200,8 @@ class NeuroGraphMemory:
                 except ImportError:
                     logger.info("Tonic engine not available — ouroboros-only mode")
                 except Exception as exc:
-                    logger.info("Tonic engine init error: %s — ouroboros-only mode", exc)
+                    logger.warning("Tonic engine init error: %s — ouroboros-only mode", exc)
+                    self._tonic_thread = None
             except Exception as exc:
                 logger.info("The Tonic not available: %s", exc)
 
@@ -232,7 +242,11 @@ class NeuroGraphMemory:
         # Acquire graph lock — waits for Tonic engine to finish its current
         # token before mutating graph state (RLock so re-entrant calls are safe).
         with self.graph._concurrent_lock:
-            result = self.ingestor.ingest(text, source_type=source_type)
+            try:
+                result = self.ingestor.ingest(text, source_type=source_type)
+            except Exception as exc:
+                logger.warning("Ingest error: %s", exc)
+                result = None
 
             # Run SNN learning step
             step_result = self.graph.step()
@@ -253,6 +267,9 @@ class NeuroGraphMemory:
         # Auto-save
         if self._message_count % self.auto_save_interval == 0:
             self.save()
+
+        if result is None:
+            return {"status": "error", "reason": "ingest_failed", "message_count": self._message_count}
 
         return {
             "status": "ingested",
