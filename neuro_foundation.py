@@ -19,6 +19,36 @@ Design principles (PRD §2.1):
     - Persistence-native: all state is serializable
 
 # ---- Changelog ----
+# [2026-04-27] Claude (Sonnet 4.6) — Replace exact-set hyperedge discovery with overlap-based candidate matching
+# What: discover_hyperedges() now uses Jaccard overlap (threshold: he_discovery_overlap_threshold=0.5,
+#       bootstrap value — candidate for competency graduation via Elmer's TuningSocket) to match
+#       the current fired set against existing candidates. Best match refines to the intersection
+#       (the reliable co-activation core); no match starts a new candidate from the full fired set.
+# Why:  Exact-set key tuple(sorted(fired_node_ids)) never accumulated counts in a live substrate —
+#       any variation in the fired set (even one node) created a different bucket, so counters
+#       reset constantly and no hyperedge ever crossed min_co_fires. Zero hyperedges formed since
+#       discover_hyperedges was wired in (2026-04-26, commit 62364c4).
+# How:  Added he_discovery_overlap_threshold to DEFAULT_CONFIG. In discover_hyperedges(), iterate
+#       candidates, compute Jaccard, find best match >= threshold, refine key to intersection,
+#       increment count. New candidates start from full fired set as before. Threshold/creation
+#       logic unchanged — only the candidate-matching strategy changed.
+# [2026-04-22] Claude (Sonnet 4.6) — Fix autosave race in _serialize_full()
+# What: Snapshot all mutable dicts at the top of _serialize_full() via list()
+#       before building the return dict.
+# Why:  Tonic runs prime_and_propagate(write_mode=True) concurrently without
+#       holding _concurrent_lock (by design — latent tokens must keep flowing).
+#       This adds/removes nodes and synapses while _serialize_full() iterates
+#       them, causing RuntimeError: dictionary changed size during iteration.
+#       Autosave had been silently failing on every cycle since at least Apr 20.
+# How:  One list(dict.items()) snapshot per mutable dict at method entry.
+#       The save captures a consistent moment; any Tonic writes after that point
+#       are picked up by the next autosave cycle 60s later. Zero impact on any
+#       learning pathway — only the serialization path changes.
+# [2026-04-19] CC (punchlist #167) — Add threading.RLock to Graph.step()
+#   What: self._step_lock (RLock) acquired for entire step() body
+#   Why:  TriSyn worker calls record_outcome() concurrently with
+#         graph.step() — concurrent mutation of nodes/synapses unsafe
+#   How:  import threading; _step_lock init in __init__; with block in step()
 # [2026-04-16] Claude (Sonnet 4.6) — #163: Tonic firings now trigger synapse sprouting
 # What: prime_and_propagate(write_mode=True) now records fired nodes in _recent_spikes
 #       and calls _sprout_synapses() after each cycle. Previously: 1,155 Tonic firings
@@ -46,27 +76,17 @@ Design principles (PRD §2.1):
 #   _deserialize() restores all four. Delay buffer validates delivery timestep > current
 #   and node existence. Homeostatic counter applied post plasticity-rules re-init.
 #   Migration v0.4.1→v0.4.2 is a no-op (old checkpoints get defaults on next save).
-# [2026-03-25] Claude Code (Opus 4.6) — Dynamic tuning API (SVG Phase 5)
-#   What: Added TUNABLE_PARAMS, update_tunable(), get_tunables() to Graph class.
-#     12 SNN parameters tunable at runtime with validated bounds: learning_rate,
-#     decay_rate, default_threshold, target_firing_rate, surprise_reward_scaling,
-#     he_member_weight_lr, he_threshold_lr, he_pattern_completion_strength,
-#     prediction_confirm_bonus, prediction_error_penalty, he_salience_decay_rate,
-#     he_consolidation_adapt_rate. Updates propagate to cached plasticity rule objects.
-#   Why:  SVG Phase 5 — the substrate's own parameters are the substrate's concern.
-#     Elmer's TuningSocket can now adjust the SNN engine itself, not just ng_lite.
-#   How:  TUNABLE_PARAMS dict with (min, max) bounds. update_tunable() validates,
-#     clamps, updates config dict AND propagates to STDPRule/HomeostaticRule/
-#     HyperedgePlasticityRule objects. Matches ng_lite.py pattern.
-# [2026-04-08] Claude Code (Opus 4.6) — Punchlist #55: CES attention tunables
-#   What: Added surfacing_decay_rate, surfacing_min_confidence to DEFAULT_CONFIG
-#     and TUNABLE_PARAMS. Added prediction_window to TUNABLE_PARAMS (was in
-#     DEFAULT_CONFIG but not tunable).
-#   Why:  CES attention params were static — Elmer couldn't tune them. Temporal
-#     stuttering requires substrate-driven attention dynamics. SurfacingMonitor
-#     reads these from graph.config, so they're live once set here.
-#   How:  Dict entries only. No structural changes. update_tunable() handles
-#     them generically via clamp-and-set.
+# [2026-04-27] Claude Code (Sonnet 4.6) — Remove TUNABLE_PARAMS from Graph class (#224)
+#   What: Deleted TUNABLE_PARAMS class dict, update_tunable(), and get_tunables()
+#     from the Graph class. Both changelog entries above (2026-03-25, 2026-04-08)
+#     describe the addition — removed here.
+#   Why:  Law 1 violation exposure. These were added with the explicit intent
+#     "Elmer's TuningSocket can now adjust the SNN engine itself." No module
+#     writes directly to another module's config. Zero live callers of
+#     Graph.update_tunable() confirmed before removal. ng_lite.py TUNABLE_PARAMS
+#     (legitimate — Elmer calls update_tunable() on its own NGLite instance) untouched.
+#   How:  Deleted SVG Phase 5 comment block, TUNABLE_PARAMS dict, update_tunable(),
+#     and get_tunables(). No callers affected.
 # [2026-03-24] Claude Code (Opus 4.6) — Homeostasis audit: 6 remaining fixes
 # What: (1) Threshold ceiling at 5.0 prevents unbounded growth. (2) prediction_window
 #   dataclass default aligned to 10 (was 5, conflicting with Phase 3 config).
@@ -137,6 +157,7 @@ import copy
 import json
 import logging
 import math
+import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -853,7 +874,7 @@ class HomeostaticRule(PlasticityRule):
             # Multiplicative synaptic scaling (PRD §3.2.1)
             # Scale incoming weights by (target/actual)^factor
             scale = ratio ** self.scaling_factor
-            incoming_syn_ids = list(graph._incoming.get(nid, set()))
+            incoming_syn_ids = graph._incoming.get(nid, set())
             for syn_id in incoming_syn_ids:
                 syn = graph.synapses.get(syn_id)
                 if syn is None:
@@ -981,6 +1002,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "he_discovery_window": 10,
     "he_discovery_min_co_fires": 5,
     "he_discovery_min_nodes": 3,
+    "he_discovery_overlap_threshold": 0.5,  # bootstrap — candidate for Elmer TuningSocket graduation
     "he_consolidation_overlap": 0.8,
     "he_member_evolution_window": 50,
     "he_member_evolution_min_co_fires": 10,
@@ -1162,6 +1184,7 @@ class Graph:
 
         # --- Clock ---
         self.timestep: int = 0
+        self._step_lock = threading.RLock()
 
         # --- Dirty flags for incremental checkpointing ---
         self._dirty_nodes: Set[str] = set()
@@ -1319,87 +1342,6 @@ class Graph:
     # -----------------------------------------------------------------------
     # Topology Management (PRD §2.2.4)
     # -----------------------------------------------------------------------
-
-    # --- SVG Phase 5: Dynamic Tuning API ---
-    # Parameters Elmer (or any organ) is permitted to adjust at runtime.
-    # Keys map to (min, max) bounds. Anything not in this dict is frozen.
-    # Matches the ng_lite.py TUNABLE_PARAMS pattern.
-    TUNABLE_PARAMS: Dict[str, Tuple[float, float]] = {
-        # STDP / learning
-        "learning_rate":                (0.001, 0.1),
-        "decay_rate":                   (0.90,  0.99),
-        "default_threshold":            (0.5,   2.0),
-        "target_firing_rate":           (0.01,  0.2),
-        "surprise_reward_scaling":      (0.1,   2.0),
-        # Hyperedge plasticity
-        "he_member_weight_lr":          (0.005, 0.2),
-        "he_threshold_lr":              (0.001, 0.05),
-        "he_pattern_completion_strength": (0.1, 1.0),
-        # Predictive coding
-        "prediction_confirm_bonus":     (0.001, 0.1),
-        "prediction_error_penalty":     (0.001, 0.1),
-        # Salience
-        "he_salience_decay_rate":       (0.0001, 0.01),
-        # Consolidation
-        "he_consolidation_adapt_rate":  (0.001, 0.05),
-        # Predictive coding window
-        "prediction_window":            (3,     20),
-        # CES attention dynamics (#55)
-        "surfacing_decay_rate":         (0.80,  0.99),
-        "surfacing_min_confidence":     (0.10,  0.50),
-    }
-
-    def update_tunable(self, key: str, value: float) -> Dict[str, Any]:
-        """Update a tunable config parameter at runtime.
-
-        Only parameters listed in TUNABLE_PARAMS are accepted.
-        Values are clamped to their declared bounds.
-
-        When learning/plasticity parameters change, the corresponding
-        plasticity rule objects are updated to stay in sync.
-
-        Returns dict with old_value, new_value, clamped (bool).
-        Raises KeyError if key is not tunable.
-        """
-        if key not in self.TUNABLE_PARAMS:
-            raise KeyError(
-                f"'{key}' is not a tunable parameter. "
-                f"Allowed: {sorted(self.TUNABLE_PARAMS.keys())}"
-            )
-        lo, hi = self.TUNABLE_PARAMS[key]
-        old_value = self.config[key]
-        clamped = value < lo or value > hi
-        new_value = max(lo, min(hi, float(value)))
-        self.config[key] = new_value
-
-        # Propagate to plasticity rule objects that cache these values
-        for rule in self._plasticity_rules:
-            if isinstance(rule, STDPRule) and key == "learning_rate":
-                rule.learning_rate = new_value
-            elif isinstance(rule, HomeostaticRule) and key == "target_firing_rate":
-                rule.target_firing_rate = new_value
-            elif isinstance(rule, HyperedgePlasticityRule):
-                if key == "he_member_weight_lr":
-                    rule.member_weight_lr = new_value
-                elif key == "he_threshold_lr":
-                    rule.threshold_lr = new_value
-
-        logger.info(
-            "Tunable update: %s = %.6f → %.6f%s",
-            key, old_value, new_value, " (clamped)" if clamped else "",
-        )
-        return {"old_value": old_value, "new_value": new_value, "clamped": clamped}
-
-    def get_tunables(self) -> Dict[str, Dict[str, float]]:
-        """Return current tunable values and their bounds."""
-        result = {}
-        for key, (lo, hi) in self.TUNABLE_PARAMS.items():
-            result[key] = {
-                "value": self.config[key],
-                "min": lo,
-                "max": hi,
-            }
-        return result
 
     def create_node(
         self,
@@ -1630,355 +1572,356 @@ class Graph:
         Returns:
             StepResult with fired nodes, hyperedges, pruning/sprouting counts.
         """
-        self.timestep += 1
-        result = StepResult(timestep=self.timestep)
+        with self._step_lock:
+            self.timestep += 1
+            result = StepResult(timestep=self.timestep)
 
-        # 1. Voltage decay: v = v * decay_rate + (1-decay) * resting  (PRD §2.2.4)
-        decay = self.config["decay_rate"]
-        for node in list(self.nodes.values()):
-            node.voltage = node.voltage * decay + (1.0 - decay) * node.resting_potential
+            # 1. Voltage decay: v = v * decay_rate + (1-decay) * resting  (PRD §2.2.4)
+            decay = self.config["decay_rate"]
+            for node in self.nodes.values():
+                node.voltage = node.voltage * decay + (1.0 - decay) * node.resting_potential
 
-        # 2. Deliver delayed spikes arriving this timestep
-        arrivals = self._delay_buffer.pop(self.timestep, [])
-        for target_id, current in arrivals:
-            target = self.nodes.get(target_id)
-            if target is None:
-                logger.debug(
-                    "Delayed spike target %s no longer exists (deleted mid-flight)",
-                    target_id,
-                )
-                continue
-            target.voltage += current * target.intrinsic_excitability
-
-        # 3. Detect firing nodes
-        #    Lenia FlowGraph: pre_fire handlers can adjust thresholds.
-        fired_ids: List[str] = []
-        for nid, node in self.nodes.items():
-            if node.refractory_remaining > 0:
-                continue
-            effective_threshold = node.threshold
-            if self._event_handlers.get("pre_fire"):
-                for cb in self._event_handlers["pre_fire"]:
-                    effective_threshold += cb(node_id=nid)
-            if node.voltage >= effective_threshold:
-                fired_ids.append(nid)
-
-        # 3b. Zero-firing circuit breaker tracking
-        if fired_ids:
-            self._steps_since_last_fire = 0
-        else:
-            self._steps_since_last_fire += 1
-
-        # 4. Reset fired nodes and set refractory
-        for nid in fired_ids:
-            node = self.nodes[nid]
-            node.voltage = node.resting_potential
-            node.refractory_remaining = node.refractory_period
-            node.last_spike_time = float(self.timestep)
-            node.spike_history.append(float(self.timestep))
-            # Track recent spikes for sprouting
-            self._recent_spikes.setdefault(nid, deque(maxlen=20)).append(self.timestep)
-
-        result.fired_node_ids = fired_ids
-
-        # 5. Propagate spikes through outgoing synapses (with delay)
-        for nid in fired_ids:
-            node = self.nodes[nid]
-            sign = -1.0 if node.is_inhibitory else 1.0
-            for syn_id in list(self._outgoing.get(nid, set())):
-                syn = self.synapses.get(syn_id)
-                if syn is None:
-                    logger.debug("Stale synapse ref %s in outgoing[%s]", syn_id, nid)
+            # 2. Deliver delayed spikes arriving this timestep
+            arrivals = self._delay_buffer.pop(self.timestep, [])
+            for target_id, current in arrivals:
+                target = self.nodes.get(target_id)
+                if target is None:
+                    logger.debug(
+                        "Delayed spike target %s no longer exists (deleted mid-flight)",
+                        target_id,
+                    )
                     continue
-                # Effective current is weight × sign
-                effective_type_sign = sign
-                if syn.synapse_type == SynapseType.INHIBITORY:
-                    effective_type_sign = -1.0
-                current = syn.weight * effective_type_sign
-                arrival = self.timestep + syn.delay
-                self._delay_buffer.setdefault(arrival, []).append(
-                    (syn.post_node_id, current)
-                )
-                syn.inactive_steps = 0  # Reset inactivity
+                target.voltage += current * target.intrinsic_excitability
 
-        # 6. Evaluate hyperedges (PRD §4.2) — with dynamic pattern completion
-        fired_set = set(fired_ids)
-        fired_he_this_step: List[str] = []
-        experience_threshold = self.config["he_experience_threshold"]
-        ema_alpha = self.config["prediction_ema_alpha"]
-        # Process by level so child hyperedges fire before parents
-        max_level = max((he.level for he in list(self.hyperedges.values())), default=0)
-        for level in range(max_level + 1):
-            for hid, he in self.hyperedges.items():
-                if he.level != level:
+            # 3. Detect firing nodes
+            #    Lenia FlowGraph: pre_fire handlers can adjust thresholds.
+            fired_ids: List[str] = []
+            for nid, node in self.nodes.items():
+                if node.refractory_remaining > 0:
                     continue
-                if he.is_archived:
-                    continue  # Archived hyperedges don't participate
-                activation = self._compute_hyperedge_activation(he, fired_set)
-                he.current_activation = activation
-                # Update activation EMA (Phase 2.5)
-                fired_flag = 1.0 if (activation >= he.activation_threshold and he.refractory_remaining == 0) else 0.0
-                he.recent_activation_ema = (
-                    (1.0 - ema_alpha) * he.recent_activation_ema
-                    + ema_alpha * fired_flag
-                )
-                if he.refractory_remaining > 0:
-                    continue  # Still in refractory — cannot fire
-                if activation >= he.activation_threshold:
-                    result.fired_hyperedge_ids.append(hid)
-                    fired_he_this_step.append(hid)
-                    he.activation_count += 1
-                    he.refractory_remaining = he.refractory_period
+                effective_threshold = node.threshold
+                if self._event_handlers.get("pre_fire"):
+                    for cb in self._event_handlers["pre_fire"]:
+                        effective_threshold += cb(node_id=nid)
+                if node.voltage >= effective_threshold:
+                    fired_ids.append(nid)
 
-                    # Output injection — GRADED mode scales by activation level
-                    effective_weight = he.output_weight
-                    if he.activation_mode == ActivationMode.GRADED:
-                        effective_weight *= activation
-                    for target_id in he.output_targets:
-                        target = self.nodes.get(target_id)
-                        if target is not None:
-                            target.voltage += effective_weight * target.intrinsic_excitability
+            # 3b. Zero-firing circuit breaker tracking
+            if fired_ids:
+                self._steps_since_last_fire = 0
+            else:
+                self._steps_since_last_fire += 1
 
-                    # Dynamic pattern completion (Phase 2.5):
-                    # Scale by experience: new HEs complete weakly, experienced ones fully.
-                    # completion_strength = base × min(1.0, activation_count / threshold)
-                    if he.pattern_completion_strength > 0:
-                        learning_factor = min(1.0, he.activation_count / max(experience_threshold, 1))
-                        effective_completion = he.pattern_completion_strength * learning_factor
-                        if effective_completion > 0:
-                            for nid in he.member_nodes:
-                                if nid not in fired_set:
-                                    node = self.nodes.get(nid)
-                                    if node is not None and node.refractory_remaining == 0:
-                                        node.voltage += (
-                                            effective_completion
-                                            * he.member_weights.get(nid, 1.0)
-                                            * node.intrinsic_excitability
-                                        )
-
-                    # Prediction creation (Phase 2.5): predict output targets will fire
-                    if he.output_targets:
-                        pred_id = f"pred_{self._prediction_counter}"
-                        self._prediction_counter += 1
-                        pred = PredictionState(
-                            hyperedge_id=hid,
-                            predicted_targets=set(he.output_targets),
-                            prediction_strength=activation,
-                            prediction_timestamp=self.timestep,
-                            prediction_window=self.config["prediction_window"],
-                        )
-                        self._active_predictions[pred_id] = pred
-                        self._prediction_window_fired[pred_id] = set()
-                        self._total_predictions += 1
-                        self._emit("prediction_created", prediction_id=pred_id,
-                                   hyperedge_id=hid, targets=list(he.output_targets))
-
-                    self._emit("hyperedge_fired", hid=hid, activation=activation)
-
-        # 6a. Phase 2.5b: Output target learning
-        # When an HE fires, we start watching. On subsequent steps, any
-        # non-member node that fires within the window gets counted. If it
-        # fires enough times (min_co_fires), it becomes an output_target.
-        ol_window = self.config["he_output_learning_window"]
-        ol_min = self.config["he_output_min_co_fires"]
-        ol_max = self.config["he_output_max_targets"]
-
-        # Record which HEs fired THIS step
-        for hid in fired_he_this_step:
-            self._he_last_fired_step[hid] = self.timestep
-            self._he_output_candidates[hid] = {}
-
-        # For all HEs with active learning windows, count fired non-members
-        expired_windows: List[str] = []
-        for hid, fire_step in self._he_last_fired_step.items():
-            if hid in fired_he_this_step:
-                continue  # Just started tracking — skip this step
-            if self.timestep - fire_step > ol_window:
-                expired_windows.append(hid)
-                continue
-            he = self.hyperedges.get(hid)
-            if he is None:
-                expired_windows.append(hid)
-                continue
-            candidates = self._he_output_candidates.get(hid, {})
+            # 4. Reset fired nodes and set refractory
             for nid in fired_ids:
-                if nid in he.member_nodes:
-                    continue  # Members excluded
-                if nid in he.output_targets:
-                    continue  # Already learned
-                candidates[nid] = candidates.get(nid, 0) + 1
-                if candidates[nid] >= ol_min and len(he.output_targets) < ol_max:
-                    he.output_targets.append(nid)
-                    self._emit("he_output_learned", hid=hid, target=nid)
-                    logger.info(
-                        "Phase 2.5b: HE %s learned output target %s "
-                        "(co-fires=%d within window=%d)",
-                        hid, nid, candidates[nid], ol_window,
+                node = self.nodes[nid]
+                node.voltage = node.resting_potential
+                node.refractory_remaining = node.refractory_period
+                node.last_spike_time = float(self.timestep)
+                node.spike_history.append(float(self.timestep))
+                # Track recent spikes for sprouting
+                self._recent_spikes.setdefault(nid, deque(maxlen=20)).append(self.timestep)
+
+            result.fired_node_ids = fired_ids
+
+            # 5. Propagate spikes through outgoing synapses (with delay)
+            for nid in fired_ids:
+                node = self.nodes[nid]
+                sign = -1.0 if node.is_inhibitory else 1.0
+                for syn_id in self._outgoing.get(nid, set()):
+                    syn = self.synapses.get(syn_id)
+                    if syn is None:
+                        logger.debug("Stale synapse ref %s in outgoing[%s]", syn_id, nid)
+                        continue
+                    # Effective current is weight × sign
+                    effective_type_sign = sign
+                    if syn.synapse_type == SynapseType.INHIBITORY:
+                        effective_type_sign = -1.0
+                    current = syn.weight * effective_type_sign
+                    arrival = self.timestep + syn.delay
+                    self._delay_buffer.setdefault(arrival, []).append(
+                        (syn.post_node_id, current)
                     )
-            self._he_output_candidates[hid] = candidates
+                    syn.inactive_steps = 0  # Reset inactivity
 
-        # Clean up expired windows
-        for hid in expired_windows:
-            self._he_last_fired_step.pop(hid, None)
-            self._he_output_candidates.pop(hid, None)
-
-        # Decrement hyperedge refractory counters (skip those that just fired)
-        fired_he_set = set(fired_he_this_step)
-        for hid, he in self.hyperedges.items():
-            if he.refractory_remaining > 0 and hid not in fired_he_set:
-                he.refractory_remaining -= 1
-
-        # 6b. Evaluate Phase 2.5 hyperedge-level predictions
-        he_confirmed_this_step = 0
-        he_surprised_this_step = 0
-        he_preds_to_remove: List[str] = []
-        for pid, pred_state in self._active_predictions.items():
-            # Track nodes that fired during this prediction's window
-            window_fired = self._prediction_window_fired.get(pid, set())
-            window_fired.update(fired_set)
-            self._prediction_window_fired[pid] = window_fired
-
-            # Check for newly confirmed targets
-            for target in pred_state.predicted_targets - pred_state.confirmed_targets:
-                if target in fired_set:
-                    pred_state.confirmed_targets.add(target)
-
-            # Check if all targets confirmed
-            if pred_state.confirmed_targets >= pred_state.predicted_targets:
-                he_confirmed_this_step += 1
-                self._total_confirmed += 1
-                he_preds_to_remove.append(pid)
-                target_list = list(pred_state.predicted_targets)
-                self._emit(
-                    "prediction_confirmed",
-                    prediction_id=pid,
-                    hyperedge_id=pred_state.hyperedge_id,
-                    targets=target_list,
-                    target_node=target_list[0] if target_list else None,
-                    timestep=self.timestep,
-                )
-            # Check if window expired
-            elif self.timestep - pred_state.prediction_timestamp >= pred_state.prediction_window:
-                he_surprised_this_step += 1
-                self._total_surprised += 1
-                he_preds_to_remove.append(pid)
-                for expected in pred_state.predicted_targets - pred_state.confirmed_targets:
-                    surprise = SurpriseEvent(
-                        hyperedge_id=pred_state.hyperedge_id,
-                        expected_node=expected,
-                        prediction_strength=pred_state.prediction_strength,
-                        actual_nodes=window_fired,
-                        timestamp=self.timestep,
+            # 6. Evaluate hyperedges (PRD §4.2) — with dynamic pattern completion
+            fired_set = set(fired_ids)
+            fired_he_this_step: List[str] = []
+            experience_threshold = self.config["he_experience_threshold"]
+            ema_alpha = self.config["prediction_ema_alpha"]
+            # Process by level so child hyperedges fire before parents
+            max_level = max((he.level for he in self.hyperedges.values()), default=0)
+            for level in range(max_level + 1):
+                for hid, he in self.hyperedges.items():
+                    if he.level != level:
+                        continue
+                    if he.is_archived:
+                        continue  # Archived hyperedges don't participate
+                    activation = self._compute_hyperedge_activation(he, fired_set)
+                    he.current_activation = activation
+                    # Update activation EMA (Phase 2.5)
+                    fired_flag = 1.0 if (activation >= he.activation_threshold and he.refractory_remaining == 0) else 0.0
+                    he.recent_activation_ema = (
+                        (1.0 - ema_alpha) * he.recent_activation_ema
+                        + ema_alpha * fired_flag
                     )
+                    if he.refractory_remaining > 0:
+                        continue  # Still in refractory — cannot fire
+                    if activation >= he.activation_threshold:
+                        result.fired_hyperedge_ids.append(hid)
+                        fired_he_this_step.append(hid)
+                        he.activation_count += 1
+                        he.refractory_remaining = he.refractory_period
+
+                        # Output injection — GRADED mode scales by activation level
+                        effective_weight = he.output_weight
+                        if he.activation_mode == ActivationMode.GRADED:
+                            effective_weight *= activation
+                        for target_id in he.output_targets:
+                            target = self.nodes.get(target_id)
+                            if target is not None:
+                                target.voltage += effective_weight * target.intrinsic_excitability
+
+                        # Dynamic pattern completion (Phase 2.5):
+                        # Scale by experience: new HEs complete weakly, experienced ones fully.
+                        # completion_strength = base × min(1.0, activation_count / threshold)
+                        if he.pattern_completion_strength > 0:
+                            learning_factor = min(1.0, he.activation_count / max(experience_threshold, 1))
+                            effective_completion = he.pattern_completion_strength * learning_factor
+                            if effective_completion > 0:
+                                for nid in he.member_nodes:
+                                    if nid not in fired_set:
+                                        node = self.nodes.get(nid)
+                                        if node is not None and node.refractory_remaining == 0:
+                                            node.voltage += (
+                                                effective_completion
+                                                * he.member_weights.get(nid, 1.0)
+                                                * node.intrinsic_excitability
+                                            )
+
+                        # Prediction creation (Phase 2.5): predict output targets will fire
+                        if he.output_targets:
+                            pred_id = f"pred_{self._prediction_counter}"
+                            self._prediction_counter += 1
+                            pred = PredictionState(
+                                hyperedge_id=hid,
+                                predicted_targets=set(he.output_targets),
+                                prediction_strength=activation,
+                                prediction_timestamp=self.timestep,
+                                prediction_window=self.config["prediction_window"],
+                            )
+                            self._active_predictions[pred_id] = pred
+                            self._prediction_window_fired[pred_id] = set()
+                            self._total_predictions += 1
+                            self._emit("prediction_created", prediction_id=pred_id,
+                                       hyperedge_id=hid, targets=list(he.output_targets))
+
+                        self._emit("hyperedge_fired", hid=hid, activation=activation)
+
+            # 6a. Phase 2.5b: Output target learning
+            # When an HE fires, we start watching. On subsequent steps, any
+            # non-member node that fires within the window gets counted. If it
+            # fires enough times (min_co_fires), it becomes an output_target.
+            ol_window = self.config["he_output_learning_window"]
+            ol_min = self.config["he_output_min_co_fires"]
+            ol_max = self.config["he_output_max_targets"]
+
+            # Record which HEs fired THIS step
+            for hid in fired_he_this_step:
+                self._he_last_fired_step[hid] = self.timestep
+                self._he_output_candidates[hid] = {}
+
+            # For all HEs with active learning windows, count fired non-members
+            expired_windows: List[str] = []
+            for hid, fire_step in self._he_last_fired_step.items():
+                if hid in fired_he_this_step:
+                    continue  # Just started tracking — skip this step
+                if self.timestep - fire_step > ol_window:
+                    expired_windows.append(hid)
+                    continue
+                he = self.hyperedges.get(hid)
+                if he is None:
+                    expired_windows.append(hid)
+                    continue
+                candidates = self._he_output_candidates.get(hid, {})
+                for nid in fired_ids:
+                    if nid in he.member_nodes:
+                        continue  # Members excluded
+                    if nid in he.output_targets:
+                        continue  # Already learned
+                    candidates[nid] = candidates.get(nid, 0) + 1
+                    if candidates[nid] >= ol_min and len(he.output_targets) < ol_max:
+                        he.output_targets.append(nid)
+                        self._emit("he_output_learned", hid=hid, target=nid)
+                        logger.info(
+                            "Phase 2.5b: HE %s learned output target %s "
+                            "(co-fires=%d within window=%d)",
+                            hid, nid, candidates[nid], ol_window,
+                        )
+                self._he_output_candidates[hid] = candidates
+
+            # Clean up expired windows
+            for hid in expired_windows:
+                self._he_last_fired_step.pop(hid, None)
+                self._he_output_candidates.pop(hid, None)
+
+            # Decrement hyperedge refractory counters (skip those that just fired)
+            fired_he_set = set(fired_he_this_step)
+            for hid, he in self.hyperedges.items():
+                if he.refractory_remaining > 0 and hid not in fired_he_set:
+                    he.refractory_remaining -= 1
+
+            # 6b. Evaluate Phase 2.5 hyperedge-level predictions
+            he_confirmed_this_step = 0
+            he_surprised_this_step = 0
+            he_preds_to_remove: List[str] = []
+            for pid, pred_state in self._active_predictions.items():
+                # Track nodes that fired during this prediction's window
+                window_fired = self._prediction_window_fired.get(pid, set())
+                window_fired.update(fired_set)
+                self._prediction_window_fired[pid] = window_fired
+
+                # Check for newly confirmed targets
+                for target in pred_state.predicted_targets - pred_state.confirmed_targets:
+                    if target in fired_set:
+                        pred_state.confirmed_targets.add(target)
+
+                # Check if all targets confirmed
+                if pred_state.confirmed_targets >= pred_state.predicted_targets:
+                    he_confirmed_this_step += 1
+                    self._total_confirmed += 1
+                    he_preds_to_remove.append(pid)
+                    target_list = list(pred_state.predicted_targets)
                     self._emit(
-                        "surprise",
-                        surprise=surprise,
+                        "prediction_confirmed",
+                        prediction_id=pid,
+                        hyperedge_id=pred_state.hyperedge_id,
+                        targets=target_list,
+                        target_node=target_list[0] if target_list else None,
                         timestep=self.timestep,
                     )
-        for pid in he_preds_to_remove:
-            self._active_predictions.pop(pid, None)
-            self._prediction_window_fired.pop(pid, None)
-        result.predictions_confirmed = he_confirmed_this_step
-        result.predictions_surprised = he_surprised_this_step
+                # Check if window expired
+                elif self.timestep - pred_state.prediction_timestamp >= pred_state.prediction_window:
+                    he_surprised_this_step += 1
+                    self._total_surprised += 1
+                    he_preds_to_remove.append(pid)
+                    for expected in pred_state.predicted_targets - pred_state.confirmed_targets:
+                        surprise = SurpriseEvent(
+                            hyperedge_id=pred_state.hyperedge_id,
+                            expected_node=expected,
+                            prediction_strength=pred_state.prediction_strength,
+                            actual_nodes=window_fired,
+                            timestamp=self.timestep,
+                        )
+                        self._emit(
+                            "surprise",
+                            surprise=surprise,
+                            timestep=self.timestep,
+                        )
+            for pid in he_preds_to_remove:
+                self._active_predictions.pop(pid, None)
+                self._prediction_window_fired.pop(pid, None)
+            result.predictions_confirmed = he_confirmed_this_step
+            result.predictions_surprised = he_surprised_this_step
 
-        # 6c. Evaluate Phase 3 synapse-level predictions (PRD §5.1)
-        self._predicted_this_step.clear()
-        self._evaluate_predictions(fired_set)
+            # 6c. Evaluate Phase 3 synapse-level predictions (PRD §5.1)
+            self._predicted_this_step.clear()
+            self._evaluate_predictions(fired_set)
 
-        # 6d. Generate new predictions from fired nodes (PRD §5.1)
-        self._generate_predictions(fired_ids)
+            # 6d. Generate new predictions from fired nodes (PRD §5.1)
+            self._generate_predictions(fired_ids)
 
-        # 6e. Decay eligibility traces (PRD §5.2)
-        # Only process synapses with non-zero traces for performance
-        if self.config.get("three_factor_enabled", False):
-            trace_tau = self.config["eligibility_trace_tau"]
-            trace_decay = math.exp(-1.0 / trace_tau) if trace_tau > 0 else 0.0
-            for syn in list(self.synapses.values()):
-                if abs(syn.eligibility_trace) > 1e-12:
-                    syn.eligibility_trace *= trace_decay
+            # 6e. Decay eligibility traces (PRD §5.2)
+            # Only process synapses with non-zero traces for performance
+            if self.config.get("three_factor_enabled", False):
+                trace_tau = self.config["eligibility_trace_tau"]
+                trace_decay = math.exp(-1.0 / trace_tau) if trace_tau > 0 else 0.0
+                for syn in self.synapses.values():
+                    if abs(syn.eligibility_trace) > 1e-12:
+                        syn.eligibility_trace *= trace_decay
 
-        # 6f. Clean up expired Phase 3 predictions
-        self._cleanup_predictions()
+            # 6f. Clean up expired Phase 3 predictions
+            self._cleanup_predictions()
 
-        # 7. Apply plasticity rules
-        if fired_ids:
-            for rule in self._plasticity_rules:
-                rule.apply(self, fired_ids, self.timestep)
+            # 7. Apply plasticity rules
+            if fired_ids:
+                for rule in self._plasticity_rules:
+                    rule.apply(self, fired_ids, self.timestep)
 
-        # 8. Structural plasticity
-        pruned, sprouted = self._structural_plasticity(fired_ids)
-        result.synapses_pruned = pruned
-        result.synapses_sprouted = sprouted
-        self._total_pruned += pruned
-        self._total_sprouted += sprouted
+            # 8. Structural plasticity
+            pruned, sprouted = self._structural_plasticity(fired_ids)
+            result.synapses_pruned = pruned
+            result.synapses_sprouted = sprouted
+            self._total_pruned += pruned
+            self._total_sprouted += sprouted
 
-        # 8b. Consolidation lifecycle evaluation (Phase 4 — runs on interval).
-        self._he_consolidation_eval_steps += 1
-        if self._he_consolidation_eval_steps >= self.config["he_consolidation_eval_interval"]:
-            self._he_consolidation_eval_steps = 0
-            self._evaluate_consolidation_states()
+            # 8b. Consolidation lifecycle evaluation (Phase 4 — runs on interval).
+            self._he_consolidation_eval_steps += 1
+            if self._he_consolidation_eval_steps >= self.config["he_consolidation_eval_interval"]:
+                self._he_consolidation_eval_steps = 0
+                self._evaluate_consolidation_states()
 
-        # 9. Decrement refractory counters
-        #    Skip nodes that just fired this step — their full refractory
-        #    period starts on the NEXT step (PRD §3.2.1: mandatory N-step rest).
-        fired_this_step = set(fired_ids)
-        for nid, node in self.nodes.items():
-            if node.refractory_remaining > 0 and nid not in fired_this_step:
-                node.refractory_remaining -= 1
+            # 9. Decrement refractory counters
+            #    Skip nodes that just fired this step — their full refractory
+            #    period starts on the NEXT step (PRD §3.2.1: mandatory N-step rest).
+            fired_this_step = set(fired_ids)
+            for nid, node in self.nodes.items():
+                if node.refractory_remaining > 0 and nid not in fired_this_step:
+                    node.refractory_remaining -= 1
 
-        # 10. Track synapse inactivity + decay salience armor (Phase 4).
-        salience_decay = self.config["he_salience_decay_rate"]
-        for syn in list(self.synapses.values()):
-            syn.inactive_steps += 1
-            # Salience decays proportionally toward 1.0 — high salience fades
-            # faster than low.  Never drops below 1.0.
-            if syn.salience > 1.0:
-                syn.salience = 1.0 + (syn.salience - 1.0) * (1.0 - salience_decay)
+            # 10. Track synapse inactivity + decay salience armor (Phase 4).
+            salience_decay = self.config["he_salience_decay_rate"]
+            for syn in self.synapses.values():
+                syn.inactive_steps += 1
+                # Salience decays proportionally toward 1.0 — high salience fades
+                # faster than low.  Never drops below 1.0.
+                if syn.salience > 1.0:
+                    syn.salience = 1.0 + (syn.salience - 1.0) * (1.0 - salience_decay)
 
-        # Emit spike events (enriched with trace state for Lenia bridge)
-        if fired_ids:
-            # Collect eligibility trace magnitudes per fired node (Law 7:
-            # trace STATE is structural, not semantic content analysis).
-            trace_info = {}
-            if self._event_handlers.get("spikes"):
-                for nid in fired_ids:
-                    traces = []
-                    for syn_id in list(self._outgoing.get(nid, set())):
-                        syn = self.synapses.get(syn_id)
-                        if syn is not None and abs(syn.eligibility_trace) > 1e-12:
-                            traces.append(syn.eligibility_trace)
-                    trace_info[nid] = traces
-            self._emit("spikes", node_ids=fired_ids, timestep=self.timestep,
-                        trace_info=trace_info)
+            # Emit spike events (enriched with trace state for Lenia bridge)
+            if fired_ids:
+                # Collect eligibility trace magnitudes per fired node (Law 7:
+                # trace STATE is structural, not semantic content analysis).
+                trace_info = {}
+                if self._event_handlers.get("spikes"):
+                    for nid in fired_ids:
+                        traces = []
+                        for syn_id in self._outgoing.get(nid, set()):
+                            syn = self.synapses.get(syn_id)
+                            if syn is not None and abs(syn.eligibility_trace) > 1e-12:
+                                traces.append(syn.eligibility_trace)
+                        trace_info[nid] = traces
+                self._emit("spikes", node_ids=fired_ids, timestep=self.timestep,
+                            trace_info=trace_info)
 
-        # 11. Zero-firing circuit breaker
-        breaker_steps = self.config.get("zero_fire_breaker_steps", 200)
-        alert_steps = self.config.get("zero_fire_alert_steps", 50)
-        if self._steps_since_last_fire >= breaker_steps:
-            self._emergency_excitability_boost()
-            self._emit(
-                "zero_fire_breaker_tripped",
-                steps_silent=self._steps_since_last_fire,
-                timestep=self.timestep,
-            )
-            logger.warning(
-                "Zero-fire breaker tripped at step %d (%d steps silent). "
-                "Emergency excitability boost applied.",
-                self.timestep, self._steps_since_last_fire,
-            )
-            self._steps_since_last_fire = 0
-        elif self._steps_since_last_fire == alert_steps:
-            self._emit(
-                "zero_fire_warning",
-                steps_silent=self._steps_since_last_fire,
-                timestep=self.timestep,
-            )
-            logger.warning(
-                "Zero-fire warning at step %d (%d steps without any neuron firing).",
-                self.timestep, self._steps_since_last_fire,
-            )
+            # 11. Zero-firing circuit breaker
+            breaker_steps = self.config.get("zero_fire_breaker_steps", 200)
+            alert_steps = self.config.get("zero_fire_alert_steps", 50)
+            if self._steps_since_last_fire >= breaker_steps:
+                self._emergency_excitability_boost()
+                self._emit(
+                    "zero_fire_breaker_tripped",
+                    steps_silent=self._steps_since_last_fire,
+                    timestep=self.timestep,
+                )
+                logger.warning(
+                    "Zero-fire breaker tripped at step %d (%d steps silent). "
+                    "Emergency excitability boost applied.",
+                    self.timestep, self._steps_since_last_fire,
+                )
+                self._steps_since_last_fire = 0
+            elif self._steps_since_last_fire == alert_steps:
+                self._emit(
+                    "zero_fire_warning",
+                    steps_silent=self._steps_since_last_fire,
+                    timestep=self.timestep,
+                )
+                logger.warning(
+                    "Zero-fire warning at step %d (%d steps without any neuron firing).",
+                    self.timestep, self._steps_since_last_fire,
+                )
 
-        return result
+            return result
 
     def step_n(self, n: int) -> List[StepResult]:
         """Run n steps; returns all StepResults (PRD §8 step_n)."""
@@ -2047,7 +1990,7 @@ class Graph:
         for dist in range(1, steps + 1):
             next_frontier: Set[str] = set()
             for nid in frontier:
-                for syn_id in list(self._outgoing.get(nid, set())):
+                for syn_id in self._outgoing.get(nid, set()):
                     syn = self.synapses.get(syn_id)
                     if syn and syn.post_node_id not in distances:
                         distances[syn.post_node_id] = dist
@@ -2056,9 +1999,9 @@ class Graph:
 
         # Collect current prediction targets for was_predicted tagging
         predicted_targets: Set[str] = set()
-        for pred in list(self.active_predictions.values()):
+        for pred in self.active_predictions.values():
             predicted_targets.add(pred.target_node_id)
-        for pred_state in list(self._active_predictions.values()):
+        for pred_state in self._active_predictions.values():
             predicted_targets.update(pred_state.predicted_targets)
 
         # --- PRIME: inject current into specified nodes ---
@@ -2083,7 +2026,7 @@ class Graph:
             prop_timestep += 1
 
             # 1. Voltage decay
-            for node in list(self.nodes.values()):
+            for node in self.nodes.values():
                 node.voltage = node.voltage * decay + (1.0 - decay) * node.resting_potential
 
             # 2. Deliver delayed spikes from propagation buffer
@@ -2126,7 +2069,7 @@ class Graph:
             for nid in fired_ids:
                 node = self.nodes[nid]
                 sign = -1.0 if node.is_inhibitory else 1.0
-                for syn_id in list(self._outgoing.get(nid, set())):
+                for syn_id in self._outgoing.get(nid, set()):
                     syn = self.synapses.get(syn_id)
                     if syn is None:
                         continue
@@ -2140,7 +2083,7 @@ class Graph:
                     )
 
             # 6. Evaluate hyperedges (pattern completion, output injection)
-            max_level = max((he.level for he in list(self.hyperedges.values())), default=0)
+            max_level = max((he.level for he in self.hyperedges.values()), default=0)
             for level in range(max_level + 1):
                 for hid, he in self.hyperedges.items():
                     if he.level != level or he.is_archived:
@@ -2362,7 +2305,7 @@ class Graph:
             return
         visited.add(source_id)
 
-        for syn_id in list(self._outgoing.get(source_id, set())):
+        for syn_id in self._outgoing.get(source_id, set()):
             if len(self.active_predictions) >= max_active:
                 return
 
@@ -2641,7 +2584,7 @@ class Graph:
         salience_max = self.config["he_salience_max"]
         surprise_magnitude = pred.strength * pred.confidence
         context_boost = 1.0 + (surprise_magnitude * 2.0)  # softer than new synapse boost
-        for syn_id in list(self._outgoing.get(source_id, set())):
+        for syn_id in self._outgoing.get(source_id, set()):
             syn = self.synapses.get(syn_id)
             if syn and syn.inactive_steps < self.config["co_activation_window"] * 2:
                 # Recently active from source — this was part of the context.
@@ -2676,7 +2619,7 @@ class Graph:
         the prediction threshold.
         """
         threshold = self.config["prediction_threshold"]
-        for syn_id in list(self._outgoing.get(source_id, set())):
+        for syn_id in self._outgoing.get(source_id, set()):
             syn = self.synapses.get(syn_id)
             if syn and syn.post_node_id in targets and syn.weight >= threshold:
                 return True
@@ -2693,8 +2636,8 @@ class Graph:
         # Collect recently fired nodes for surprise analysis
         recent_window = self.config["prediction_window"]
         recent_fired: Set[str] = set()
-        for nid, spikes in list(self._recent_spikes.items()):
-            for t in list(spikes):
+        for nid, spikes in self._recent_spikes.items():
+            for t in spikes:
                 if self.timestep - t <= recent_window:
                     recent_fired.add(nid)
                     break
@@ -2712,7 +2655,7 @@ class Graph:
         self, pre_id: str, post_id: str
     ) -> Optional[Synapse]:
         """Find a synapse connecting pre_id → post_id, if one exists."""
-        for syn_id in list(self._outgoing.get(pre_id, set())):
+        for syn_id in self._outgoing.get(pre_id, set()):
             syn = self.synapses.get(syn_id)
             if syn and syn.post_node_id == post_id:
                 return syn
@@ -2757,7 +2700,7 @@ class Graph:
         initial_w = self.config["initial_sprouting_weight"]
 
         to_prune: List[str] = []
-        for sid, syn in list(self.synapses.items()):
+        for sid, syn in self.synapses.items():
             age = self.timestep - syn.creation_time
 
             # Weight-based pruning
@@ -2808,12 +2751,12 @@ class Graph:
         # Build a set of recently-fired-but-not-this-step nodes for quick lookup
         fired_set = set(fired_ids)
         candidates: Set[str] = set()
-        for nid, spikes in list(self._recent_spikes.items()):
+        for nid, spikes in self._recent_spikes.items():
             if nid in fired_set:
                 continue
             if any(
                 0 < (self.timestep - t) <= window
-                for t in list(spikes)
+                for t in spikes
             ):
                 candidates.add(nid)
 
@@ -2823,11 +2766,11 @@ class Graph:
         # Build a fast edge-existence index for fired nodes
         existing_pairs: Set[Tuple[str, str]] = set()
         for nid in fired_ids:
-            for sid in list(self._outgoing.get(nid, set())):
+            for sid in self._outgoing.get(nid, set()):
                 syn = self.synapses.get(sid)
                 if syn:
                     existing_pairs.add((nid, syn.post_node_id))
-            for sid in list(self._incoming.get(nid, set())):
+            for sid in self._incoming.get(nid, set()):
                 syn = self.synapses.get(sid)
                 if syn:
                     existing_pairs.add((syn.pre_node_id, nid))
@@ -2880,7 +2823,7 @@ class Graph:
             return {"node_id": node_id, "children": []}
         visited.add(node_id)
         children = []
-        for sid in list(self._outgoing.get(node_id, set())):
+        for sid in self._outgoing.get(node_id, set()):
             syn = self.synapses.get(sid)
             if syn and syn.weight > self.config["weight_threshold"]:
                 child = self._trace_causal(syn.post_node_id, depth - 1, visited)
@@ -2916,9 +2859,9 @@ class Graph:
             surprise_rate: surprises / total predictions (0 if none).
             hyperedge_experience_distribution: bucket histogram of activation_counts.
         """
-        weights = [s.weight for s in list(self.synapses.values())]
-        rates = [n.firing_rate_ema for n in list(self.nodes.values())]
-        he_counts = [he.activation_count for he in list(self.hyperedges.values())]
+        weights = [s.weight for s in self.synapses.values()]
+        rates = [n.firing_rate_ema for n in self.nodes.values()]
+        he_counts = [he.activation_count for he in self.hyperedges.values()]
 
         # Phase 2.5: Experience distribution buckets
         exp_dist: Dict[str, int] = {"0": 0, "1-9": 0, "10-99": 0, "100+": 0}
@@ -2976,7 +2919,7 @@ class Graph:
             he_adapt_candidate_count=self._he_adapt_candidate_count,
             he_by_state={
                 state.value: sum(
-                    1 for he in list(self.hyperedges.values())
+                    1 for he in self.hyperedges.values()
                     if not he.is_archived and he.consolidation_state == state
                 )
                 for state in ConsolidationState
@@ -3021,7 +2964,7 @@ class Graph:
         if len(self._reward_history) > 1000:
             self._reward_history = self._reward_history[-500:]
 
-        for syn in list(self.synapses.values()):
+        for syn in self.synapses.values():
             if abs(syn.eligibility_trace) < 1e-9:
                 continue
 
@@ -3037,7 +2980,7 @@ class Graph:
                 syn.peak_weight = syn.weight
 
         # Hyperedge threshold learning (PRD §4.3)
-        for he in list(self.hyperedges.values()):
+        for he in self.hyperedges.values():
             if not he.is_learnable:
                 continue
             # Scope check for hyperedges
@@ -3143,33 +3086,58 @@ class Graph:
         window = self.config["he_discovery_window"]
         min_fires = self.config["he_discovery_min_co_fires"]
         min_nodes = self.config["he_discovery_min_nodes"]
+        overlap_threshold = self.config["he_discovery_overlap_threshold"]
 
         # Reset discovery counts periodically
         if self.timestep - self._he_discovery_last_reset > window * 2:
             self._he_discovery_counts.clear()
             self._he_discovery_last_reset = self.timestep
 
-        # Build sorted key from fired nodes (order-independent)
-        fired_sorted = tuple(sorted(fired_node_ids))
+        fired_set = set(fired_node_ids)
 
-        # Track all subsets of size >= min_nodes would be too expensive,
-        # so we track the full fired set as a co-activation pattern.
-        self._he_discovery_counts[fired_sorted] = (
-            self._he_discovery_counts.get(fired_sorted, 0) + 1
-        )
+        # Find the existing candidate with the best Jaccard overlap.
+        # Refining to the intersection on each match converges the candidate
+        # toward the reliable co-activation core, discarding peripheral nodes
+        # that don't fire consistently together.
+        best_key: Optional[Tuple[str, ...]] = None
+        best_jaccard = 0.0
+        for candidate_key in list(self._he_discovery_counts.keys()):
+            candidate_set = set(candidate_key)
+            union_size = len(fired_set | candidate_set)
+            if not union_size:
+                continue
+            jaccard = len(fired_set & candidate_set) / union_size
+            if jaccard >= overlap_threshold and jaccard > best_jaccard:
+                best_jaccard = jaccard
+                best_key = candidate_key
+
+        if best_key is not None:
+            # Refine candidate to intersection — drop nodes not in this firing
+            refined = tuple(sorted(fired_set & set(best_key)))
+            count = self._he_discovery_counts.pop(best_key)
+            if len(refined) < min_nodes:
+                # Intersection shrank below minimum — discard candidate
+                return []
+            self._he_discovery_counts[refined] = count + 1
+            active_key = refined
+        else:
+            # No overlapping candidate — start a new one from the full fired set
+            fired_sorted = tuple(sorted(fired_node_ids))
+            self._he_discovery_counts[fired_sorted] = (
+                self._he_discovery_counts.get(fired_sorted, 0) + 1
+            )
+            active_key = fired_sorted
 
         discovered: List[Hyperedge] = []
 
-        if self._he_discovery_counts[fired_sorted] >= min_fires:
-            # Check no existing hyperedge already covers this exact set
-            fired_set = set(fired_node_ids)
+        if self._he_discovery_counts.get(active_key, 0) >= min_fires:
+            active_set = set(active_key)
             already_exists = any(
-                he.member_nodes == fired_set
-                for he in list(self.hyperedges.values())
+                he.member_nodes == active_set
+                for he in self.hyperedges.values()
             )
-            if not already_exists and len(fired_set) >= min_nodes:
-                # Verify all nodes still exist
-                valid_nodes = {nid for nid in fired_set if nid in self.nodes}
+            if not already_exists and len(active_set) >= min_nodes:
+                valid_nodes = {nid for nid in active_set if nid in self.nodes}
                 if len(valid_nodes) >= min_nodes:
                     he = self.create_hyperedge(
                         valid_nodes,
@@ -3182,7 +3150,7 @@ class Graph:
                     self._total_he_discovered += 1
                     self._emit("hyperedge_discovered", hid=he.hyperedge_id)
             # Reset this pattern's counter
-            del self._he_discovery_counts[fired_sorted]
+            del self._he_discovery_counts[active_key]
 
         return discovered
 
@@ -3526,7 +3494,7 @@ class Graph:
         """
         threshold_ceiling = self.config.get("threshold_ceiling", 5.0)
         boosted = 0
-        for node in list(self.nodes.values()):
+        for node in self.nodes.values():
             node.intrinsic_excitability = min(
                 node.intrinsic_excitability * 1.2, 5.0,
             )
@@ -3674,21 +3642,36 @@ class Graph:
         }
 
     def _serialize_full(self) -> Dict[str, Any]:
+        # Snapshot all mutable dicts before building the return value.
+        # Tonic runs prime_and_propagate(write_mode=True) concurrently and
+        # can add nodes/synapses between iterations — list() gives us a
+        # stable view without pausing the latent thread.
+        _nodes      = list(self.nodes.items())
+        _synapses   = list(self.synapses.items())
+        _hyperedges = list(self.hyperedges.items())
+        _archived   = list(self._archived_hyperedges.items())
+        _act_preds  = list(self.active_predictions.items())
+        _syn_hist   = list(self._synapse_confirmation_history.items())
+        _he_preds   = list(self._active_predictions.items())
+        _he_window  = list(self._prediction_window_fired.items())
+        _delay_buf  = list(self._delay_buffer.items())
+        _recent_spk = [(nid, spikes) for nid, spikes
+                       in self._recent_spikes.items() if spikes]
         return {
             "version": "0.4.2",
             "timestep": self.timestep,
             "config": self.config,
-            "nodes": {nid: self._serialize_node(n) for nid, n in list(self.nodes.items())},
-            "synapses": {sid: self._serialize_synapse(s) for sid, s in list(self.synapses.items())},
-            "hyperedges": {hid: self._serialize_hyperedge(h) for hid, h in list(self.hyperedges.items())},
+            "nodes": {nid: self._serialize_node(n) for nid, n in _nodes},
+            "synapses": {sid: self._serialize_synapse(s) for sid, s in _synapses},
+            "hyperedges": {hid: self._serialize_hyperedge(h) for hid, h in _hyperedges},
             "archived_hyperedges": {
                 hid: self._serialize_hyperedge(h)
-                for hid, h in list(self._archived_hyperedges.items())
+                for hid, h in _archived
             },
             # Phase 3: Active synapse-level predictions
             "active_predictions": {
                 pid: self._serialize_prediction(pred)
-                for pid, pred in self.active_predictions.items()
+                for pid, pred in _act_preds
             },
             # Phase 3: Recent prediction outcomes
             "prediction_outcomes": [
@@ -3703,7 +3686,7 @@ class Graph:
             # Phase 3: Per-synapse confirmation history
             "synapse_confirmation_history": {
                 syn_id: list(history)
-                for syn_id, history in self._synapse_confirmation_history.items()
+                for syn_id, history in _syn_hist
             },
             # Phase 3: Logs
             "novel_sequence_log": list(self._novel_sequence_log),
@@ -3711,12 +3694,12 @@ class Graph:
             # Phase 2.5: Active HE-level predictions
             "he_active_predictions": {
                 pid: self._serialize_prediction_state(ps)
-                for pid, ps in self._active_predictions.items()
+                for pid, ps in _he_preds
             },
             # Phase 2.5: Window-fired tracking
             "he_prediction_window_fired": {
                 pid: list(nodes)
-                for pid, nodes in self._prediction_window_fired.items()
+                for pid, nodes in _he_window
             },
             # Phase 2.5: Counter for unique HE prediction IDs
             "he_prediction_counter": self._prediction_counter,
@@ -3753,12 +3736,11 @@ class Graph:
             # zero-firing circuit breaker loses streak continuity across calls.
             "delay_buffer": {
                 str(ts): [[nid, curr] for nid, curr in entries]
-                for ts, entries in self._delay_buffer.items()
+                for ts, entries in _delay_buf
             },
             "recent_spikes": {
                 nid: list(spikes)
-                for nid, spikes in list(self._recent_spikes.items())
-                if spikes
+                for nid, spikes in _recent_spk
             },
             "steps_since_last_fire": self._steps_since_last_fire,
             "homeostatic_steps_since_scaling": next(
@@ -3821,7 +3803,7 @@ class Graph:
 
         # Filter synapses — both endpoints must be in the extracted set
         extracted_synapses = {}
-        for sid, syn in list(self.synapses.items()):
+        for sid, syn in self.synapses.items():
             if syn.pre_node_id in node_ids and syn.post_node_id in node_ids:
                 extracted_synapses[sid] = self._serialize_synapse(syn)
 
