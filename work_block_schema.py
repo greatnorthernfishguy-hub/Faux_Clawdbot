@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-05-03] Claude (Sonnet 4.6) — Add read_only_paths to constraints schema (#168)
+# What: Added read_only_paths as a valid constraints property
+# Why: spec_executor.py already reads this field (lines 96-100) but work_block_schema.py
+#      constraints had additionalProperties:False with no read_only_paths entry — any spec
+#      using it failed schema validation before execution could reach the field.
+# How: One new property added to constraints; no executor changes (already handled).
 # [2026-04-06] Josh + Claude — Add edit_file tool + shell_allowlist constraint
 # What: (1) edit_file in _TOOL_NAMES (2) shell_allowlist in constraints schema
 # Why: Gap 2 — specs need to extend shell allowlist; Gap 3 — edit_file is a new tool
@@ -289,6 +295,11 @@ WORK_BLOCK_SCHEMA = {
                 },
                 "max_iterations": {"type": "integer", "minimum": 1, "maximum": 100, "default": 15},
                 "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 3600, "default": 300},
+                "read_only_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute paths outside workspace that read_file may access (read-only). Typical use: sibling repos QB needs to inspect without writing.",
+                },
             },
         },
         "steps": {
