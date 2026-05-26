@@ -19,6 +19,144 @@ Design principles (PRD §2.1):
     - Persistence-native: all state is serializable
 
 # ---- Changelog ----
+# [2026-05-26] Claude Opus 4.7 (1M ctx) — #258 Orphan-node grace period
+#   What: Added orphan_node_grace_period config (default 25 steps); added
+#         creation_time field to Node dataclass; create_node() now stamps
+#         it; _collect_orphan_nodes() now checks (timestep - creation_time)
+#         > grace before sweeping. Serialization + restore handle the new
+#         field with default=0 for backward compatibility with existing
+#         msgpacks (restored nodes look ancient → grace passes → same
+#         sweep behavior as before this patch).
+#   Why:  #237 orphan collection has no grace period — sweeps zero-synapse
+#         nodes on every step(). This is fine for a populated substrate
+#         (Syl) because spreading activation through existing synapses
+#         fires co-activation partners in the same step, STDP creates
+#         synapses at step 7, orphan check at step 8 finds the new node
+#         already has synapses. But empty-substrate bootstrap (NuWave
+#         with NUWAVE_FRESH_START=1) has NO existing synapses for
+#         spreading activation to traverse — first deposit creates an
+#         isolated node, no co-firing happens, orphan check sweeps it.
+#         Substrate can never grow past zero. NuWave's A.1 Run 3 sidecar
+#         empirically confirmed this: 24 turns of deposits, substrate_nodes
+#         stayed at 0 throughout. Grace period gives canonical mechanisms
+#         time to wire new nodes — 25 steps default matches scaling_interval
+#         pattern (same as homeostatic regulation cadence). Latent defensive
+#         depth for Syl too: protects against bootstrap-from-empty if her
+#         substrate ever needs to be restored from a clean state.
+#   How:  6 surgical additions: dataclass field, config key, create_node
+#         stamp, orphan check age guard, serializer field, restore default.
+#         Backward-compatible (.get() with default=0). Re-vendored to
+#         NuWave/nuwave/substrate/neuro_foundation.py.
+# [2026-05-26] Claude Code (Sonnet 4.6) — GSG Phase 3: non-Euclidean message passing
+#   What: Added _GSG_LAYER_NORMS_NF, _GSG_KAPPA_L2, _GSG_MSG_DECAY constants. Step 5
+#         propagation loop now maintains a per-step _gsg_pos_cache (list→ndarray once
+#         per node). For each synapse between two GSG-stamped nodes, computes Poincaré
+#         geodesic distance hdist and curvature ratio kappa_norm = κ(pre)/κ(L2), then
+#         scales current by h_factor = exp(-_GSG_MSG_DECAY * kappa_norm * hdist).
+#   Why:  Closes the geometry loop for hyperbolic propagation: Phase 1 placed nodes on
+#         the Poincaré ball; Phase 2 applied curvature-scaled STDP. Phase 3 modulates
+#         the activation signal itself — signals between geometrically distant nodes
+#         attenuate more steeply, and boundary nodes (high curvature, novel input)
+#         attenuate more steeply than hub nodes. Grounded in GSG paper (arXiv
+#         2508.06793): γ_ij * hdist maps to kappa_norm * hdist for scalar propagation.
+#   How:  Per-step Dict cache avoids re-converting poincare_dir list→ndarray per synapse.
+#         Nodes without poincare_dir silently skip (h_factor=1.0, backward-compatible).
+#         Geodesic: acosh(1 + 2||x-y||² / ((1-||x||²)(1-||y||²))). Norms clamped to
+#         0.9999 to avoid division-by-zero at ball boundary.
+# [2026-05-25] Claude Code (Sonnet 4.6) — GSG Phase 2: curvature-modulated STDP (neuro_foundation.py)
+#   What: Added _GSG_CURVATURE_TABLE (3×3) before STDPRule. In STDPRule.apply(), both _apply_dw()
+#         call sites (incoming + outgoing loops) now multiply dw by the table lookup
+#         _GSG_CURVATURE_TABLE[pre_layer][post_layer] before committing the weight change.
+#   Why:  Poincaré ball curvature κ(x) = 1/(1-||x||²) grows as ||x|| → 1 (boundary).
+#         Layer 0 nodes (boundary, novel/input) have κ≈1.96; Layer 2 hubs (center) have κ≈1.10.
+#         Multiplying dw by the normalized average curvature means STDP learns faster between
+#         boundary nodes (novel concept pairs) and at baseline between hub nodes. This respects
+#         the DiffPC hierarchy: new semantic structure forms quickly at the input layer where
+#         concepts are novel, while consolidated hub topology remains stable.
+#   How:  Precomputed 3×3 table indexed by (pre_layer, post_layer). getattr guard on diffpc_layer
+#         (defaults to 2 = hub baseline if attribute absent) ensures backward-compat with
+#         checkpoints predating DiffPC. No serialization changes. No config changes.
+# [2026-05-25] Claude Code (Sonnet 4.6) — DiffPC Phase 2: eligibility trace modulation + StepResult telemetry
+#   What: _diffpc_step() now returns (ternary_spike_count, mean_pred_error) and modulates
+#         syn.eligibility_trace by ±diffpc_trace_boost (default 0.05) when ternary fires.
+#         StepResult gains diffpc_ternary_spikes and diffpc_mean_pred_error fields.
+#         step() captures return value and writes to result.
+#   Why:  Closes the DiffPC → STDP feedback loop. Ternary errors from step 7b gate STDP
+#         at the next timestep's step 7 via eligibility_trace — accurate predictions keep
+#         full eligibility, over-predictions suppress it, under-predictions amplify it.
+#         This is the third factor (prediction error) alongside existing reward signal.
+#   How:  _diffpc_step(fired_ids) → Tuple[int, float]. ternary=+1: trace += boost.
+#         ternary=-1: trace -= boost. Temporal ordering is correct: this step's error
+#         modulates next step's Hebbian update. diffpc_trace_boost=0.05 in DEFAULT_CONFIG.
+# [2026-05-25] Claude Code (Sonnet 4.6) — DiffPC: Difference Predictive Coding layer hierarchy
+#   What: Added diffpc_layer (0=novel/input, 1=mid, 2=hub), pred_weights (Dict[str,float]),
+#         pred_error_ema (float) to Node. HomeostaticRule._refresh_degree_targets() now
+#         also assigns diffpc_layer by degree percentile (p33/p67) each scaling interval.
+#         _diffpc_step() computes ternary prediction errors (±1,0) from Layer-L → Layer-L-1
+#         prediction weights, updates pred_weights by gradient, accumulates pred_error_ema.
+#         Called at step 7b (after STDP, before structural plasticity).
+#         New DEFAULT_CONFIG: diffpc_epsilon=0.2, diffpc_pred_lr=0.01.
+#         Backward-compat: old checkpoints load diffpc_layer=0, pred_weights={}, pred_error_ema=0.0.
+#   Why:  Semantic layer hierarchy for DiffPC. Degree bands become a 3-layer predictive
+#         coding architecture. Ternary errors are sparse vs. dense floats — efficient,
+#         biologically plausible. Birth thresholds seeded from River novelty (neurograph_rpc.py)
+#         give semantically meaningful layer placement before organic connections form.
+#   How:  Layer: degree percentile p33/p67, refreshed at each scaling_interval alongside
+#         DAS-GNN targets. _diffpc_step(): for each fired Layer-L node, walk outgoing synapses
+#         to Layer-L-1 targets, compute error=actual−pred_weight, ternary-quantize, update weight.
+# [2026-05-25] Claude Code (Sonnet 4.6) — Heterogeneous Synaptic Delays (#257)
+#   What: Added d_min/d_max to DEFAULT_CONFIG. _sprout_synapses() now samples
+#         delay=random.randint(d_min, d_max) for each new synapse (default 1–5 steps).
+#         Existing synapses load delay=1 (backward-compat via sd.get('delay', 1)).
+#         _delay_buffer, step() routing, and serialization were already present.
+#   Why:  Heterogeneous delays enable polychronous spiking motifs: neuron combos
+#         with precise relative firing timing whose delayed signals arrive
+#         simultaneously at a target, reliably triggering post-synaptic spikes.
+#         Encodes temporal sequences (turn structure, recurring patterns, procedural
+#         memory) as first-class topology. STDP unchanged — coincident delayed
+#         arrivals cause firing → STDP naturally selects the causal delay patterns.
+#   How:  import random added. 2 config params. 1 create_synapse call in sprout.
+# [2026-05-25] Claude Code (Sonnet 4.6) — IcaN + IK-AHP intrinsic calcium channels (#254)
+#   What: Added Ca_i state variable to Node. IcaN (+g_CaN*Ca_i) depolarizes to sustain
+#         attractors. IK-AHP (-g_AHP*Ca_i) hyperpolarizes to provide burst protection.
+#         Net: (g_CaN-g_AHP)*Ca_i applied to voltage before each step's fire detection.
+#         Ca_i decays (×Ca_decay) each step; increments (+delta_Ca) on each spike.
+#   Why:  Pure STDP attractors are noise-fragile. Calcium channels provide intrinsic
+#         memory stability without requiring high synaptic weights.
+#   How:  4 new config params (delta_Ca=0.2, Ca_decay=0.9, g_CaN=0.06, g_AHP=0.04).
+#         Ca_i=0.0 in Node dataclass, serialized/deserialized with .get() default.
+# [2026-05-25] Claude Code (Sonnet 4.6) — Degree-Aware Firing Thresholds (#104)
+#   What: Added degree_sensitivity config + per-node adjusted firing targets to HomeostaticRule.
+#   Why:  Single global target_firing_rate causes hub nodes (high degree) to dominate with noisy
+#         spikes while peripheral nodes (low degree) are starved silent. DAS-GNN fix: hubs get
+#         a lower effective target (threshold raised faster); peripherals get a higher effective
+#         target (threshold lowered faster). Equalizes firing rates across the topology.
+#   How:  Log-scaled deg_norm per node. node_target = global * max(0.1, 1-(norm-0.5)*2*sens).
+#         _refresh_degree_targets() updates at scaling_interval cadence. One new config param.
+# [2026-05-05] Claude (Sonnet 4.6) — #237 Orphan-node collection in _structural_plasticity()
+# What: Added _collect_orphan_nodes() as a third sub-step in _structural_plasticity(),
+#       called after _prune_synapses() and before _sprout_synapses(). Removes any node
+#       with no incoming synapses, no outgoing synapses, and no hyperedge membership.
+# Why:  _prune_synapses() removes dead connections but never calls remove_node() on
+#       the resulting zero-connection nodes. Full SNN has no max_nodes cap (NG-Lite does
+#       at 1000). VPS graph reached 61,597 nodes / 8,438 synapses — ~90% orphans.
+#       This drove Tonic 102× over budget (153s ticks vs 1.5s budget) and ~80% CPU idle.
+#       Fix lives here, not in a module — substrate behavior must be independent of any
+#       module's existence (same principle as removing TUNABLE_PARAMS, 2026-04-27).
+# How:  Snapshot orphan list before iteration to avoid dict-mutation-during-iteration.
+#       Calls existing remove_node() which handles all cascading cleanup. Emits
+#       "nodes_collected" event. Return signature of _structural_plasticity unchanged.
+#       Josh confirmed backup and approved per Syl's Law (2026-05-05).
+# [2026-05-01] Claude (Sonnet 4.6) — #164 Phase B: working_set optimization in prime_and_propagate
+# What: Replaced O(n) voltage decay, fire detection, and refractory decrement loops with
+#       O(working_set) iterations. working_set = non-resting + refractory + primed nodes,
+#       built O(n) once per call. Set maintained as nodes receive current (steps 2, 6) and
+#       pruned when voltage returns to resting + refractory clears (step 1).
+# Why:  Tonic fires every 2s with steps=2, doing 6× O(n) node passes per tick. At 50k+
+#       nodes this becomes ~300k node ops/second sustained. working_set is typically <<1%
+#       of n at steady state (most nodes at resting). ~5× speedup for Tonic (write_mode).
+# How:  _ACTIVE_EPS=1e-5 threshold for "at resting". save/restore remain O(n) in read mode
+#       (safe — all nodes need state preserved). Josh explicitly approved per Syl's Law.
 # [2026-04-27] Claude (Sonnet 4.6) — Replace exact-set hyperedge discovery with overlap-based candidate matching
 # What: discover_hyperedges() now uses Jaccard overlap (threshold: he_discovery_overlap_threshold=0.5,
 #       bootstrap value — candidate for competency graduation via Elmer's TuningSocket) to match
@@ -157,6 +295,7 @@ import copy
 import json
 import logging
 import math
+import random
 import threading
 import uuid
 from collections import deque
@@ -307,6 +446,11 @@ class Node:
     intrinsic_excitability: float = 1.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     is_inhibitory: bool = False
+    Ca_i: float = 0.0  # intracellular calcium concentration (IcaN + IK-AHP, #254)
+    diffpc_layer: int = 0                           # DiffPC layer: 0=novel/input, 1=mid, 2=hub
+    pred_weights: Dict[str, float] = field(default_factory=dict)  # nid → prediction weight
+    pred_error_ema: float = 0.0                     # EMA of ternary prediction error received
+    creation_time: int = 0                          # Timestep when node was created (#258 orphan grace)
 
 
 @dataclass
@@ -433,6 +577,8 @@ class StepResult:
     synapses_sprouted: int = 0
     predictions_confirmed: int = 0
     predictions_surprised: int = 0
+    diffpc_ternary_spikes: int = 0       # count of ±1 ternary error spikes this step
+    diffpc_mean_pred_error: float = 0.0  # mean |error| where ternary != 0
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +798,24 @@ class PlasticityRule:
         raise NotImplementedError
 
 
+# GSG Phase 2: curvature-modulated STDP weight changes.
+# Rows = pre_layer, cols = post_layer (0=novel/boundary, 1=mid, 2=hub/center).
+# Values = avg Poincaré curvature κ(layer)=1/(1-norm²) for norms [0.70,0.50,0.30],
+# normalized by Layer-2 baseline κ≈1.099. Layer 0↔0 = 1.784× (maximum amplification),
+# Layer 2↔2 = 1.000× (baseline). Defaulting to layer=2 when diffpc_layer absent
+# ensures pre-DiffPC checkpoints receive no modulation (factor=1.0).
+_GSG_CURVATURE_TABLE: List[List[float]] = [
+    [1.784, 1.499, 1.392],  # pre=Layer 0 (novel/input, near boundary)
+    [1.499, 1.213, 1.107],  # pre=Layer 1 (mid)
+    [1.392, 1.107, 1.000],  # pre=Layer 2 (hub/familiar, near center)
+]
+# GSG Phase 3: non-Euclidean propagation constants.
+_GSG_LAYER_NORMS_NF: List[float] = [0.70, 0.50, 0.30]  # L0/L1/L2 Poincaré ball radii
+# κ(L2) = 1/(1-0.30²) ≈ 1.099 — hub baseline for curvature normalization
+_GSG_KAPPA_L2: float = 1.0 / (1.0 - 0.30 ** 2)
+_GSG_MSG_DECAY: float = 0.15  # geodesic decay rate; 0.0=Euclidean, 0.15=gentle; tunable
+
+
 class STDPRule(PlasticityRule):
     """Spike-Timing-Dependent Plasticity (PRD §3.1).
 
@@ -749,6 +913,10 @@ class STDPRule(PlasticityRule):
                     scale = (syn.max_weight - syn.weight) / syn.max_weight
                     dw = raw_dw * self.learning_rate * max(scale, 0.0)
 
+                # GSG Phase 2: amplify dw by Poincaré curvature of pre/post layer
+                _pre_l = getattr(pre_node, "diffpc_layer", 2)
+                _post_l = getattr(post_node, "diffpc_layer", 2)
+                dw *= _GSG_CURVATURE_TABLE[max(0, min(2, _pre_l))][max(0, min(2, _post_l))]
                 self._apply_dw(syn, dw, timestep, three_factor)
 
             # Also handle outgoing synapses (post-before-pre → LTD from
@@ -783,6 +951,10 @@ class STDPRule(PlasticityRule):
                 else:
                     continue  # already handled in incoming pass
 
+                # GSG Phase 2: post_node is pre here (outgoing from it); other_node is post
+                _pre_l = getattr(post_node, "diffpc_layer", 2)
+                _post_l = getattr(other_node, "diffpc_layer", 2)
+                dw *= _GSG_CURVATURE_TABLE[max(0, min(2, _pre_l))][max(0, min(2, _post_l))]
                 self._apply_dw(syn, dw, timestep, three_factor)
 
 
@@ -807,6 +979,7 @@ class HomeostaticRule(PlasticityRule):
         excitability_rate: float = 0.01,
         threshold_rate: float = 0.001,
         ema_alpha: float = 0.01,
+        degree_sensitivity: float = 0.4,
     ):
         self.target_firing_rate = target_firing_rate
         self.scaling_interval = scaling_interval
@@ -814,7 +987,39 @@ class HomeostaticRule(PlasticityRule):
         self.excitability_rate = excitability_rate
         self.threshold_rate = threshold_rate
         self.ema_alpha = ema_alpha
+        self.degree_sensitivity = degree_sensitivity
+        self._degree_targets: Dict[str, float] = {}
         self._steps_since_scaling = 0
+
+    def _refresh_degree_targets(self, graph: "Graph") -> None:
+        """Compute per-node firing targets adjusted for vertex degree (DAS-GNN, #104)."""
+        if not self.degree_sensitivity or not graph.nodes:
+            self._degree_targets = {}
+            return
+        degrees = {
+            nid: len(graph._incoming.get(nid, ())) + len(graph._outgoing.get(nid, ()))
+            for nid in graph.nodes
+        }
+        max_deg = max(degrees.values(), default=1) or 1
+        log_max = math.log(max_deg + 1)
+        self._degree_targets = {}
+        for nid, deg in degrees.items():
+            deg_norm = math.log(deg + 1) / log_max if log_max > 0 else 0.5
+            # Center at 0.5: hub (deg_norm=1) → scale<1 → target lower → faster dampening
+            # Peripheral (deg_norm=0) → scale>1 → target higher → faster threshold drop
+            scale = max(0.1, 1.0 - (deg_norm - 0.5) * 2.0 * self.degree_sensitivity)
+            self._degree_targets[nid] = self.target_firing_rate * scale
+
+        # DiffPC: assign layer 0/1/2 by degree percentile (p33/p67 cut points)
+        if degrees:
+            sorted_degs = sorted(degrees.values())
+            n = len(sorted_degs)
+            p33 = sorted_degs[n // 3]
+            p67 = sorted_degs[(2 * n) // 3]
+            for nid, deg in degrees.items():
+                node = graph.nodes.get(nid)
+                if node is not None:
+                    node.diffpc_layer = 0 if deg <= p33 else (1 if deg <= p67 else 2)
 
     def apply(
         self,
@@ -836,19 +1041,22 @@ class HomeostaticRule(PlasticityRule):
         threshold_ceiling = graph.config.get("threshold_ceiling", 5.0)
         for nid, node in graph.nodes.items():
             rate = node.firing_rate_ema
-            if rate > self.target_firing_rate * 1.2:
+            node_target = self._degree_targets.get(nid, self.target_firing_rate)
+            if rate > node_target * 1.2:
                 node.threshold = min(node.threshold + self.threshold_rate, threshold_ceiling)
-            elif rate < self.target_firing_rate * 0.8:
+            elif rate < node_target * 0.8:
                 node.threshold = max(0.01, node.threshold - self.threshold_rate)
 
         self._steps_since_scaling += 1
         if self._steps_since_scaling < self.scaling_interval:
             return
         self._steps_since_scaling = 0
+        self._refresh_degree_targets(graph)
 
         # Synaptic scaling & intrinsic excitability (every N steps)
         for nid, node in graph.nodes.items():
             rate = node.firing_rate_ema
+            node_target = self._degree_targets.get(nid, self.target_firing_rate)
             if rate < 1e-9:
                 # Silent node → boost excitability (PRD §3.1.2 Silent Death mitigation)
                 node.intrinsic_excitability = min(
@@ -857,7 +1065,7 @@ class HomeostaticRule(PlasticityRule):
                 )
                 continue
 
-            ratio = self.target_firing_rate / rate
+            ratio = node_target / rate
 
             # Intrinsic excitability adjustment
             if ratio > 1.0:
@@ -977,8 +1185,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "target_firing_rate": 0.05,
     "threshold_ceiling": 5.0,
     "scaling_interval": 25,
+    "degree_sensitivity": 0.4,           # DAS-GNN: hub/peripheral threshold balance (#104)
+    # IcaN + IK-AHP intrinsic calcium channels (#254)
+    "delta_Ca": 0.2,    # calcium influx per spike
+    "Ca_decay": 0.9,    # per-step calcium decay multiplier
+    "g_CaN": 0.06,      # IcaN conductance (depolarizing, attractor persistence)
+    "g_AHP": 0.04,      # IK-AHP conductance (hyperpolarizing, burst protection)
+    # Heterogeneous Synaptic Delays + Polychrony (#257)
+    "d_min": 1,         # minimum synaptic delay in timesteps
+    "d_max": 5,         # maximum synaptic delay in timesteps (range enables polychrony)
+    # DiffPC: Difference Predictive Coding (#DiffPC)
+    "diffpc_epsilon": 0.2,       # ternary threshold: |error| > epsilon → ±1 spike, else 0
+    "diffpc_pred_lr": 0.01,      # prediction weight learning rate
+    "diffpc_trace_boost": 0.05,  # eligibility trace ±boost per ternary spike (Phase 2)
     "weight_threshold": 0.01,
     "grace_period": 500,
+    "orphan_node_grace_period": 25,      # Steps before orphan-node sweep (#258). Prevents empty-substrate bootstrap failure.
     "inactivity_threshold": 1000,
     "co_activation_window": 5,
     "initial_sprouting_weight": 0.1,
@@ -1112,6 +1334,7 @@ class Graph:
             HomeostaticRule(
                 target_firing_rate=self.config["target_firing_rate"],
                 scaling_interval=self.config["scaling_interval"],
+                degree_sensitivity=self.config.get("degree_sensitivity", 0.4),
             ),
             HyperedgePlasticityRule(
                 member_weight_lr=self.config["he_member_weight_lr"],
@@ -1368,6 +1591,7 @@ class Graph:
             refractory_period=self.config["refractory_period"],
             metadata=metadata or {},
             is_inhibitory=is_inhibitory,
+            creation_time=int(self.timestep),
         )
         self.nodes[nid] = node
         self._outgoing[nid] = set()
@@ -1593,6 +1817,19 @@ class Graph:
                     continue
                 target.voltage += current * target.intrinsic_excitability
 
+            # 3a. IcaN + IK-AHP: calcium-gated intrinsic currents (#254)
+            # Net voltage adjustment = (g_CaN - g_AHP) * Ca_i per step.
+            # g_CaN > g_AHP at defaults → mild attractor persistence.
+            # Ca_i decay ensures effect fades between firing episodes.
+            _delta_Ca = self.config.get("delta_Ca", 0.0)
+            if _delta_Ca:
+                _Ca_decay = self.config.get("Ca_decay", 0.9)
+                _g_net = self.config.get("g_CaN", 0.0) - self.config.get("g_AHP", 0.0)
+                for _nid, _node in self.nodes.items():
+                    if _node.Ca_i > 1e-9:
+                        _node.voltage += _g_net * _node.Ca_i
+                        _node.Ca_i *= _Ca_decay
+
             # 3. Detect firing nodes
             #    Lenia FlowGraph: pre_fire handlers can adjust thresholds.
             fired_ids: List[str] = []
@@ -1621,23 +1858,54 @@ class Graph:
                 node.spike_history.append(float(self.timestep))
                 # Track recent spikes for sprouting
                 self._recent_spikes.setdefault(nid, deque(maxlen=20)).append(self.timestep)
+                if _delta_Ca:  # IcaN/IK-AHP calcium influx on spike (#254)
+                    node.Ca_i = min(node.Ca_i + _delta_Ca, 5.0)  # cap at 5 to prevent runaway
 
             result.fired_node_ids = fired_ids
 
             # 5. Propagate spikes through outgoing synapses (with delay)
+            # GSG Phase 3: per-step Poincaré position cache (list→ndarray once per node)
+            _gsg_pos_cache: Dict[str, Any] = {}
             for nid in fired_ids:
                 node = self.nodes[nid]
                 sign = -1.0 if node.is_inhibitory else 1.0
+                # GSG Phase 3: resolve pre-node position on Poincaré ball (cached this step)
+                if nid not in _gsg_pos_cache:
+                    _pdir = (node.metadata or {}).get("poincare_dir")
+                    if _pdir is not None:
+                        _l = max(0, min(2, getattr(node, "diffpc_layer", 2)))
+                        _gsg_pos_cache[nid] = np.array(_pdir, dtype=np.float32) * _GSG_LAYER_NORMS_NF[_l]
+                    else:
+                        _gsg_pos_cache[nid] = None
+                _pre_pos = _gsg_pos_cache[nid]
                 for syn_id in self._outgoing.get(nid, set()):
                     syn = self.synapses.get(syn_id)
                     if syn is None:
                         logger.debug("Stale synapse ref %s in outgoing[%s]", syn_id, nid)
                         continue
-                    # Effective current is weight × sign
                     effective_type_sign = sign
                     if syn.synapse_type == SynapseType.INHIBITORY:
                         effective_type_sign = -1.0
                     current = syn.weight * effective_type_sign
+                    # GSG Phase 3: modulate by curvature-aware hyperbolic geodesic proximity
+                    if _pre_pos is not None:
+                        _post_node = self.nodes.get(syn.post_node_id)
+                        if _post_node is not None:
+                            if syn.post_node_id not in _gsg_pos_cache:
+                                _pdir2 = (_post_node.metadata or {}).get("poincare_dir")
+                                if _pdir2 is not None:
+                                    _l2 = max(0, min(2, getattr(_post_node, "diffpc_layer", 2)))
+                                    _gsg_pos_cache[syn.post_node_id] = np.array(_pdir2, dtype=np.float32) * _GSG_LAYER_NORMS_NF[_l2]
+                                else:
+                                    _gsg_pos_cache[syn.post_node_id] = None
+                            _post_pos = _gsg_pos_cache[syn.post_node_id]
+                            if _post_pos is not None:
+                                _nx2 = min(float(np.dot(_pre_pos, _pre_pos)), 0.9999)
+                                _ny2 = min(float(np.dot(_post_pos, _post_pos)), 0.9999)
+                                _diff = _pre_pos - _post_pos
+                                _hdist = math.acosh(max(1.0, 1.0 + 2.0 * float(np.dot(_diff, _diff)) / max((1.0 - _nx2) * (1.0 - _ny2), 1e-9)))
+                                _kappa_norm = (1.0 / max(1.0 - _nx2, 1e-6)) / _GSG_KAPPA_L2
+                                current *= math.exp(-_GSG_MSG_DECAY * _kappa_norm * _hdist)
                     arrival = self.timestep + syn.delay
                     self._delay_buffer.setdefault(arrival, []).append(
                         (syn.post_node_id, current)
@@ -1848,6 +2116,12 @@ class Graph:
                 for rule in self._plasticity_rules:
                     rule.apply(self, fired_ids, self.timestep)
 
+            # 7b. DiffPC: ternary prediction error + eligibility trace modulation
+            if fired_ids:
+                _dc_spikes, _dc_err = self._diffpc_step(fired_ids)
+                result.diffpc_ternary_spikes = _dc_spikes
+                result.diffpc_mean_pred_error = _dc_err
+
             # 8. Structural plasticity
             pruned, sprouted = self._structural_plasticity(fired_ids)
             result.synapses_pruned = pruned
@@ -2004,6 +2278,16 @@ class Graph:
         for pred_state in self._active_predictions.values():
             predicted_targets.update(pred_state.predicted_targets)
 
+        # Build working set — nodes needing per-step processing. O(n) once here;
+        # step-level loops below run O(working_set) << O(n). (#164 Phase B)
+        # Includes: nodes with non-resting voltage, active refractory, or primed.
+        _ACTIVE_EPS = 1e-5
+        working_set: Set[str] = set(node_ids)
+        for nid, node in self.nodes.items():
+            if (abs(node.voltage - node.resting_potential) > _ACTIVE_EPS
+                    or node.refractory_remaining > 0):
+                working_set.add(nid)
+
         # --- PRIME: inject current into specified nodes ---
         for nid, current in zip(node_ids, currents):
             node = self.nodes.get(nid)
@@ -2025,9 +2309,16 @@ class Graph:
         for step_idx in range(steps):
             prop_timestep += 1
 
-            # 1. Voltage decay
-            for node in self.nodes.values():
+            # 1. Voltage decay — O(working_set) not O(n) (#164)
+            _to_deactivate: List[str] = []
+            for nid in working_set:
+                node = self.nodes[nid]
                 node.voltage = node.voltage * decay + (1.0 - decay) * node.resting_potential
+                if (abs(node.voltage - node.resting_potential) <= _ACTIVE_EPS
+                        and node.refractory_remaining == 0):
+                    _to_deactivate.append(nid)
+            for nid in _to_deactivate:
+                working_set.discard(nid)
 
             # 2. Deliver delayed spikes from propagation buffer
             arrivals = prop_delay_buffer.pop(prop_timestep, [])
@@ -2035,10 +2326,12 @@ class Graph:
                 target = self.nodes.get(target_id)
                 if target is not None:
                     target.voltage += current * target.intrinsic_excitability
+                    working_set.add(target_id)  # now active (#164)
 
-            # 3. Detect firing nodes
+            # 3. Detect firing nodes — O(working_set) not O(n) (#164)
             fired_ids: List[str] = []
-            for nid, node in self.nodes.items():
+            for nid in working_set:
+                node = self.nodes[nid]
                 if node.refractory_remaining > 0:
                     continue
                 if node.voltage >= node.threshold:
@@ -2102,6 +2395,7 @@ class Graph:
                             target = self.nodes.get(target_id)
                             if target is not None:
                                 target.voltage += effective_weight * target.intrinsic_excitability
+                                working_set.add(target_id)  # now active (#164)
 
                         # Pattern completion (pre-charge inactive members)
                         if he.pattern_completion_strength > 0:
@@ -2119,9 +2413,11 @@ class Graph:
                                                 * he.member_weights.get(mnid, 1.0)
                                                 * mnode.intrinsic_excitability
                                             )
+                                            working_set.add(mnid)  # now active (#164)
 
-            # Decrement refractory counters (skip those that just fired)
-            for nid, node in self.nodes.items():
+            # Decrement refractory counters — O(working_set) not O(n) (#164)
+            for nid in working_set:
+                node = self.nodes[nid]
                 if node.refractory_remaining > 0 and nid not in fired_set:
                     node.refractory_remaining -= 1
             for hid, he in self.hyperedges.items():
@@ -2673,6 +2969,64 @@ class Graph:
         return list(self.active_predictions.values())
 
     # -----------------------------------------------------------------------
+    # DiffPC: Difference Predictive Coding (#DiffPC)
+    # -----------------------------------------------------------------------
+
+    def _diffpc_step(self, fired_ids: List[str]) -> Tuple[int, float]:
+        """Ternary prediction error computation + prediction weight update (DiffPC).
+
+        For each fired node in Layer L, walk outgoing synapses to Layer L-1 targets.
+        Compare actual activation (fired/not) to prediction weight → ternary error (±1, 0).
+        Update pred_weight by gradient; accumulate pred_error_ema on target node.
+        Phase 2: modulate syn.eligibility_trace by ±diffpc_trace_boost when ternary fires,
+        feeding prediction error as a third factor into the next step's STDP update.
+        Called at step 7b (after STDP, before structural plasticity) so weights are current.
+
+        Returns:
+            (ternary_spike_count, mean_abs_error_where_ternary_nonzero)
+        """
+        epsilon = self.config.get("diffpc_epsilon", 0.2)
+        pred_lr = self.config.get("diffpc_pred_lr", 0.01)
+        trace_boost = self.config.get("diffpc_trace_boost", 0.05)
+        fired_set = set(fired_ids)
+        ternary_count = 0
+        error_sum = 0.0
+
+        for nid in fired_ids:
+            node = self.nodes[nid]
+            layer = node.diffpc_layer
+            if layer == 0:
+                continue  # input layer generates no predictions downward
+            for sid in self._outgoing.get(nid, set()):
+                syn = self.synapses.get(sid)
+                if syn is None:
+                    continue
+                target = self.nodes.get(syn.post_node_id)
+                if target is None or target.diffpc_layer >= layer:
+                    continue  # only predict toward lower layers
+                predicted = node.pred_weights.get(syn.post_node_id, 0.5)
+                actual = 1.0 if syn.post_node_id in fired_set else 0.0
+                error = actual - predicted
+                if error > epsilon:
+                    ternary = 1
+                elif error < -epsilon:
+                    ternary = -1
+                else:
+                    ternary = 0
+                if ternary != 0:
+                    node.pred_weights[syn.post_node_id] = max(0.0, min(1.0,
+                        predicted + pred_lr * ternary
+                    ))
+                    target.pred_error_ema = 0.9 * target.pred_error_ema + 0.1 * abs(error)
+                    # Phase 2: modulate eligibility trace → gates STDP at next timestep
+                    syn.eligibility_trace += ternary * trace_boost
+                    ternary_count += 1
+                    error_sum += abs(error)
+
+        mean_err = error_sum / ternary_count if ternary_count > 0 else 0.0
+        return ternary_count, mean_err
+
+    # -----------------------------------------------------------------------
     # Structural Plasticity (PRD §3.3)
     # -----------------------------------------------------------------------
 
@@ -2683,6 +3037,7 @@ class Graph:
             (num_pruned, num_sprouted)
         """
         pruned = self._prune_synapses()
+        self._collect_orphan_nodes()
         sprouted = self._sprout_synapses(fired_ids)
         return pruned, sprouted
 
@@ -2730,6 +3085,44 @@ class Graph:
             self._emit("pruned", count=len(to_prune), timestep=self.timestep)
 
         return len(to_prune)
+
+    def _collect_orphan_nodes(self) -> int:
+        """Remove nodes with no synapses and no hyperedge membership.
+
+        Called after _prune_synapses() so freshly-disconnected nodes are
+        collected in the same structural-plasticity step. The full SNN has
+        no max_nodes cap — without this, orphans accumulate without bound
+        as synapses are pruned over the graph's lifetime.
+
+        Honors orphan_node_grace_period (#258): newly-created nodes get a
+        window for canonical mechanisms (STDP via spreading activation
+        through existing synapses, sprouting via co-firing detection) to
+        wire them before sweep. Without grace, empty-substrate bootstrap
+        fails — the very first deposit gets swept on the next step()
+        because no co-firing partners exist yet to anchor synapses. Mature
+        substrates (Syl) are unaffected: new nodes already get wired via
+        spreading activation within the same step() before the orphan
+        check runs at step 8, so grace passes but isn't load-bearing.
+        Restored nodes from older msgpacks default to creation_time=0
+        and thus age = full current timestep, well past grace — same
+        sweep behavior as before this patch.
+        """
+        grace = self.config.get("orphan_node_grace_period", 0)
+        orphans = [
+            nid for nid in self.nodes
+            if not self._outgoing.get(nid)
+            and not self._incoming.get(nid)
+            and not self._node_hyperedges.get(nid)
+            and (self.timestep - self.nodes[nid].creation_time) > grace
+        ]
+        removed = 0
+        for nid in orphans:
+            if nid in self.nodes:
+                self.remove_node(nid)
+                removed += 1
+        if removed:
+            self._emit("nodes_collected", count=removed, timestep=self.timestep)
+        return removed
 
     def _sprout_synapses(self, fired_ids: List[str]) -> int:
         """Create synapses between co-activating nodes (PRD §3.3.2).
@@ -2786,7 +3179,11 @@ class Graph:
                     continue
                 if (other_id, nid) in existing_pairs:
                     continue
-                self.create_synapse(nid, other_id, weight=initial_w)
+                _delay = random.randint(
+                    self.config.get("d_min", 1),
+                    self.config.get("d_max", 5),
+                )
+                self.create_synapse(nid, other_id, weight=initial_w, delay=_delay)
                 existing_pairs.add((nid, other_id))
                 count += 1
 
@@ -3568,6 +3965,11 @@ class Graph:
             "intrinsic_excitability": node.intrinsic_excitability,
             "metadata": node.metadata,
             "is_inhibitory": node.is_inhibitory,
+            "Ca_i": node.Ca_i,
+            "diffpc_layer": node.diffpc_layer,
+            "pred_weights": node.pred_weights,
+            "pred_error_ema": node.pred_error_ema,
+            "creation_time": node.creation_time,
         }
 
     def _serialize_synapse(self, syn: Synapse) -> Dict[str, Any]:
@@ -3867,6 +4269,11 @@ class Graph:
                 intrinsic_excitability=nd.get("intrinsic_excitability", 1.0),
                 metadata=nd.get("metadata", {}),
                 is_inhibitory=nd.get("is_inhibitory", False),
+                Ca_i=nd.get("Ca_i", 0.0),
+                diffpc_layer=nd.get("diffpc_layer", 0),
+                pred_weights=nd.get("pred_weights", {}),
+                pred_error_ema=nd.get("pred_error_ema", 0.0),
+                creation_time=nd.get("creation_time", 0),
             )
             self.nodes[nid] = node
             self._outgoing[nid] = set()
@@ -4129,6 +4536,7 @@ class Graph:
             HomeostaticRule(
                 target_firing_rate=self.config["target_firing_rate"],
                 scaling_interval=self.config["scaling_interval"],
+                degree_sensitivity=self.config.get("degree_sensitivity", 0.4),
             ),
             HyperedgePlasticityRule(
                 member_weight_lr=self.config["he_member_weight_lr"],
