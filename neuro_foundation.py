@@ -47,6 +47,34 @@ Design principles (PRD §2.1):
 #         stamp, orphan check age guard, serializer field, restore default.
 #         Backward-compatible (.get() with default=0). Re-vendored to
 #         NuWave/nuwave/substrate/neuro_foundation.py.
+# [2026-05-29] Claude Code (Sonnet 4.6) — Geometry-informed synaptic delays
+#   What: _sprout_synapses() now computes geodesic distance between pre/post nodes
+#         and scales delay = d_min + round((d_max-d_min)*(1-exp(-_GSG_MSG_DECAY*dist))).
+#         Sphere+sphere: great circle arccos(dot). Hyp+hyp: Poincare geodesic.
+#         Cross-manifold or missing poincare_dir: falls back to random.randint.
+#   Why:  Biologically, synaptic delay = axon travel time (physical distance).
+#         SpSNN (2026) confirms 18x parameter reduction via spatial delay grounding.
+#         Now geometry shapes both propagation strength AND temporal structure.
+#   How:  Same decay constant (_GSG_MSG_DECAY=0.15) as Phase 3 propagation —
+#         geodesic distance that attenuates a spike's current also lengthens travel.
+# [2026-05-28] Claude Code (Sonnet 4.6) — GSG Phase 4: spherical manifold for attractor nodes
+#   What: Added manifold_type field to Node ("hyperbolic"/"spherical"). Constants:
+#         _GSG_MSG_DECAY_SPHER. Config key gsg_spherical_fraction (default 0.20).
+#         HomeostaticRule._refresh_degree_targets() assigns manifold_type via two-pass:
+#         (1) candidates with abs(pred_error_ema) <= 20th-percentile threshold;
+#         (2) co-confirmed only if at least one synapse neighbor is also a candidate
+#         (attractor pairs/groups labeled together; isolated quiescent nodes stay hyperbolic).
+#         Step 5 propagation cache refactored to store (pos_array, mtype) tuples:
+#         sphere+sphere synapses → great circle distance arccos(dot); hyp+hyp → existing
+#         Poincaré geodesic (Phase 3 unchanged); cross-manifold → neutral (no modulation).
+#         Serialization: manifold_type saved/loaded with backward-compat "hyperbolic" default.
+#   Why:  Source GSG paper specifies S×E×H mixed-curvature manifolds. H only = incomplete.
+#         Attractor dynamics are cyclical (closed loops), not hierarchical — spherical geometry
+#         handles cyclical topology naturally. pred_error_ema (DiffPC Phase 2) identifies
+#         stable attractor participants. Co-assignment ensures relational labeling of pairs.
+#   How:  Spherical pos = poincare_dir (already unit-normalized, lives on unit sphere).
+#         Great circle dist = arccos(clamp(dot(a,b), -1+ε, 1-ε)) — simpler than hyperbolic,
+#         no boundary singularity. Co-confirm via graph._outgoing/_incoming synapse scan.
 # [2026-05-26] Claude Code (Sonnet 4.6) — GSG Phase 3: non-Euclidean message passing
 #   What: Added _GSG_LAYER_NORMS_NF, _GSG_KAPPA_L2, _GSG_MSG_DECAY constants. Step 5
 #         propagation loop now maintains a per-step _gsg_pos_cache (list→ndarray once
@@ -450,6 +478,7 @@ class Node:
     diffpc_layer: int = 0                           # DiffPC layer: 0=novel/input, 1=mid, 2=hub
     pred_weights: Dict[str, float] = field(default_factory=dict)  # nid → prediction weight
     pred_error_ema: float = 0.0                     # EMA of ternary prediction error received
+    manifold_type: str = "hyperbolic"                # GSG Phase 4: "hyperbolic"=hierarchical, "spherical"=attractor
     creation_time: int = 0                          # Timestep when node was created (#258 orphan grace)
 
 
@@ -814,6 +843,7 @@ _GSG_LAYER_NORMS_NF: List[float] = [0.70, 0.50, 0.30]  # L0/L1/L2 Poincaré ball
 # κ(L2) = 1/(1-0.30²) ≈ 1.099 — hub baseline for curvature normalization
 _GSG_KAPPA_L2: float = 1.0 / (1.0 - 0.30 ** 2)
 _GSG_MSG_DECAY: float = 0.15  # geodesic decay rate; 0.0=Euclidean, 0.15=gentle; tunable
+_GSG_MSG_DECAY_SPHER: float = 0.15  # great circle decay for sphere+sphere synapses
 
 
 class STDPRule(PlasticityRule):
@@ -1021,6 +1051,36 @@ class HomeostaticRule(PlasticityRule):
                 if node is not None:
                     node.diffpc_layer = 0 if deg <= p33 else (1 if deg <= p67 else 2)
 
+        # GSG Phase 4: assign manifold_type -- attractor nodes (stable predictors)
+        # co-confirmed spherical. Two-pass: individual candidates by pred_error_ema
+        # percentile, then co-confirm each candidate requires a candidate neighbor.
+        _spher_frac = graph.config.get("gsg_spherical_fraction", 0.20)
+        _ema_items = [(nid, abs(nd.pred_error_ema))
+                      for nid, nd in graph.nodes.items() if nd is not None]
+        if _ema_items:
+            _sorted_emas = sorted(v for _, v in _ema_items)
+            _n_ema = len(_sorted_emas)
+            _cutoff_idx = max(0, min(int(_n_ema * _spher_frac), _n_ema - 1))
+            _ema_thresh = _sorted_emas[_cutoff_idx]
+            _candidates: Set[str] = {nid for nid, v in _ema_items if v <= _ema_thresh}
+            for nid, node in graph.nodes.items():
+                if node is None:
+                    continue
+                if nid in _candidates:
+                    _syn_ids = (graph._outgoing.get(nid, set())
+                                | graph._incoming.get(nid, set()))
+                    _nbr_nids: Set[str] = set()
+                    for _sid in _syn_ids:
+                        _syn = graph.synapses.get(_sid)
+                        if _syn:
+                            _nbr_nids.add(_syn.post_node_id)
+                            _nbr_nids.add(_syn.pre_node_id)
+                    _nbr_nids.discard(nid)
+                    node.manifold_type = ("spherical"
+                                          if (_candidates & _nbr_nids) else "hyperbolic")
+                else:
+                    node.manifold_type = "hyperbolic"
+
     def apply(
         self,
         graph: "Graph",
@@ -1195,7 +1255,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "d_min": 1,         # minimum synaptic delay in timesteps
     "d_max": 5,         # maximum synaptic delay in timesteps (range enables polychrony)
     # DiffPC: Difference Predictive Coding (#DiffPC)
-    "diffpc_epsilon": 0.2,       # ternary threshold: |error| > epsilon → ±1 spike, else 0
+    "diffpc_epsilon": 0.2,
+    "gsg_spherical_fraction": 0.20,  # fraction of nodes assigned spherical manifold (Phase 4)
     "diffpc_pred_lr": 0.01,      # prediction weight learning rate
     "diffpc_trace_boost": 0.05,  # eligibility trace ±boost per ternary spike (Phase 2)
     "weight_threshold": 0.01,
@@ -1864,20 +1925,30 @@ class Graph:
             result.fired_node_ids = fired_ids
 
             # 5. Propagate spikes through outgoing synapses (with delay)
-            # GSG Phase 3: per-step Poincaré position cache (list→ndarray once per node)
-            _gsg_pos_cache: Dict[str, Any] = {}
+            # GSG Phase 3+4: per-step cache — (pos_array, manifold_type) or None per node.
+            # sphere+sphere -> great circle arccos; hyp+hyp -> Poincare geodesic; cross -> neutral
+            _gsg_cache: Dict[str, Any] = {}
+
+            def _gsg_resolve(nid_: str, nd_: Any) -> None:
+                if nid_ in _gsg_cache:
+                    return
+                _pd = (nd_.metadata or {}).get("poincare_dir")
+                if _pd is None:
+                    _gsg_cache[nid_] = None
+                    return
+                _arr = np.array(_pd, dtype=np.float32)
+                _mt = getattr(nd_, "manifold_type", "hyperbolic")
+                if _mt == "spherical":
+                    _gsg_cache[nid_] = (_arr, "spherical")  # unit dir IS sphere pos
+                else:
+                    _l_ = max(0, min(2, getattr(nd_, "diffpc_layer", 2)))
+                    _gsg_cache[nid_] = (_arr * _GSG_LAYER_NORMS_NF[_l_], "hyperbolic")
+
             for nid in fired_ids:
                 node = self.nodes[nid]
                 sign = -1.0 if node.is_inhibitory else 1.0
-                # GSG Phase 3: resolve pre-node position on Poincaré ball (cached this step)
-                if nid not in _gsg_pos_cache:
-                    _pdir = (node.metadata or {}).get("poincare_dir")
-                    if _pdir is not None:
-                        _l = max(0, min(2, getattr(node, "diffpc_layer", 2)))
-                        _gsg_pos_cache[nid] = np.array(_pdir, dtype=np.float32) * _GSG_LAYER_NORMS_NF[_l]
-                    else:
-                        _gsg_pos_cache[nid] = None
-                _pre_pos = _gsg_pos_cache[nid]
+                _gsg_resolve(nid, node)
+                _pre_entry = _gsg_cache[nid]
                 for syn_id in self._outgoing.get(nid, set()):
                     syn = self.synapses.get(syn_id)
                     if syn is None:
@@ -1887,25 +1958,31 @@ class Graph:
                     if syn.synapse_type == SynapseType.INHIBITORY:
                         effective_type_sign = -1.0
                     current = syn.weight * effective_type_sign
-                    # GSG Phase 3: modulate by curvature-aware hyperbolic geodesic proximity
-                    if _pre_pos is not None:
+                    # GSG Phase 3+4: manifold-aware propagation attenuation
+                    if _pre_entry is not None:
                         _post_node = self.nodes.get(syn.post_node_id)
                         if _post_node is not None:
-                            if syn.post_node_id not in _gsg_pos_cache:
-                                _pdir2 = (_post_node.metadata or {}).get("poincare_dir")
-                                if _pdir2 is not None:
-                                    _l2 = max(0, min(2, getattr(_post_node, "diffpc_layer", 2)))
-                                    _gsg_pos_cache[syn.post_node_id] = np.array(_pdir2, dtype=np.float32) * _GSG_LAYER_NORMS_NF[_l2]
-                                else:
-                                    _gsg_pos_cache[syn.post_node_id] = None
-                            _post_pos = _gsg_pos_cache[syn.post_node_id]
-                            if _post_pos is not None:
-                                _nx2 = min(float(np.dot(_pre_pos, _pre_pos)), 0.9999)
-                                _ny2 = min(float(np.dot(_post_pos, _post_pos)), 0.9999)
-                                _diff = _pre_pos - _post_pos
-                                _hdist = math.acosh(max(1.0, 1.0 + 2.0 * float(np.dot(_diff, _diff)) / max((1.0 - _nx2) * (1.0 - _ny2), 1e-9)))
-                                _kappa_norm = (1.0 / max(1.0 - _nx2, 1e-6)) / _GSG_KAPPA_L2
-                                current *= math.exp(-_GSG_MSG_DECAY * _kappa_norm * _hdist)
+                            _gsg_resolve(syn.post_node_id, _post_node)
+                            _post_entry = _gsg_cache[syn.post_node_id]
+                            if _post_entry is not None:
+                                _pre_pos, _pre_mt = _pre_entry
+                                _post_pos, _post_mt = _post_entry
+                                if _pre_mt == "spherical" and _post_mt == "spherical":
+                                    # Great circle distance on unit sphere
+                                    _cos = max(-1.0 + 1e-7, min(1.0 - 1e-7,
+                                               float(np.dot(_pre_pos, _post_pos))))
+                                    current *= math.exp(-_GSG_MSG_DECAY_SPHER * math.acos(_cos))
+                                elif _pre_mt == "hyperbolic" and _post_mt == "hyperbolic":
+                                    # Curvature-aware Poincare geodesic (Phase 3)
+                                    _nx2 = min(float(np.dot(_pre_pos, _pre_pos)), 0.9999)
+                                    _ny2 = min(float(np.dot(_post_pos, _post_pos)), 0.9999)
+                                    _diff = _pre_pos - _post_pos
+                                    _hdist = math.acosh(max(1.0, 1.0 + 2.0 *
+                                        float(np.dot(_diff, _diff)) /
+                                        max((1.0 - _nx2) * (1.0 - _ny2), 1e-9)))
+                                    _kappa_norm = (1.0 / max(1.0 - _nx2, 1e-6)) / _GSG_KAPPA_L2
+                                    current *= math.exp(-_GSG_MSG_DECAY * _kappa_norm * _hdist)
+                                # cross-manifold: no modulation (neutral ground)
                     arrival = self.timestep + syn.delay
                     self._delay_buffer.setdefault(arrival, []).append(
                         (syn.post_node_id, current)
@@ -3179,10 +3256,39 @@ class Graph:
                     continue
                 if (other_id, nid) in existing_pairs:
                     continue
-                _delay = random.randint(
-                    self.config.get("d_min", 1),
-                    self.config.get("d_max", 5),
-                )
+                _d_min = self.config.get("d_min", 1)
+                _d_max = self.config.get("d_max", 5)
+                _delay = random.randint(_d_min, _d_max)  # fallback
+                # GSG: geometry-informed delay — geodesic distance → travel time
+                _pn = self.nodes.get(nid)
+                _on = self.nodes.get(other_id)
+                if _pn and _on:
+                    _pd1 = (_pn.metadata or {}).get("poincare_dir")
+                    _pd2 = (_on.metadata or {}).get("poincare_dir")
+                    if _pd1 and _pd2:
+                        _a = np.array(_pd1, dtype=np.float32)
+                        _b = np.array(_pd2, dtype=np.float32)
+                        _mt1 = getattr(_pn, "manifold_type", "hyperbolic")
+                        _mt2 = getattr(_on, "manifold_type", "hyperbolic")
+                        _gdist = None
+                        if _mt1 == "spherical" and _mt2 == "spherical":
+                            _cos = max(-1.0+1e-7, min(1.0-1e-7, float(np.dot(_a, _b))))
+                            _gdist = math.acos(_cos)
+                        elif _mt1 == "hyperbolic" and _mt2 == "hyperbolic":
+                            _l1 = max(0, min(2, getattr(_pn, "diffpc_layer", 2)))
+                            _l2 = max(0, min(2, getattr(_on, "diffpc_layer", 2)))
+                            _pa = _a * _GSG_LAYER_NORMS_NF[_l1]
+                            _pb = _b * _GSG_LAYER_NORMS_NF[_l2]
+                            _nx2 = min(float(np.dot(_pa, _pa)), 0.9999)
+                            _ny2 = min(float(np.dot(_pb, _pb)), 0.9999)
+                            _dv = _pa - _pb
+                            _gdist = math.acosh(max(1.0, 1.0 + 2.0 *
+                                float(np.dot(_dv, _dv)) /
+                                max((1.0 - _nx2) * (1.0 - _ny2), 1e-9)))
+                        if _gdist is not None:
+                            _t = 1.0 - math.exp(-_GSG_MSG_DECAY * _gdist)
+                            _delay = max(_d_min, min(_d_max,
+                                         round(_d_min + (_d_max - _d_min) * _t)))
                 self.create_synapse(nid, other_id, weight=initial_w, delay=_delay)
                 existing_pairs.add((nid, other_id))
                 count += 1
@@ -3969,6 +4075,7 @@ class Graph:
             "diffpc_layer": node.diffpc_layer,
             "pred_weights": node.pred_weights,
             "pred_error_ema": node.pred_error_ema,
+            "manifold_type": node.manifold_type,
             "creation_time": node.creation_time,
         }
 
@@ -4273,6 +4380,7 @@ class Graph:
                 diffpc_layer=nd.get("diffpc_layer", 0),
                 pred_weights=nd.get("pred_weights", {}),
                 pred_error_ema=nd.get("pred_error_ema", 0.0),
+                manifold_type=nd.get("manifold_type", "hyperbolic"),
                 creation_time=nd.get("creation_time", 0),
             )
             self.nodes[nid] = node
