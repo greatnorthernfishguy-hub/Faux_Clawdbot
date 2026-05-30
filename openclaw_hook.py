@@ -1,4 +1,16 @@
 # ---- Changelog ----
+# [2026-05-30] Claude Code (Sonnet 4.6) — Transplant _harvest_associations() + surprise-weighted surfacing
+#   What: Added _harvest_associations() — full SNN spreading activation harvest with GSG-aware geodesic
+#         routing (spherical arccos for attractor nodes, Poincaré for hyperbolic), surprise-weighted
+#         parameter scaling via _substrate_novelty_ema (EMA α=0.1 of predictions_surprised/total).
+#         recall() now delegates to _harvest_associations() instead of plain ingestor.query_similar().
+#         on_message() harvests auto-knowledge associations after ingest + updates novelty EMA after step.
+#   Why:  FC was discarding the most valuable part of the live SNN: topology-traversal recall.
+#         _harvest_associations() didn't exist when FC was built — omission, not design choice.
+#         With neuro_foundation.py now carrying full GSG (manifold_type, prime_and_propagate), FC
+#         has everything needed to support it.
+#   How:  _harvest_associations() verbatim from NeuroGraph canonical openclaw_hook.py (c32cc9e).
+#         Novelty EMA update lives in on_message() (FC has no neurograph_rpc.py to own it).
 # [2026-04-26] Codemine (BLK-FC-215) — Three targeted bug fixes
 # What: (A) on_message() wraps ingestor.ingest() in try/except; result=None on failure; return dict gated.
 #        (B) graph.config.update(snn_config) re-applied after restore() so checkpoint cannot overwrite code defaults.
@@ -168,6 +180,7 @@ class NeuroGraphMemory:
 
         self._message_count = 0
         self.auto_save_interval = 10
+        self._substrate_novelty_ema: float = 0.5  # MMN EMA for surprise-weighted surfacing (#255)
 
         # --- The Tonic: Latent Thread + Engine ---
         # Keeps the substrate alive between spec executions via continuous
@@ -248,8 +261,19 @@ class NeuroGraphMemory:
                 logger.warning("Ingest error: %s", exc)
                 result = None
 
+            # Auto-knowledge: spreading activation harvest before step (success path only)
+            surfaced: List[Dict[str, Any]] = []
+            if result is not None and self.graph.config.get("auto_knowledge_enabled", True) and self.vector_db.count() > 0:
+                surfaced = self._harvest_associations(text, set(result.nodes_created))
+
             # Run SNN learning step
             step_result = self.graph.step()
+
+            # Update MMN novelty EMA for surprise-weighted surfacing (#255)
+            _pc_total = getattr(step_result, "predictions_confirmed", 0) + getattr(step_result, "predictions_surprised", 0)
+            if _pc_total > 0:
+                _raw_novelty = getattr(step_result, "predictions_surprised", 0) / _pc_total
+                self._substrate_novelty_ema = 0.9 * self._substrate_novelty_ema + 0.1 * _raw_novelty
 
             # Update novelty probation for ingested nodes
             graduated = self.ingestor.update_probation()
@@ -278,22 +302,114 @@ class NeuroGraphMemory:
             "hyperedges_created": len(result.hyperedges_created),
             "chunks": result.chunks_created,
             "fired": len(step_result.fired_node_ids),
+            "surfaced": len(surfaced),
             "graduated": len(graduated),
             "message_count": self._message_count,
         }
 
     def recall(self, query: str, k: int = 5, threshold: float = 0.5) -> List[Dict[str, Any]]:
-        """Semantic similarity search over ingested knowledge.
+        """Semantic + SNN spreading activation recall.
 
         Args:
             query: Text to search for.
             k: Maximum results to return.
-            threshold: Minimum similarity score (0-1).
+            threshold: Minimum similarity gate for seed node selection.
 
         Returns:
-            List of dicts with 'content', 'similarity', 'node_id', 'metadata'.
+            List of dicts with 'content', 'metadata', 'node_id', 'latency', 'strength'.
         """
-        return self.ingestor.query_similar(query, k=k, threshold=threshold)
+        old_max = self.graph.config.get("max_surfaced", 10)
+        old_thresh = self.graph.config.get("prime_threshold", 0.4)
+        self.graph.config["max_surfaced"] = k
+        self.graph.config["prime_threshold"] = threshold
+        try:
+            return self._harvest_associations(query, novelty=getattr(self, "_substrate_novelty_ema", 0.5))
+        finally:
+            self.graph.config["max_surfaced"] = old_max
+            self.graph.config["prime_threshold"] = old_thresh
+
+    def _harvest_associations(
+        self,
+        text: str,
+        exclude_node_ids: Optional[set] = None,
+        novelty: float = 0.5,
+    ) -> List[Dict[str, Any]]:
+        """Semantic priming + spreading activation harvest with GSG-aware geodesic routing.
+
+        Embeds the input text, finds similar existing nodes via the vector DB,
+        injects current into those nodes, runs N SNN steps, and harvests
+        everything that fires. The result is knowledge the network
+        *associatively connects* with the input — no explicit search needed.
+
+        Returns:
+            List of surfaced knowledge dicts sorted by association strength.
+        """
+        if exclude_node_ids is None:
+            exclude_node_ids = set()
+
+        snn_config = self.graph.config
+        prime_k = snn_config.get("prime_k", 10)
+        prime_threshold = snn_config.get("prime_threshold", 0.4)
+        prime_strength = snn_config.get("prime_strength", 1.0)
+        propagation_steps = snn_config.get("propagation_steps", 3)
+        max_surfaced = snn_config.get("max_surfaced", 10)
+
+        # Surprise-weighted surfacing (#255): scale retrieval aggressiveness by MMN novelty.
+        # novelty ∈ [0,1]; novelty_scale ∈ [-1,+1]. High novelty → cast wider/deeper.
+        ns = (novelty - 0.5) * 2.0  # novelty_scale
+        prime_k = max(5, round(prime_k * (1.0 + ns * 0.5)))
+        prime_threshold = max(0.15, prime_threshold * (1.0 - ns * 0.3))
+        propagation_steps = max(1, round(propagation_steps * (1.0 + ns * 0.4)))
+        max_surfaced = max(5, round(max_surfaced * (1.0 + ns * 0.3)))
+
+        try:
+            query_vec = self.ingestor.embedder.embed_text(text)
+            similar = self.vector_db.search(
+                query_vec, k=prime_k, threshold=prime_threshold
+            )
+
+            prime_ids = []
+            prime_currents = []
+            for entry_id, sim_score in similar:
+                if entry_id not in exclude_node_ids:
+                    prime_ids.append(entry_id)
+                    prime_currents.append(sim_score * prime_strength)
+
+            if not prime_ids:
+                return []
+
+            propagation = self.graph.prime_and_propagate(
+                node_ids=prime_ids,
+                currents=prime_currents,
+                steps=propagation_steps,
+            )
+
+            surfaced = []
+            seen = set()
+            for entry in propagation.fired_entries:
+                if entry.node_id in exclude_node_ids:
+                    continue
+                if entry.node_id in seen:
+                    continue
+                seen.add(entry.node_id)
+
+                db_entry = self.vector_db.get(entry.node_id)
+                if db_entry is not None:
+                    surfaced.append({
+                        "node_id": entry.node_id,
+                        "content": db_entry.get("content", ""),
+                        "metadata": db_entry.get("metadata", {}),
+                        "latency": entry.firing_step,
+                        "strength": entry.voltage_at_fire,
+                        "was_predicted": entry.was_predicted,
+                    })
+
+            surfaced.sort(key=lambda x: (x["latency"], -x["strength"]))
+            return surfaced[:max_surfaced]
+
+        except Exception as exc:
+            logger.debug("Auto-knowledge harvest failed: %s", exc)
+            return []
 
     def step(self, n: int = 1) -> List[Any]:
         """Run N SNN learning steps without ingestion."""
