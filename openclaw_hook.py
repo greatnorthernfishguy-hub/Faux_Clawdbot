@@ -1,4 +1,25 @@
 # ---- Changelog ----
+# [2026-07-05] Claude Code (Sonnet 5) — Torn-read fix + grace_period fix + CES wiring
+# What: (1) _wait_for_stable_checkpoint() ported from canonical, wired into both restore
+#       call sites (main.msgpack, vector_db.npz) — closes the same torn-read-during-
+#       autosave bug that caused real checkpoint collapses on the VPS and laptop CC-NG
+#       instances. (2) grace_period 500->5000, porting Syl's 2026-06-25 fix (never
+#       applied here). (3) CES (StreamParser, ActivationPersistence, SurfacingMonitor,
+#       CESMonitor) added as a new, additive block — was entirely absent (not staleness;
+#       never wired into the original build, same "Syl-specific, not needed" mistake
+#       named in docs/concepts/NeuroGraph Is a Mind, Not a Database.md). Feed/after_step
+#       wired into on_message(); save/restore wired into save()/__init__(). Dashboard
+#       stays opt-in (NEUROGRAPH_CES_DASHBOARD unset here) so it never binds a port on
+#       the HF Space.
+# Why:  All three are core substrate-safety/completeness fixes, not Codemine-specific
+#       feature work — same class of gap this file's own changelog history already
+#       treats seriously (see 2026-05-30 entry: "omission, not design choice").
+# How:  Surgical, additive only. Every existing Codemine-specific adaptation preserved
+#       verbatim: .npz vector format, ~/.openclaw/neurograph internal default (dead code
+#       in the real path — verified via app.py -> worker_ng.py -> NEUROGRAPH_WORKSPACE_DIR
+#       env var, real value is /data/neurograph_worker on the HF Space), heuristic-only
+#       Tonic (no River, no BrainSwitcher), all three existing BLK-FC-215 bug fixes.
+#       Nothing removed, nothing replaced.
 # [2026-05-30] Claude Code (Sonnet 4.6) — Transplant _harvest_associations() + surprise-weighted surfacing
 #   What: Added _harvest_associations() — full SNN spreading activation harvest with GSG-aware geodesic
 #         routing (spherical arccos for attractor nodes, Poincaré for hyperbolic), surprise-weighted
@@ -78,7 +99,10 @@ OPENCLAW_SNN_CONFIG = {
     "scaling_interval": 25,        # v0.4.1: lowered from 100 — homeostatic scaling fires more often
     "threshold_ceiling": 5.0,      # v0.4.1: prevents runaway threshold growth
     "weight_threshold": 0.01,
-    "grace_period": 500,
+    "grace_period": 5000,  # [2026-07-05] 500->5000, porting Syl's 2026-06-25 fix (openclaw_hook.py
+                            # OPENCLAW_SNN_CONFIG canonical) — age-cull was reaping connections in
+                            # ~17min of graph-time before they could double their weight, starving
+                            # the graph. Same bug, never ported to Codemine's config until now.
     "inactivity_threshold": 1000,
     "co_activation_window": 5,
     "initial_sprouting_weight": 0.1,
@@ -107,6 +131,37 @@ OPENCLAW_SNN_CONFIG = {
     "he_consolidation_overlap": 0.8,
     "he_experience_threshold": 100,
 }
+
+
+def _wait_for_stable_checkpoint(path: str, max_wait: float = 10.0, check_interval: float = 0.5) -> bool:
+    """Poll a checkpoint file's size until it stops changing.
+
+    Returns True once two consecutive size reads agree (write complete, or
+    file untouched during the poll window). Returns False if the file never
+    stabilizes within max_wait — caller must NOT read it in that case; a
+    file that's still growing/shrinking is mid-write, and reading it now
+    risks a torn deserialization that then gets silently treated as an
+    empty checkpoint. Ported from NeuroGraph canonical (2026-07-03) after
+    the same class of bug caused real checkpoint collapses on the VPS and
+    laptop CC-NG instances. Missing file is not instability — returns True
+    immediately (existing exists() checks at call sites handle that case).
+    """
+    if not os.path.exists(path):
+        return True
+    deadline = time.time() + max_wait
+    last_size = -1
+    while time.time() < deadline:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            time.sleep(check_interval)
+            continue
+        if size == last_size:
+            return True
+        last_size = size
+        time.sleep(check_interval)
+    logger.warning('%s did not stabilize within %.1fs — likely mid-write, skipping restore', path, max_wait)
+    return False
 
 
 class NeuroGraphMemory:
@@ -147,7 +202,12 @@ class NeuroGraphMemory:
             self.graph._concurrent_lock = threading.RLock()
 
         # Restore from checkpoint if one exists
-        if self._checkpoint_path.exists():
+        if self._checkpoint_path.exists() and not _wait_for_stable_checkpoint(str(self._checkpoint_path)):
+            logger.warning(
+                "Checkpoint %s mid-write — skipping restore this init (graph starts empty)",
+                self._checkpoint_path,
+            )
+        elif self._checkpoint_path.exists():
             try:
                 self.graph.restore(str(self._checkpoint_path))
                 logger.info(
@@ -162,7 +222,12 @@ class NeuroGraphMemory:
 
         # Vector DB for semantic search
         self.vector_db = SimpleVectorDB()
-        if self._vector_db_path.exists():
+        if self._vector_db_path.exists() and not _wait_for_stable_checkpoint(str(self._vector_db_path)):
+            logger.warning(
+                "Vector DB %s mid-write — skipping restore this init (vdb starts empty)",
+                self._vector_db_path,
+            )
+        elif self._vector_db_path.exists():
             try:
                 self.vector_db.load(str(self._vector_db_path))
                 logger.info(
@@ -181,6 +246,58 @@ class NeuroGraphMemory:
         self._message_count = 0
         self.auto_save_interval = 10
         self._substrate_novelty_ema: float = 0.5  # MMN EMA for surprise-weighted surfacing (#255)
+
+        # --- CES: Cognitive Enhancement Suite ---
+        # Ported from NeuroGraph canonical (2026-07-05) — was entirely absent from this
+        # file (not staleness; the original build never wired it in). StreamParser
+        # (real-time attention pre-activation), ActivationPersistence (cross-session
+        # voltage continuity — directly relevant here since Codemine already backs up
+        # NG state every N saves specifically to persist across separate spec runs;
+        # without this the substrate still starts voltage-cold each run despite that),
+        # SurfacingMonitor (associative recall without explicit search), and CESMonitor
+        # (health context string; HTTP dashboard stays opt-in via NEUROGRAPH_CES_DASHBOARD,
+        # unset here so it never binds a port on the HF Space). None of this is
+        # OpenClaw/Syl-specific — constructors take explicit graph/vector_db/config,
+        # no global state, same shape as the Tonic wiring already in this file.
+        self._ces_config = None
+        self._stream_parser = None
+        self._activation_persistence = None
+        self._surfacing_monitor = None
+        self._ces_monitor = None
+
+        ces_conf = (config or {}).get("ces", {})
+        if ces_conf.get("enabled", True):
+            try:
+                from ces_config import load_ces_config
+                from stream_parser import StreamParser
+                from activation_persistence import ActivationPersistence
+                from surfacing import SurfacingMonitor
+                from ces_monitoring import CESMonitor
+
+                self._ces_config = load_ces_config(ces_conf)
+                self._stream_parser = StreamParser(
+                    self.graph,
+                    self.vector_db,
+                    self._ces_config,
+                    fallback_embedder=self.ingestor.embedder.embed_text,
+                )
+                self._activation_persistence = ActivationPersistence(self._ces_config)
+                self._surfacing_monitor = SurfacingMonitor(
+                    self.graph, self.vector_db, self._ces_config
+                )
+                self._ces_monitor = CESMonitor(self, self._ces_config)
+                self._ces_monitor._surfacing_monitor = self._surfacing_monitor
+
+                if self._checkpoint_path.exists():
+                    self._activation_persistence.restore(
+                        self.graph, str(self._checkpoint_path)
+                    )
+
+                if os.environ.get("NEUROGRAPH_CES_DASHBOARD", "0") == "1":
+                    self._ces_monitor.start()
+                logger.info("CES modules initialized")
+            except Exception as exc:
+                logger.info("CES not available: %s", exc)
 
         # --- The Tonic: Latent Thread + Engine ---
         # Keeps the substrate alive between spec executions via continuous
@@ -286,6 +403,16 @@ class NeuroGraphMemory:
                 except Exception as exc:
                     logger.debug("Tonic cycle error: %s", exc)
 
+            # CES: feed stream parser (success path only)
+            if self._stream_parser is not None and result is not None:
+                self._stream_parser.feed(text)
+
+            # CES: surfacing monitor — scan fired nodes for relevant concepts
+            ces_surfaced: List[Dict[str, Any]] = []
+            if self._surfacing_monitor is not None:
+                self._surfacing_monitor.after_step(step_result)
+                ces_surfaced = self._surfacing_monitor.get_surfaced()
+
         self._message_count += 1
 
         # Auto-save
@@ -303,6 +430,7 @@ class NeuroGraphMemory:
             "chunks": result.chunks_created,
             "fired": len(step_result.fired_node_ids),
             "surfaced": len(surfaced),
+            "ces_surfaced": ces_surfaced,
             "graduated": len(graduated),
             "message_count": self._message_count,
         }
@@ -421,6 +549,12 @@ class NeuroGraphMemory:
     def save(self) -> str:
         """Save graph state to checkpoint. Returns the checkpoint path."""
         self.graph.checkpoint(str(self._checkpoint_path), mode=CheckpointMode.FULL)
+        # CES: save activation sidecar alongside checkpoint (restore side is in __init__)
+        if self._activation_persistence is not None:
+            try:
+                self._activation_persistence.save(self.graph, str(self._checkpoint_path))
+            except Exception as exc:
+                logger.warning("Activation sidecar save failed (non-fatal): %s", exc)
         try:
             self.vector_db.save(str(self._vector_db_path))
         except Exception as exc:
