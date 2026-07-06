@@ -1,4 +1,17 @@
 # ---- Changelog ----
+# [2026-07-06] Weft (TQB) — Wire pattern-completion recall filter/compose into _recall()
+# What: _recall() now runs Graph.recall() output through filter_recall_results(), then
+#       prepends a synthetic dict entry carrying SurfacingMonitor's recency text (via
+#       surfacing_context(self.ng, [])) ahead of the filtered pattern-completion list.
+# Why: PRD §2-4 (2026-07-06-codemine-pattern-completion-recall) — recency-first,
+#      pattern-completion-second composition, same rule as the other two call sites.
+#      Return type stays list[dict] — persona_client._format_graph_context and
+#      risk_authority._graph_recall_density (out of this PRD's file scope) both iterate
+#      this list downstream and expect dicts with a "content" key.
+# How: worker_ng.filter_recall_results/surfacing_context (sub-step 1, unchanged here).
+#      No gate_repeat_recall here — PRD only gates the per-tool-call site (app.py
+#      execute_tool()), not this per-mission-iteration site. Local import matches this
+#      file's existing convention (see _ingest_iteration()'s local worker_ng import).
 # [2026-04-07] Josh + Claude — Chain of command orchestrator (Phase 6)
 # What: The full loop — intent → spec → execute → evaluate → iterate/done
 # Why: "Say go and walk away." This is the top-level entry point.
@@ -395,9 +408,30 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _recall(self, query: str, k: int = 5) -> list:
-        """Recall relevant context from the Graph."""
+        """Recall relevant context from the Graph.
+
+        Filtered through substrate-first content resolution. SurfacingMonitor's
+        recency signal is prepended as a synthetic entry ahead of the filtered
+        pattern-completion results (recency first, per PRD composition rule) —
+        the return type stays list[dict] because persona_client._format_graph_context
+        and risk_authority._graph_recall_density both iterate this list downstream
+        and are out of this PRD's file scope.
+        """
+        from worker_ng import filter_recall_results, surfacing_context
         try:
-            return self.ng.recall(query, k=k, threshold=0.35)
+            raw = self.ng.recall(query, k=k, threshold=0.35)
+            filtered = filter_recall_results(self.ng, raw)
+            recency_text = surfacing_context(self.ng, [])
+            if recency_text:
+                filtered = [{
+                    "node_id": None,
+                    "content": recency_text,
+                    "metadata": {},
+                    "latency": -1,
+                    "strength": 0.0,
+                    "was_predicted": False,
+                }] + filtered
+            return filtered
         except Exception as e:
             logger.warning("Graph recall failed: %s", e)
             return []

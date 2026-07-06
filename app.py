@@ -1,4 +1,17 @@
 # ---- Changelog ----
+# [2026-07-06] Weft (TQB) — Wire pattern-completion recall filter/compose/gate into call sites
+# What: (1) agent_loop()'s per-turn substrate context now runs .recall() output through
+#       filter_recall_results() + surfacing_context() instead of joining the raw vdb shards.
+#       (2) execute_tool()'s per-tool-call recall is gated per tool+target via
+#       gate_repeat_recall() (module-level _recall_gate_cache) — a repeat touch within the
+#       TTL window skips the filtered-recall pass and falls back to SurfacingMonitor-only
+#       content via surfacing_context(worker_ng, []).
+# Why: PRD §2-4 (2026-07-06-codemine-pattern-completion-recall) — .recall() was surfacing
+#      raw vdb shards (short "tree concept" fragments) instead of her actual lived turns,
+#      and every tool call re-ran the full pattern-completion pass with no dedup.
+# How: worker_ng.filter_recall_results/surfacing_context/gate_repeat_recall (sub-step 1,
+#      unchanged here). Outer except (OSError, ValueError) narrow-catch convention preserved
+#      at both sites — the new helpers already fail soft internally.
 # [2026-04-20] Codemine (BLK-NG-192) — Wire full substrate signal loop into Chat tab
 # What: Replaced single-pass on_message + flat recall with dual-pass ingest +
 #       worker_ng.step() + spreading activation recall + response deposit.
@@ -37,7 +50,7 @@ from policy_engine import check_tool_call, should_gate_for_review
 from model_client import get_client, call_model
 from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
-from worker_ng import get_worker_ng, ingest_tool_result, recall_context
+from worker_ng import get_worker_ng, ingest_tool_result, recall_context, filter_recall_results, surfacing_context, gate_repeat_recall
 from ng_topology_sync import run_sync as _run_ng_topology_sync
 from spec_executor import SpecExecutor
 from orchestrator import Orchestrator
@@ -82,6 +95,7 @@ _ECOSYSTEM_READ_PATHS: list[Path] = [
 ]
 worker_ng = get_worker_ng()          # NG singleton created first — worker owns it
 _run_ng_topology_sync(worker_ng)
+_recall_gate_cache: dict = {}        # per-target TTL dedup for execute_tool()'s recall gate
 ctx = RecursiveContextManager(str(REPO_PATH), ng=worker_ng)  # facade shares the same instance
 client = get_client()
 
@@ -198,9 +212,22 @@ def execute_tool(tool_name: str, args: dict) -> dict:
             "description": f"Staged for review: {tool_name}",
         }
 
-    # Recall past experience from worker substrate
-    context_str = json.dumps(args, default=str)[:500]
-    recalls = recall_context(worker_ng, tool_name, context_str)
+    # Recall past experience from worker substrate — gated per-target: a repeat
+    # touch to the same tool+target within the TTL window skips the full
+    # filtered-recall pass and falls back to SurfacingMonitor-only content.
+    target = args.get("path") or args.get("command") or args.get("query") or args.get("message") or args.get("branch") or ""
+    gate_key = f"{tool_name}:{target}"
+    recall_text = ""
+    try:
+        if gate_repeat_recall(_recall_gate_cache, gate_key, time.time()):
+            context_str = json.dumps(args, default=str)[:500]
+            raw_recalls = recall_context(worker_ng, tool_name, context_str)
+            filtered = filter_recall_results(worker_ng, raw_recalls)
+        else:
+            filtered = []
+        recall_text = surfacing_context(worker_ng, filtered)
+    except (OSError, ValueError) as e:
+        logger.warning("Recall gating/filtering failed: %s", e)
 
     # Execute
     handler = TOOL_REGISTRY.get(tool_name)
@@ -219,8 +246,7 @@ def execute_tool(tool_name: str, args: dict) -> dict:
             result_str = str(result)
 
         # Prepend substrate recall if available — agent sees what it learned before
-        if recalls:
-            recall_text = "\n".join(r.get("content", "")[:200] for r in recalls[:3])
+        if recall_text:
             result_str = f"[Substrate recall for {tool_name}]\n{recall_text}\n\n[Result]\n{result_str}"
 
         # Ingest tool result as raw experience into worker substrate (Law 7)
@@ -394,15 +420,17 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
     except (OSError, ValueError) as e:
         logger.warning("NG ingestion failed: %s", e)
 
-    # Assemble substrate context — spreading activation recall
+    # Assemble substrate context — spreading activation recall, substrate-first
+    # content resolution, composed with SurfacingMonitor's recency signal.
     substrate_context = ""
     try:
         recalls = worker_ng.recall(full_message, k=8, threshold=0.30)
-        if recalls:
-            snippets = "\n---\n".join(r.get("content", "")[:400] for r in recalls[:6])
+        filtered = filter_recall_results(worker_ng, recalls)
+        recall_text = surfacing_context(worker_ng, filtered)
+        if recall_text:
             substrate_context = (
                 "\n\n## Substrate Context (What I have learned and experienced):\n"
-                + snippets + "\n"
+                + recall_text + "\n"
             )
     except (OSError, ValueError) as e:
         logger.warning("NG recall failed: %s", e)

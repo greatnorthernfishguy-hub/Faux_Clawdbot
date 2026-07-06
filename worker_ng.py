@@ -1,4 +1,14 @@
 # ---- Changelog ----
+# [2026-07-06] Weft (TQB) — Pattern-completion recall filter/compose/gate helpers
+# What: filter_recall_results(), surfacing_context(), gate_repeat_recall() added.
+# Why: PRD §2-3 (2026-07-06-codemine-pattern-completion-recall) — .recall() output
+#      needs substrate-first content resolution (not the raw vdb shard), composition
+#      with SurfacingMonitor's recency signal, and a per-target dedup gate for the
+#      per-tool-call recall site. Call sites are wired in a later sub-step.
+# How: filter_recall_results() runs each raw recall() dict through
+#      surface_resolver.resolve_surface_content() against the live graph node.
+#      surfacing_context() joins SurfacingMonitor.format_context() with the filtered
+#      pattern-completion block. gate_repeat_recall() is a pure TTL dedup gate.
 # [2026-04-16] Claude (Sonnet 4.6) — Tonic enabled (heuristic mode)
 # What: tonic.enabled False→True in WORKER_SNN_CONFIG.
 # Why: Gradio process is long-lived — substrate was dormant between spec
@@ -39,6 +49,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openclaw_hook import NeuroGraphMemory
+from surface_resolver import resolve_surface_content
 
 logger = logging.getLogger("worker_ng")
 
@@ -252,6 +263,87 @@ def recall_context(ng: NeuroGraphMemory, tool_name: str, context: str, k: int = 
     from ng_embed import embed
     query = f"{tool_name} {context}"
     return ng.recall(query, k=k, threshold=0.4)
+
+
+# ---------------------------------------------------------------------------
+# Pattern-completion recall: filter / compose / gate
+#
+# The three helpers below turn raw .recall() output into what's actually
+# worth surfacing. See changelog entry [2026-07-06] above for the PRD ref.
+# ---------------------------------------------------------------------------
+
+def filter_recall_results(ng: NeuroGraphMemory, results: list) -> list:
+    """Filter raw .recall() results through substrate-first content resolution.
+
+    Each result dict from NeuroGraphMemory.recall() carries node_id/content/metadata/
+    latency/strength/was_predicted keys (see openclaw_hook.py _harvest_associations()).
+    Looks up the live graph node for its metadata (the vdb shard alone is a fallback,
+    not the source of truth — Law 7 in spirit: prefer the substrate's own record).
+    Drops entries resolve_surface_content() filters out (degenerate fragments, bare
+    stopword shards). Returns a new list of shallow-copied dicts with `content`
+    replaced by the resolved text — all other keys preserved unchanged so downstream
+    consumers (persona_client._format_graph_context, risk_authority._graph_recall_density)
+    keep working against the same shape.
+
+    Fails soft: any exception during resolution for a single result drops that one
+    result (does not raise), matching this file's existing fail-soft convention.
+    """
+    filtered = []
+    for r in results:
+        try:
+            node_id = r.get("node_id")
+            node = ng.graph.nodes.get(node_id) if node_id is not None else None
+            resolved = resolve_surface_content(node, r, allow_ingested=True, max_chars=300)
+            if resolved is None:
+                continue
+            new_r = dict(r)
+            new_r["content"] = resolved
+            filtered.append(new_r)
+        except Exception as exc:
+            logger.debug("filter_recall_results: dropping one result after error: %s", exc)
+            continue
+    return filtered
+
+
+def surfacing_context(ng: NeuroGraphMemory, filtered_results: list) -> str:
+    """Compose SurfacingMonitor's recency signal with filtered pattern-completion recall.
+
+    Recency block first, pattern-completion block second, "\\n\\n"-joined when both
+    are non-empty. Either half may be empty (CES unavailable, or nothing filtered
+    through) — returns "" only if both are empty. Fails soft: a SurfacingMonitor
+    error degrades to pattern-completion-only content, never raises.
+    """
+    recency_block = ""
+    monitor = getattr(ng, "_surfacing_monitor", None)
+    if monitor is not None:
+        try:
+            recency_block = monitor.format_context() or ""
+        except Exception as exc:
+            logger.debug("surfacing_context: SurfacingMonitor.format_context() failed: %s", exc)
+            recency_block = ""
+
+    pattern_block = ""
+    if filtered_results:
+        pattern_block = "\n---\n".join(r.get("content", "") for r in filtered_results if r.get("content"))
+
+    if recency_block and pattern_block:
+        return recency_block + "\n\n" + pattern_block
+    return recency_block or pattern_block
+
+
+def gate_repeat_recall(cache: dict, key: str, now: float, ttl: float = 1800.0) -> bool:
+    """Per-target dedup gate for the per-tool-call recall site. Pure function,
+    no I/O. Returns True (and records `now` in cache[key]) when key has no
+    entry or its entry is older than `ttl` seconds — caller should run the
+    full filtered-recall + SurfacingMonitor pass. Returns False (cache
+    untouched) when the same key was already given a pass within the TTL
+    window — caller should skip straight to SurfacingMonitor-only content.
+    """
+    last = cache.get(key)
+    if last is None or (now - last) > ttl:
+        cache[key] = now
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
