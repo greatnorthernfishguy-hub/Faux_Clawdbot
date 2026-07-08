@@ -1,4 +1,20 @@
 # ---- Changelog ----
+# [2026-07-08] Ratchet (TQB/QB build) — Fix _export() to read the real vdb sidecar format
+# What: _export() loaded checkpoints/vector_db.npz with np.load() as a genuine npz;
+#       the current-era sidecar is JSON (SimpleVectorDB.save() picks format by
+#       extension: .msgpack -> msgpack, else JSON with base64 embeddings), so
+#       np.load() fails on it; hard evidence shows the export never once produced
+#       output since inception (zero codemine_export.jsonl ever created, zero export
+#       commits in docs history). Now loads via SimpleVectorDB.load(), which mirrors
+#       the writer's format branches exactly.
+# Why: PRD 2026-07-06-codemine-ng-topology-sync-checkpoint-fix §2, §7 Task 1 findings
+#      (QB empirical: main.msgpack is pure graph state with no content strings;
+#      content lives in the co-located vector_db.npz sidecar, JSON-formatted).
+# How: Intra-module import of SimpleVectorDB from universal_ingestor (same repo, no
+#      Law-1 issue); contents = non-empty content values. Path check, SHA-256 hashing,
+#      JSONL line format, _MY_EXPORT filename, git commit/push logic, and fail-silent
+#      try/except shape all unchanged. numpy import removed (no remaining uses).
+# -------------------
 # [2026-04-20] Codemine (BLK-NG-194) -- NG topology sync: export + import via docs git repo
 # What: Exports Codemine's vector_db content to docs/ng_topology/codemine_export.jsonl;
 #       imports novel experiences from laptop/vps exports via on_message().
@@ -60,13 +76,15 @@ def _save_seen(workspace_dir: str, hashes: set) -> None:
 
 
 def _export(workspace_dir: str) -> int:
-    import numpy as np
+    from universal_ingestor import SimpleVectorDB
     npz = Path(workspace_dir) / "checkpoints" / "vector_db.npz"
     if not npz.exists():
         logger.info("No vector_db.npz -- export skipped")
         return 0
     try:
-        contents = np.load(npz, allow_pickle=True)["content"].tolist()
+        db = SimpleVectorDB()
+        db.load(str(npz))
+        contents = [c for c in db.content.values() if c]
     except Exception as e:
         logger.warning("vector_db.npz load failed: %s", e)
         return 0
