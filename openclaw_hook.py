@@ -1,4 +1,62 @@
 # ---- Changelog ----
+# [2026-07-08] Meridian (TQB/QB build) — #256 anticipatory pre-activation + GSG surfacing re-score
+# What: (1) _anticipate(): after each on_message() SNN step, walk outgoing
+#       synapses from the just-fired set, score neighbors by accumulated edge
+#       weight, keep top-K with a TTL (instance state: self._primed_nodes).
+#       (2) _harvest_associations(): surfaced items still primed (unexpired)
+#       gain _ANTICIPATE_BONUS on strength; then _gsg_rescore_surfaced() adds
+#       _GSG_SCORE_BONUS/(1+geodesic_dist) for stamped nodes (Poincaré geodesic
+#       for hyperbolic, great-circle for spherical); single re-sort by strength
+#       desc ONLY if a bonus was applied, before [:max_surfaced] truncation —
+#       otherwise the existing (latency, -strength) ordering stands untouched.
+# Why: PRD 2026-07-08-codemine-surfacing-parity §2.4/§7.4 (#256 was never
+#      built in the fork) and §2.5/§7.5 (GSG re-score absent). Retrieval
+#      boundary only — prime_and_propagate, _score_node, STDP and all
+#      learning math untouched.
+# How: _anticipate() is canonical neurograph_rpc.py:2716-2742 verbatim, fork-
+#      adapted per PRD §7.4: primed state on the NeuroGraphMemory singleton
+#      (self._primed_nodes) instead of a module global. _poincare_distance()
+#      and the re-score block are canonical rpc.py:2991-3038 (CC-port shape,
+#      §7.5). Constants copied VERBATIM, source-annotated, test-pinned
+#      (tests/test_anticipate_and_gsg_rescore.py): top-K 15, TTL 120.0s,
+#      bonus 0.25, layer norms (0.70, 0.50, 0.30), GSG bonus 0.30. Every
+#      block independently fail-soft: anticipate, bonus application, and
+#      re-score each degrade to current behavior on error — none can empty
+#      the harvest or break a worker turn.
+# [2026-07-08] Meridian (TQB/QB build) — GSG poincare_dir ingest stamping + backfill
+# What: (1) Module-level _embed_to_poincare_dir() (verbatim shape from canonical
+#       neurograph_rpc.py). (2) on_message() stamps node.metadata["poincare_dir"]
+#       on each id in result.nodes_created after a successful ingest, from the
+#       node's stored vdb embedding (SimpleVectorDB.insert() L2-normalizes on
+#       storage, so stored embeddings ARE unit directions — zero model calls).
+#       (3) _gsg_backfill_poincare_dirs(): one-time idempotent backfill at the
+#       end of __init__ (after graph restore + vdb load) for pre-existing nodes.
+# Why: PRD 2026-07-08-codemine-surfacing-parity §2.3/§7.3 — the fork's
+#      node-creation path never wrote poincare_dir, so shipped GSG Phase 3
+#      (non-Euclidean message passing) and Phase 4 (spherical manifolds) were
+#      permanent no-ops: the #358 audit found zero write sites. poincare_dir is
+#      a geometric projection of the raw embedding, not a label — no LAW 7
+#      classification-before-deposit.
+# How: Both write sites are hook-side (universal_ingestor.py is canonical-synced
+#      and untouched). Each is independently fail-soft: a stamping failure
+#      degrades to current behavior and cannot affect the harvest, the step, or
+#      the return dict. PERSISTENCE CHOICE (PRD §2.3 requires deciding +
+#      documenting): backfill is STAMP-ONLY — NO force-save. Canonical's
+#      backfill force-saves; Codemine deliberately does not, because
+#      on_message() already autosaves every auto_save_interval messages, which
+#      persists stamps on the normal cadence without adding a boot-time full
+#      checkpoint write on a live Space. Tests: tests/test_gsg_stamping.py.
+# [2026-07-08] Meridian (TQB/QB build) — Orphan-seed harvest guard
+# What: _harvest_associations() seed loop now skips vdb hits whose graph node no
+#       longer exists (orphaned by pruning): `entry_id in self.graph.nodes`.
+# Why: PRD 2026-07-08-codemine-surfacing-parity §2.1/§7.1 — a single dead seed ID
+#      entered prime_and_propagate's working set, raised KeyError in its decay
+#      loop, and the harvest's own fail-soft swallowed it at debug level: the
+#      ENTIRE surfacing result for that call silently became []. This is
+#      Codemine's production recall path. Same one-line membership guard
+#      canonical took (openclaw_hook.py, 2026-07-07, commit b2213df).
+# How: Membership guard at the seed boundary — restores graph primacy over raw
+#      vdb hits. Regression test: tests/test_harvest_orphan_seeds.py.
 # [2026-07-05] Claude Code (Sonnet 5) — Torn-read fix + grace_period fix + CES wiring
 # What: (1) _wait_for_stable_checkpoint() ported from canonical, wired into both restore
 #       call sites (main.msgpack, vector_db.npz) — closes the same torn-read-during-
@@ -71,7 +129,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from neuro_foundation import Graph, CheckpointMode
 from universal_ingestor import (
@@ -133,6 +191,18 @@ OPENCLAW_SNN_CONFIG = {
 }
 
 
+# #256 anticipatory pre-activation + GSG surfacing re-score constants — copied
+# VERBATIM from canonical neurograph_rpc.py (_anticipate, rpc.py:2716-2742;
+# GSG assemble block, rpc.py:2991-3038) per PRD
+# 2026-07-08-codemine-surfacing-parity §7.4/§7.5. Do NOT tune — exact values
+# pinned by tests/test_anticipate_and_gsg_rescore.py.
+_ANTICIPATE_TOP_K = 15
+_ANTICIPATE_TTL_S = 120.0
+_ANTICIPATE_BONUS = 0.25
+_GSG_LAYER_NORMS = (0.70, 0.50, 0.30)   # diffpc_layer 0/1/2 -> Poincaré norm
+_GSG_SCORE_BONUS = 0.30
+
+
 def _wait_for_stable_checkpoint(path: str, max_wait: float = 10.0, check_interval: float = 0.5) -> bool:
     """Poll a checkpoint file's size until it stops changing.
 
@@ -162,6 +232,40 @@ def _wait_for_stable_checkpoint(path: str, max_wait: float = 10.0, check_interva
         time.sleep(check_interval)
     logger.warning('%s did not stabilize within %.1fs — likely mid-write, skipping restore', path, max_wait)
     return False
+
+
+def _embed_to_poincare_dir(embedding):
+    """Project a raw embedding to a unit direction for GSG Poincaré placement.
+
+    Verbatim shape from canonical neurograph_rpc.py _embed_to_poincare_dir
+    (CC's identical port is _cc_embed_to_poincare_dir) — PRD
+    2026-07-08-codemine-surfacing-parity §7.3. A geometric projection of the
+    raw embedding, not a label (LAW 7 clean). Returns None for zero-norm
+    input so callers skip stamping rather than storing a degenerate direction.
+    """
+    import numpy as _np
+    v = _np.asarray(embedding, dtype=_np.float32)
+    n = float(_np.linalg.norm(v))
+    if n <= 0:
+        return None
+    return v / n
+
+
+def _poincare_distance(x, y):
+    """Poincaré-ball geodesic distance between two points.
+
+    Verbatim from canonical neurograph_rpc.py's GSG assemble block
+    (rpc.py:2991-3038) — PRD 2026-07-08-codemine-surfacing-parity §7.5.
+    """
+    import numpy as _np
+    import math
+    nx2 = min(float(_np.dot(x, x)), 0.9999)
+    ny2 = min(float(_np.dot(y, y)), 0.9999)
+    diff = x - y
+    num = 2.0 * float(_np.dot(diff, diff))
+    denom = (1.0 - nx2) * (1.0 - ny2)
+    arg = 1.0 + num / max(denom, 1e-9)
+    return math.acosh(max(1.0, arg))
 
 
 class NeuroGraphMemory:
@@ -246,6 +350,10 @@ class NeuroGraphMemory:
         self._message_count = 0
         self.auto_save_interval = 10
         self._substrate_novelty_ema: float = 0.5  # MMN EMA for surprise-weighted surfacing (#255)
+        # #256 anticipatory pre-activation (PRD §2.4/§7.4): node_id ->
+        # (score, expiry). Instance state — the fork owns its singleton, so
+        # canonical's module-global _primed_nodes becomes an instance attr.
+        self._primed_nodes: Dict[str, Tuple[float, float]] = {}
 
         # --- CES: Cognitive Enhancement Suite ---
         # Ported from NeuroGraph canonical (2026-07-05) — was entirely absent from this
@@ -335,6 +443,22 @@ class NeuroGraphMemory:
             except Exception as exc:
                 logger.info("The Tonic not available: %s", exc)
 
+        # --- GSG poincare_dir backfill (PRD §2.3/§7.3) ---
+        # One-time, idempotent, STAMP-ONLY (no force-save — deliberate
+        # persistence choice, see changelog: on_message()'s autosave cadence
+        # persists stamps). Runs after graph restore + vdb load so pre-existing
+        # nodes finally feed GSG Phases 3/4, which shipped inert (zero
+        # poincare_dir write sites — #358 audit). Fail-soft: a backfill
+        # failure degrades to current (unstamped) behavior.
+        try:
+            _stamped = self._gsg_backfill_poincare_dirs()
+            if _stamped:
+                logger.info(
+                    "GSG backfill: stamped poincare_dir on %d existing nodes", _stamped
+                )
+        except Exception as exc:
+            logger.warning("GSG poincare_dir backfill failed (non-fatal): %s", exc)
+
     @classmethod
     def get_instance(
         cls,
@@ -378,6 +502,30 @@ class NeuroGraphMemory:
                 logger.warning("Ingest error: %s", exc)
                 result = None
 
+            # GSG poincare_dir ingest stamping (PRD §2.3/§7.3, success path
+            # only): stamp each node created this message from its stored vdb
+            # embedding — SimpleVectorDB.insert() L2-normalized it on storage,
+            # so it IS the unit direction (zero model calls). Independently
+            # fail-soft: a stamping failure cannot affect the harvest, the
+            # step, or the return dict.
+            if result is not None:
+                try:
+                    for _nid in result.nodes_created:
+                        _node = self.graph.nodes.get(_nid)
+                        if _node is None or (_node.metadata or {}).get("poincare_dir"):
+                            continue
+                        _emb = self.vector_db.embeddings.get(_nid)
+                        if _emb is None:
+                            continue
+                        _dir = _embed_to_poincare_dir(_emb)
+                        if _dir is None:
+                            continue
+                        if _node.metadata is None:
+                            _node.metadata = {}
+                        _node.metadata["poincare_dir"] = _dir.tolist()
+                except Exception as exc:
+                    logger.debug("GSG ingest stamping failed (non-fatal): %s", exc)
+
             # Auto-knowledge: spreading activation harvest before step (success path only)
             surfaced: List[Dict[str, Any]] = []
             if result is not None and self.graph.config.get("auto_knowledge_enabled", True) and self.vector_db.count() > 0:
@@ -385,6 +533,17 @@ class NeuroGraphMemory:
 
             # Run SNN learning step
             step_result = self.graph.step()
+
+            # #256 anticipatory pre-activation (PRD §2.4/§7.4): walk outgoing
+            # synapses from the just-fired set and prime likely-next nodes
+            # (top-K by accumulated edge weight, TTL'd). Independently
+            # fail-soft: on error, degrade to no anticipation — never break
+            # the turn.
+            try:
+                self._anticipate(step_result.fired_node_ids)
+            except Exception as exc:
+                logger.debug("Anticipate failed (non-fatal): %s", exc)
+                self._primed_nodes = {}
 
             # Update MMN novelty EMA for surprise-weighted surfacing (#255)
             _pc_total = getattr(step_result, "predictions_confirmed", 0) + getattr(step_result, "predictions_surprised", 0)
@@ -496,10 +655,16 @@ class NeuroGraphMemory:
                 query_vec, k=prime_k, threshold=prime_threshold
             )
 
+            # Filter out newly created nodes (they ARE the input) and vdb
+            # entries whose graph node no longer exists (orphaned by
+            # pruning) — a single dead seed ID entered prime_and_propagate's
+            # working set, raised KeyError in its decay loop, and silently
+            # killed the ENTIRE harvest (caught below, returned [], logged
+            # at debug only).
             prime_ids = []
             prime_currents = []
             for entry_id, sim_score in similar:
-                if entry_id not in exclude_node_ids:
+                if entry_id not in exclude_node_ids and entry_id in self.graph.nodes:
                     prime_ids.append(entry_id)
                     prime_currents.append(sim_score * prime_strength)
 
@@ -533,11 +698,157 @@ class NeuroGraphMemory:
                     })
 
             surfaced.sort(key=lambda x: (x["latency"], -x["strength"]))
+
+            # --- #256 anticipate bonus (PRD §2.4/§7.4) ---
+            # Surfaced nodes still primed (unexpired) from the last step's
+            # fired-set walk gain _ANTICIPATE_BONUS on strength.
+            # Independently fail-soft: an error here degrades to the
+            # un-bonused list — it must never reach the outer except (which
+            # would empty the whole harvest).
+            _bonus_applied = False
+            try:
+                _primed = getattr(self, "_primed_nodes", None)
+                if _primed:
+                    _now = time.time()
+                    for item in surfaced:
+                        _pentry = _primed.get(item["node_id"])
+                        if _pentry is not None and _now < _pentry[1]:
+                            item["strength"] += _ANTICIPATE_BONUS
+                            _bonus_applied = True
+            except Exception as exc:
+                logger.debug("Anticipate bonus failed (non-fatal): %s", exc)
+
+            # --- GSG surfacing re-score (PRD §2.5/§7.5) ---
+            # Independently fail-soft: any error returns the list un-rescored.
+            try:
+                if self._gsg_rescore_surfaced(surfaced, query_vec):
+                    _bonus_applied = True
+            except Exception as exc:
+                logger.debug("GSG re-score failed (non-fatal): %s", exc)
+
+            # Canonical's shape: single re-sort by strength desc — ONLY if a
+            # bonus actually changed strengths. Otherwise the existing
+            # (latency, -strength) ordering stands untouched.
+            if _bonus_applied:
+                try:
+                    surfaced.sort(key=lambda x: x["strength"], reverse=True)
+                except Exception as exc:
+                    logger.debug("Post-bonus re-sort failed (non-fatal): %s", exc)
+
             return surfaced[:max_surfaced]
 
         except Exception as exc:
             logger.debug("Auto-knowledge harvest failed: %s", exc)
             return []
+
+    def _anticipate(self, fired_node_ids: List[str]) -> None:
+        """#256 anticipatory pre-activation: prime likely-next nodes.
+
+        Walk outgoing synapses from the just-fired set, score non-fired
+        neighbors by accumulated edge weight, keep the top
+        _ANTICIPATE_TOP_K with a _ANTICIPATE_TTL_S expiry. Port of canonical
+        _anticipate() (neurograph_rpc.py:2716-2742) — PRD
+        2026-07-08-codemine-surfacing-parity §2.4/§7.4. Fork adaptation per
+        the PRD: primed state lives on this instance (self._primed_nodes)
+        instead of canonical's module global, so canonical's `_memory is
+        None` guard is unnecessary here; the walk logic and constants are
+        verbatim. Read-only over the graph — no learning math touched.
+        """
+        if not fired_node_ids:
+            self._primed_nodes = {}
+            return
+        fired_set = set(fired_node_ids)
+        candidates: Dict[str, float] = {}
+        for nid in fired_node_ids:
+            for sid in self.graph._outgoing.get(nid, ()):
+                syn = self.graph.synapses.get(sid)
+                if syn is None:
+                    continue
+                target = syn.post_node_id
+                if target not in fired_set and target in self.graph.nodes:
+                    candidates[target] = candidates.get(target, 0.0) + syn.weight
+        top_k = sorted(candidates.items(), key=lambda x: x[1], reverse=True)[:_ANTICIPATE_TOP_K]
+        expiry = time.time() + _ANTICIPATE_TTL_S
+        self._primed_nodes = {nid: (score, expiry) for nid, score in top_k}
+
+    def _gsg_rescore_surfaced(
+        self,
+        surfaced: List[Dict[str, Any]],
+        query_vec: Any,
+    ) -> bool:
+        """Re-score surfaced items by geodesic proximity to the query.
+
+        Canonical's assemble-block shape (neurograph_rpc.py:2991-3038,
+        CC-port) — PRD 2026-07-08-codemine-surfacing-parity §2.5/§7.5.
+        Stamped nodes gain _GSG_SCORE_BONUS/(1+dist): Poincaré geodesic for
+        hyperbolic nodes (layer-normed positions), great-circle for
+        spherical. Unstamped nodes are untouched. Bonuses are computed for
+        ALL items first, then committed — an exception mid-compute leaves
+        every strength untouched (canonical: any exception returns the list
+        un-rescored). Sorting stays with the caller.
+
+        Returns:
+            True if at least one bonus was applied.
+        """
+        import math
+        import numpy as _np
+
+        query_dir = _embed_to_poincare_dir(query_vec)
+        if query_dir is None:
+            return False
+
+        bonuses = []
+        for item in surfaced:
+            node = self.graph.nodes.get(item["node_id"])
+            if node is None:
+                continue
+            pd = (node.metadata or {}).get("poincare_dir")
+            if not pd:
+                continue
+            node_dir = _np.asarray(pd, dtype=_np.float32)
+            layer = max(0, min(2, getattr(node, "diffpc_layer", 0)))
+            mtype = getattr(node, "manifold_type", "hyperbolic")
+            if mtype == "spherical":
+                cos = min(1.0 - 1e-7, max(-1.0 + 1e-7,
+                          float(_np.dot(query_dir, node_dir))))
+                bonus = _GSG_SCORE_BONUS / (1.0 + math.acos(cos))
+            else:
+                node_pt = node_dir * _GSG_LAYER_NORMS[layer]
+                query_pt = query_dir * _GSG_LAYER_NORMS[0]
+                bonus = _GSG_SCORE_BONUS / (1.0 + _poincare_distance(query_pt, node_pt))
+            bonuses.append((item, bonus))
+
+        for item, bonus in bonuses:
+            item["strength"] += bonus
+        return bool(bonuses)
+
+    def _gsg_backfill_poincare_dirs(self) -> int:
+        """Stamp poincare_dir on existing nodes from their stored vdb embeddings.
+
+        Verbatim shape from canonical _gsg_backfill_existing_nodes
+        (neurograph_rpc.py:2683-2713) MINUS its trailing force-save — PRD
+        2026-07-08-codemine-surfacing-parity §2.3/§7.3. Stored embeddings are
+        already L2-normalized (SimpleVectorDB.insert()), so they ARE unit
+        directions — zero model calls. Idempotent: already-stamped nodes are
+        skipped, so a second run stamps 0. STAMP-ONLY: persistence rides
+        on_message()'s normal autosave cadence (documented persistence choice,
+        see changelog).
+
+        Returns:
+            Number of nodes stamped this run.
+        """
+        stamped = 0
+        for node_id, node in list(self.graph.nodes.items()):
+            if (node.metadata or {}).get("poincare_dir"):
+                continue
+            emb = self.vector_db.embeddings.get(node_id)
+            if emb is None:
+                continue
+            if node.metadata is None:
+                node.metadata = {}
+            node.metadata["poincare_dir"] = emb.tolist()
+            stamped += 1
+        return stamped
 
     def step(self, n: int = 1) -> List[Any]:
         """Run N SNN learning steps without ingestion."""
