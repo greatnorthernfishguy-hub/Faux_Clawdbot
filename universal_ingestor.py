@@ -38,6 +38,28 @@ Grok Review Changelog (v0.7.1):
         bounded by max_chunk_tokens.
 
 # ---- Changelog ----
+# [2026-07-08] Tabitha (TQB, Claude Fable 5) — Magic-bytes guard + legacy-npz migration in SimpleVectorDB.load()
+#   What: load() now sniffs the file's first 4 bytes. Zip magic (PK\x03\x04 =
+#         legacy np.savez archive) routes to a migration branch: backup to
+#         <path>.legacy-npz-bak first (idempotent — skipped if bak exists),
+#         np.load(allow_pickle=True), reconstruct entries (str id, L2-normalized
+#         float32 embedding, str content, dict metadata), fully parse BEFORE
+#         clearing/populating live state, log the migration loudly at WARNING,
+#         return entry count. Non-zip files take the existing msgpack/JSON
+#         paths unchanged. Failures propagate; the original file is never
+#         deleted or overwritten.
+#   Why:  PRD "Codemine VDB Legacy-Loader Guard #364" §2 — the real legacy
+#         checkpoint data/neurograph_worker/checkpoints/vector_db.npz is a
+#         genuine np.savez zip; extension-based branching fed it to the JSON
+#         parser and raised, and the swallow-site hid the loss (deploy gate).
+#   How:  Binary 4-byte sniff at top of load(); legacy branch extracts the
+#         empirically confirmed keys ids/embeddings/content/metadata
+#         (1932 entries, 768-dim float32); metadata entries in the real
+#         archive are JSON strings, so str metadata gets a json.loads
+#         attempt before the coerce-to-dict fallback (else all 1932 would
+#         migrate as {}); added import shutil and a class-level _logger
+#         (logging.getLogger("neurograph.vector_db"), same pattern as
+#         EmbeddingEngine._logger).
 # [2026-04-13] Claude (Sonnet 4.6) — Migrate embedding backend from fastembed to ng_embed
 #   What: Replaced _try_load_fastembed() with _try_load_ng_embed(). EmbeddingEngine
 #         now uses ng_embed.NGEmbed singleton (ONNX Runtime, Snowflake arctic-embed-m-v1.5,
@@ -89,6 +111,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import tempfile
 import textwrap
 import uuid
@@ -238,6 +261,8 @@ class SimpleVectorDB:
         results = db.search(np.array([0.1, 0.9, 0.2]), k=5, threshold=0.5)
     """
 
+    _logger = logging.getLogger("neurograph.vector_db")
+
     def __init__(self) -> None:
         self.embeddings: Dict[str, np.ndarray] = {}
         self.metadata: Dict[str, Dict[str, Any]] = {}
@@ -376,13 +401,84 @@ class SimpleVectorDB:
         Clears existing state before loading. Embeddings are restored
         as L2-normalized float32 numpy arrays.
 
+        Files starting with zip magic bytes (``PK\\x03\\x04``) are treated
+        as legacy np.savez archives: backed up to ``<path>.legacy-npz-bak``
+        first, then migrated into live state. The original file is never
+        deleted or overwritten.
+
         Args:
-            path: File path to load from (.msgpack or .json).
+            path: File path to load from (.msgpack or .json; legacy .npz
+                detected by magic bytes regardless of extension).
 
         Returns:
             Number of entries loaded.
         """
         import numpy as np
+
+        # Magic-bytes sniff (PRD "Codemine VDB Legacy-Loader Guard #364" §2):
+        # np.savez archives are zip files; extension-based branching fed them
+        # to the JSON parser and crashed. Sniff first, branch on format.
+        with open(path, "rb") as f:
+            magic = f.read(4)
+
+        if magic == b"PK\x03\x04":
+            # Legacy np.savez archive — migrate. Backup FIRST, before any
+            # parse of the archive. Idempotent: never overwrite an existing bak.
+            bak_path = path + ".legacy-npz-bak"
+            if not os.path.exists(bak_path):
+                shutil.copy2(path, bak_path)
+
+            # Parse fully BEFORE touching live state — a failure here
+            # propagates and leaves existing state untouched.
+            # Local import: the JSON branch below does `import json`, which
+            # makes `json` function-local for this whole scope — the module-
+            # level import is shadowed and unbound here without this.
+            import json
+
+            staged: List[Tuple[str, np.ndarray, str, Dict[str, Any]]] = []
+            with np.load(path, allow_pickle=True) as archive:
+                ids_arr = archive["ids"]
+                embeddings_arr = archive["embeddings"]
+                content_arr = archive["content"]
+                metadata_arr = archive["metadata"]
+                for i in range(len(ids_arr)):
+                    vec = np.asarray(embeddings_arr[i], dtype=np.float32)
+                    norm = np.linalg.norm(vec)
+                    if norm > 0:
+                        vec = vec / norm
+                    meta = metadata_arr[i]
+                    if isinstance(meta, str):
+                        # Empirical: the real legacy archive stores metadata
+                        # as JSON strings (all 1932 entries), not dicts.
+                        # Parse them back; anything unparseable falls through
+                        # to the {} coercion below.
+                        try:
+                            meta = json.loads(meta)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    staged.append((
+                        str(ids_arr[i]),
+                        vec,
+                        str(content_arr[i]),
+                        meta if isinstance(meta, dict) else {},
+                    ))
+
+            # Clear existing state, then populate
+            self.embeddings.clear()
+            self.content.clear()
+            self.metadata.clear()
+            for entry_id, vec, entry_content, entry_meta in staged:
+                self.embeddings[entry_id] = vec
+                self.content[entry_id] = entry_content
+                self.metadata[entry_id] = entry_meta
+
+            self._logger.warning(
+                "LEGACY NPZ MIGRATION: %s was a legacy np.savez archive; "
+                "migrated %d entries into live state. Original backed up at "
+                "%s (never auto-deleted).",
+                path, len(staged), bak_path,
+            )
+            return len(self.embeddings)
 
         if path.endswith(".msgpack"):
             try:

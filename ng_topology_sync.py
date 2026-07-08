@@ -1,4 +1,16 @@
 # ---- Changelog ----
+# [2026-07-08] Tabitha (TQB/QB build) — _export() vdb load failure now audible
+# What: The _export() except around SimpleVectorDB.load() (previously
+#       logger.warning with the exception only) is now logger.error and
+#       includes the path. Fail-silent shape unchanged: still catches, still
+#       returns 0, sync never blocks boot.
+# Why: PRD "Codemine VDB Legacy-Loader Guard #364" §2.3 — this was the site
+#      where the legacy-npz defect hid since inception (export never once
+#      produced output; see the 2026-07-08 Ratchet entry below). A swallowed
+#      vdb load failure must be loud enough to surface in a log scan.
+# How: warning -> error; message gains the npz path and "export skipped".
+#      Log level only — no behavior change.
+# -------------------
 # [2026-07-08] Ratchet (TQB/QB build) — Fix _export() to read the real vdb sidecar format
 # What: _export() loaded checkpoints/vector_db.npz with np.load() as a genuine npz;
 #       the current-era sidecar is JSON (SimpleVectorDB.save() picks format by
@@ -86,7 +98,7 @@ def _export(workspace_dir: str) -> int:
         db.load(str(npz))
         contents = [c for c in db.content.values() if c]
     except Exception as e:
-        logger.warning("vector_db.npz load failed: %s", e)
+        logger.error("vector_db.npz load failed for %s: %s -- export skipped", npz, e)
         return 0
 
     topo = _CLONE_DIR / _TOPO_SUBDIR

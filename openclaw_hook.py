@@ -1,4 +1,19 @@
 # ---- Changelog ----
+# [2026-07-08] Tabitha (TQB/QB build) — Vector DB restore failure now audible
+# What: The __init__ vdb-restore except (previously logger.warning with the
+#       exception only) is now logger.error and includes BOTH the path
+#       (self._vector_db_path) and the exception. Behavior unchanged: still
+#       fail-soft, boot proceeds with an empty vector DB. The mid-write
+#       _wait_for_stable_checkpoint branch and the graph-restore except
+#       directly above are untouched.
+# Why: PRD "Codemine VDB Legacy-Loader Guard #364" §2.3 — this swallow hid
+#      the legacy-npz load failure for months: every boot silently started
+#      with an empty vdb while 1932 entries of accumulated worker memory sat
+#      unreadable on disk. Loudness is the fix's second half (the loader
+#      guard in universal_ingestor.py is the first).
+# How: warning -> error; message gains the path and an explicit "boot
+#      proceeds with EMPTY vector DB" consequence so a log scan cannot
+#      mistake it for noise.
 # [2026-07-08] Meridian (TQB/QB build) — #256 anticipatory pre-activation + GSG surfacing re-score
 # What: (1) _anticipate(): after each on_message() SNN step, walk outgoing
 #       synapses from the just-fired set, score neighbors by accumulated edge
@@ -339,7 +354,11 @@ class NeuroGraphMemory:
                     self._vector_db_path, self.vector_db.count(),
                 )
             except Exception as exc:
-                logger.warning("Failed to restore vector DB: %s", exc)
+                logger.error(
+                    "Failed to restore vector DB from %s: %s -- boot proceeds "
+                    "with EMPTY vector DB (accumulated content not loaded)",
+                    self._vector_db_path, exc,
+                )
 
         # Ingestor with OpenClaw project config
         ingestor_config = get_ingestor_config("openclaw")
