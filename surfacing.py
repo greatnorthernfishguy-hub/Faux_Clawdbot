@@ -17,6 +17,10 @@ Usage::
     context = monitor.format_context()
 
 # ---- Changelog ----
+# [2026-07-08] Candor (TQB/QB build) — honest salience label
+# What: format line now "(salience: {score:.2f})" instead of "(confidence: {score:.0%})"
+# Why: PRD 2026-07-08-codemine-surfacing-parity §2.2/§7.2 — salience is not a probability; >100% strings eroded worker trust
+# How: display-only change, canonical parity (e6eb2f2); pinned by tests/test_surfacing_salience.py
 # [2026-04-08] Claude (Opus 4.6) — Punchlist #55: Read attention params from substrate
 #   What: _decay_queue() reads surfacing_decay_rate and surfacing_min_confidence
 #         from graph.config (substrate) instead of frozen CES dataclass.
@@ -237,7 +241,11 @@ class SurfacingMonitor:
             # Truncate long content for context blocks
             if len(content) > 200:
                 content = content[:197] + "..."
-            lines.append(f"- {content} (confidence: {score:.0%})")
+            # Salience, NOT a probability: _score_node()'s designed range is
+            # ~[0.8, 1.8] (floored >=0.8 for any fired node). The old
+            # "(confidence: {score:.0%})" rendering produced ">100%" strings
+            # that read as fictitious and eroded worker trust in the block.
+            lines.append(f"- {content} (salience: {score:.2f})")
 
         return "\n".join(lines)
 
