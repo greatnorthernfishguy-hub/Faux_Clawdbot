@@ -1,5 +1,12 @@
 """Tests for the durable Mission Control service boundary."""
 
+# ---- Changelog ----
+# [2026-09-12] Codex — Verify durable plan-then-execute coordination.
+# What: Cover environment configuration, raw deposits, workspace roots, and locks.
+# Why: One click must not bypass a concrete plan or execute a proposal twice.
+# How: Compose the service with fake generators and dispatchers in temporary roots.
+# -------------------
+
 import json
 
 from mission_service import MissionService, load_validation_catalog
@@ -77,6 +84,31 @@ def test_plan_deposits_raw_intent_and_constraints_before_generation(tmp_path):
         ("deposit", "exact constraint"),
         ("generate", None),
     ]
+
+
+def test_planning_stops_when_raw_intent_cannot_reach_graph(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    class BrokenGraph:
+        def on_message(self, _text):
+            raise OSError("offline")
+
+    service = MissionService(
+        worker_ng=BrokenGraph(), validation_catalog_json=catalog_json(),
+        mission_root=tmp_path / "missions", worktree_root=tmp_path / "worktrees",
+        workspace_roots=[tmp_path],
+        generator_fn=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("generator must not run")
+        ),
+    )
+
+    try:
+        service.plan(intent="exact intent", constraints=None, workspace=str(workspace))
+    except RuntimeError as exc:
+        assert "Raw mission input deposit failed" in str(exc)
+    else:
+        raise AssertionError("planning continued without raw substrate deposit")
 
 
 def test_workspace_outside_environment_roots_is_rejected(tmp_path):

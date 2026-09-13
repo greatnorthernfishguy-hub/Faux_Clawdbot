@@ -1,5 +1,12 @@
 """Tests for Bethany's MissionPlan generation boundary."""
 
+# ---- Changelog ----
+# [2026-09-12] Codex — Verify planning structure and raw substrate ordering.
+# What: Cover read-only planning, retries, validation IDs, and failed deposits.
+# Why: Bethany must not mutate while planning or validate before raw experience.
+# How: Use fake persona responses and Graph recorders without provider calls.
+# -------------------
+
 import json
 
 from mission_generator import generate_mission_plan
@@ -117,3 +124,21 @@ def test_raw_planner_response_reaches_graph_before_parsing(tmp_path):
     assert result["success"] is True
     assert events[0][0] == "response"
     assert events[1] == ("deposit", json.dumps(valid_plan()))
+
+
+def test_planner_fails_closed_when_raw_response_cannot_reach_graph(tmp_path):
+    class BrokenGraph:
+        def on_message(self, _text):
+            raise OSError("offline")
+
+    result = generate_mission_plan(
+        intent="Repair it", workspace=tmp_path, worker_ng=BrokenGraph(),
+        persona_call=lambda **_kwargs: {
+            "structured": valid_plan(), "response": json.dumps(valid_plan()),
+            "tool_events": [],
+        },
+    )
+
+    assert result["success"] is False
+    assert "Raw planner response deposit failed" in result["errors"][0]
+    assert result["attempts"][0]["response"] == json.dumps(valid_plan())

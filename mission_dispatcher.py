@@ -295,11 +295,33 @@ class MissionDispatcher:
                 max_tokens=8192,
                 tool_runtime=runtime,
             )
-            self._deposit_raw(response.get("response", ""))
+            attempt = self._model_receipt(response)
+            attempt["attempt"] = attempt_number
+            if runtime.substrate_failure:
+                attempt["errors"] = [
+                    f"Substrate tool deposit failed: {runtime.substrate_failure}"
+                ]
+                attempts.append(attempt)
+                return {
+                    "status": "blocked",
+                    "attempts": attempts,
+                    "error": attempt["errors"][0],
+                    "escalate_to": "leader",
+                }
+            try:
+                self._deposit_raw(response.get("response", ""))
+            except RuntimeError as exc:
+                attempt["errors"] = [str(exc)]
+                attempts.append(attempt)
+                return {
+                    "status": "blocked",
+                    "attempts": attempts,
+                    "error": str(exc),
+                    "escalate_to": "leader",
+                }
             structured = response.get("structured") or _extract_json(response.get("response", ""))
             errors = [error.message for error in _block_result_validator.iter_errors(structured or {})]
-            attempt = self._model_receipt(response)
-            attempt.update({"attempt": attempt_number, "result": structured, "errors": errors})
+            attempt.update({"result": structured, "errors": errors})
             attempts.append(attempt)
             if errors:
                 feedback = ["Your final result failed its schema: " + "; ".join(errors)]
@@ -443,7 +465,15 @@ class MissionDispatcher:
             max_tokens=4096,
             tool_runtime=runtime,
         )
-        self._deposit_raw(response.get("response", ""))
+        try:
+            self._deposit_raw(response.get("response", ""))
+        except RuntimeError as exc:
+            return {
+                "role": role,
+                "decision": "escalate",
+                "findings": [str(exc)],
+                "model": self._model_receipt(response),
+            }
         structured = response.get("structured") or _extract_json(response.get("response", ""))
         errors = [error.message for error in _review_result_validator.iter_errors(structured or {})]
         if errors:
@@ -495,8 +525,10 @@ class MissionDispatcher:
             return
         try:
             self.ng.on_message(text)
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"Raw experience deposit failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def _run_validations(self, workspace: Path, validation_ids: list[str]) -> list[dict]:
         results = []

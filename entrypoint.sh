@@ -36,8 +36,7 @@ fi
 # CACHE DIRECTORY SETUP
 # =========================================================================
 # CHANGELOG [2025-01-31 - Claude]
-# Ensure cache directories exist and are writable BEFORE Python starts.
-# ChromaDB will crash immediately if it can't write its embedding model.
+# Ensure model cache directories exist and are writable BEFORE Python starts.
 # =========================================================================
 
 # Test if /data is writable (persistent storage enabled)
@@ -45,7 +44,7 @@ if touch /data/.write_test 2>/dev/null; then
     rm -f /data/.write_test
     echo "✅ /data is writable (persistent storage enabled)"
     # Ensure cache subdirectories exist
-    mkdir -p /data/.cache/huggingface /data/.cache/chroma
+    mkdir -p /data/.cache/huggingface
 else
     echo "⚠️  /data is NOT writable - redirecting cache to /tmp"
     echo "   (Enable persistent storage in Space Settings for durability)"
@@ -53,8 +52,7 @@ else
     export HF_HOME=/tmp/.cache/huggingface
     export TRANSFORMERS_CACHE=/tmp/.cache/huggingface
     export XDG_CACHE_HOME=/tmp/.cache
-    export CHROMA_CACHE_DIR=/tmp/.cache/chroma
-    mkdir -p /tmp/.cache/huggingface /tmp/.cache/chroma
+    mkdir -p /tmp/.cache/huggingface
 fi
 
 echo "📁 Cache directory: ${XDG_CACHE_HOME}"

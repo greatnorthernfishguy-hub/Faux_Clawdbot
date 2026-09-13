@@ -193,6 +193,7 @@ class SpecialistToolRuntime:
         }
         self.allow_write_tools = allow_write_tools
         self.mutations_approved = mutations_approved
+        self.substrate_failure: str | None = None
         self._recall_gate_cache = {}
         self._fs = FilesystemTool(
             self.workspace, policy_engine=True, read_only_paths=self.read_only_paths,
@@ -239,7 +240,11 @@ class SpecialistToolRuntime:
         else:
             result_text = str(result)
             status = "executed"
-        self._deposit(tool_name, args, result_text)
+        if not self._deposit(tool_name, args, result_text):
+            return self._error(
+                tool_name,
+                "Substrate deposit failed after tool execution; stop and escalate",
+            )
         if recall_text:
             result_text = f"[Substrate recall]\n{recall_text}\n\n[Result]\n{result_text}"
         return {"status": status, "tool": tool_name, "result": result_text}
@@ -345,14 +350,17 @@ class SpecialistToolRuntime:
             logger.warning("Specialist recall failed: %s", exc)
             return ""
 
-    def _deposit(self, tool_name: str, args: dict, result: str) -> None:
+    def _deposit(self, tool_name: str, args: dict, result: str) -> bool:
         if self.ng is None:
-            return
+            return True
         try:
             from worker_ng import ingest_tool_result
             ingest_tool_result(self.ng, tool_name, args, result)
+            return True
         except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.substrate_failure = f"{type(exc).__name__}: {exc}"
             logger.warning("Specialist experience deposit failed: %s", exc)
+            return False
 
     @staticmethod
     def _error(tool_name: str, reason: str) -> dict:

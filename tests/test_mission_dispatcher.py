@@ -1,5 +1,12 @@
 """End-to-end tests for isolated TQB MissionPlan dispatch."""
 
+# ---- Changelog ----
+# [2026-09-12] Codex — Verify isolated, reviewed, recoverable mission execution.
+# What: Cover source preservation, path scope, gates, retries, and patch artifacts.
+# Why: Autonomous workers must not blur Lego blocks or strand unfinished work.
+# How: Run the coordinator against disposable Git repositories and fake models.
+# -------------------
+
 import subprocess
 from pathlib import Path
 

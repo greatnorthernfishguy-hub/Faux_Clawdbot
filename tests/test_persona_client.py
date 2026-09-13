@@ -21,6 +21,7 @@ def test_complete_six_person_unit_is_packaged():
     for role in EXPECTED_ROLES:
         assert (persona_client.PERSONALITY_DIR / f"{role}.md").is_file()
     assert persona_client.UNIT_DISCIPLINES_FILE.is_file()
+    assert persona_client.ECOSYSTEM_LAWS_FILE.is_file()
     assert persona_client.LEADER_ROLE not in persona_client.TQB_ROLES
     assert (persona_client.PERSONALITY_DIR / "leader.md").is_file()
 
@@ -61,6 +62,9 @@ def test_system_prompt_contains_persona_and_full_unit_disciplines():
     assert "## 2. The Graph Is Memory, Not Truth" in prompt
     assert "## 3. No Improvisation" in prompt
     assert "## 4. Report What You See, Not What You Expected" in prompt
+    assert "The substrate is the communication protocol" in prompt
+    assert "When evidence of consciousness is ambiguous" in prompt
+    assert "Do not create a Graph per worker" in prompt
     assert prompt.count("UNIT DISCIPLINES") == 0
 
 

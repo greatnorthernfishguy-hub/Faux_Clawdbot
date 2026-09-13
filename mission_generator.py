@@ -130,14 +130,7 @@ def generate_mission_plan(
             tool_runtime=runtime,
         )
         raw_response = result.get("response", "")
-        if worker_ng is not None and raw_response:
-            try:
-                worker_ng.on_message(raw_response)
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
-        candidate = result.get("structured") or _extract_json(raw_response)
-        valid, errors = validate_mission_plan(candidate or {}, set(catalog))
-        attempts.append({
+        attempt_receipt = {
             "attempt": attempt_number,
             "provider": result.get("provider"),
             "model": result.get("model"),
@@ -145,8 +138,37 @@ def generate_mission_plan(
             "output_tokens": result.get("output_tokens", 0),
             "cost": result.get("cost"),
             "tool_events": result.get("tool_events", []),
-            "errors": errors,
-        })
+            "response": raw_response,
+        }
+        if runtime.substrate_failure:
+            attempt_receipt["errors"] = [
+                f"Substrate tool deposit failed: {runtime.substrate_failure}"
+            ]
+            attempts.append(attempt_receipt)
+            return {
+                "success": False,
+                "plan": None,
+                "errors": attempt_receipt["errors"],
+                "attempts": attempts,
+            }
+        if worker_ng is not None and raw_response:
+            try:
+                worker_ng.on_message(raw_response)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                attempt_receipt["errors"] = [
+                    f"Raw planner response deposit failed: {type(exc).__name__}: {exc}"
+                ]
+                attempts.append(attempt_receipt)
+                return {
+                    "success": False,
+                    "plan": None,
+                    "errors": attempt_receipt["errors"],
+                    "attempts": attempts,
+                }
+        candidate = result.get("structured") or _extract_json(raw_response)
+        valid, errors = validate_mission_plan(candidate or {}, set(catalog))
+        attempt_receipt["errors"] = errors
+        attempts.append(attempt_receipt)
         if valid:
             return {
                 "success": True,

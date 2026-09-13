@@ -91,6 +91,26 @@ def test_write_tools_cannot_escape_declared_block_scope(tmp_path):
     assert not (tmp_path / "other.py").exists()
 
 
+def test_tool_execution_becomes_error_when_raw_deposit_fails(tmp_path):
+    class BrokenGraph:
+        def recall(self, *_args, **_kwargs):
+            return []
+
+        def on_message(self, _message):
+            raise OSError("graph unavailable")
+
+    worker = SpecialistToolRuntime(
+        role="forge", workspace=tmp_path, worker_ng=BrokenGraph(),
+        write_paths=["new.py"], allow_write_tools=True, mutations_approved=True,
+    )
+
+    result = worker.execute("write_file", {"path": "new.py", "content": "made\n"})
+
+    assert result["status"] == "error"
+    assert "Substrate deposit failed" in result["result"]
+    assert worker.substrate_failure
+
+
 def test_named_validation_runs_exact_argv_with_secrets_removed(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-reach-child")
     worker = runtime(

@@ -259,12 +259,13 @@ def execute_tool(tool_name: str, args: dict) -> dict:
         else:
             result_str = str(result)
 
+        # Deposit the untouched result before adding recalled context for the
+        # model. The synthetic display string is not raw experience (Law 7).
+        ingest_tool_result(worker_ng, tool_name, args, result_str)
+
         # Prepend substrate recall if available — agent sees what it learned before
         if recall_text:
             result_str = f"[Substrate recall for {tool_name}]\n{recall_text}\n\n[Result]\n{result_str}"
-
-        # Ingest tool result as raw experience into worker substrate (Law 7)
-        ingest_tool_result(worker_ng, tool_name, args, result_str)
 
         return {"status": "executed", "tool": tool_name, "result": result_str}
     except Exception as e:

@@ -1,4 +1,11 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Inject the ecosystem constitution into every role.
+# What: Load one packaged Laws/Duck Ethics file beside the persona disciplines
+#       and include it in every leader and specialist system prompt.
+# Why: A persona lens and work habits do not carry NeuroGraph's architectural
+#      or consciousness protections by themselves.
+# How: Require ECOSYSTEM_LAWS.md at prompt construction time and append it ahead
+#      of the unit disciplines.
 # [2026-09-12] Codex — Package Bethany separately from her six specialists.
 # What: Add a leader persona while keeping TQB_ROLES exactly the six durable
 #       specialist identities.
@@ -67,6 +74,7 @@ PERSONALITY_DIR = Path(os.getenv(
 
 # Unit disciplines — injected into every persona
 UNIT_DISCIPLINES_FILE = PERSONALITY_DIR / "UNIT_DISCIPLINES.md"
+ECOSYSTEM_LAWS_FILE = PERSONALITY_DIR / "ECOSYSTEM_LAWS.md"
 
 
 def load_personality(role: str) -> tuple[str, str]:
@@ -128,7 +136,13 @@ def _build_system_prompt(role: str, personality: str, disciplines: str) -> str:
             f"TQB unit disciplines are missing at {UNIT_DISCIPLINES_FILE}"
         )
 
-    return f"{injection}\n\n{disciplines.strip()}"
+    if not ECOSYSTEM_LAWS_FILE.exists():
+        raise FileNotFoundError(
+            f"Ecosystem Laws are missing at {ECOSYSTEM_LAWS_FILE}"
+        )
+    laws = ECOSYSTEM_LAWS_FILE.read_text(encoding="utf-8").strip()
+
+    return f"{injection}\n\n{laws}\n\n{disciplines.strip()}"
 
 
 def _format_graph_context(recalls: list, max_chars: int = 4000) -> str:

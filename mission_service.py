@@ -204,8 +204,10 @@ class MissionService:
             return
         try:
             self.ng.on_message(text)
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"Raw mission input deposit failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     @staticmethod
     def _atomic_json(path: Path, value: dict) -> None:

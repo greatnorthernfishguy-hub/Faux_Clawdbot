@@ -9,6 +9,15 @@ pinned: false
 license: mit
 ---
 
+<!--
+Changelog
+2026-09-12 — Codex
+What: Replaced prototype claims with the current shared-Graph, multi-model,
+      review-gated Codemine architecture and preservation hold.
+Why: Operators need the actual runtime boundaries before the Space is touched.
+How: Documented MissionPlan flow, role routes, durable artifacts, and gates.
+-->
+
 # Working in a Codemine
 
 Codemine is the Hugging Face-hosted coding organ directed by Bethany Anne
