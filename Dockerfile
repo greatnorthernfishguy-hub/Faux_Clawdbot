@@ -4,6 +4,10 @@
 # SAFETY: Default the image to preservation dry-run so deployment cannot wake an
 # unpreserved Codemine graph when Space variables are absent or stale.
 #
+# CHANGELOG [2026-09-13 - Codex]
+# SAFETY: Package the Python boot guard and leave its normal-start acknowledgement
+# unset so one mistyped environment value cannot wake the sleeping substrate.
+#
 # CHANGELOG [2026-09-12 - Codex]
 # SHIPPED: Complete six-person TQB personality set and unit disciplines.
 # ADDED: Fail-closed preservation-only boot script and environment-owned paths.
@@ -118,12 +122,11 @@ COPY tool_definitions.py .
 COPY worker_ng.py .
 COPY surface_resolver.py .
 COPY ng_embed.py .
-COPY work_block_schema.py .
-COPY spec_executor.py .
 COPY persona_client.py .
-COPY report_evaluator.py .
 COPY risk_authority.py .
 COPY preserve_codemine.py .
+COPY boot_mode.py .
+COPY archive_safety.py .
 COPY tqb-personalities/ ./tqb-personalities/
 
 # Copy tools directory

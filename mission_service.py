@@ -5,6 +5,11 @@
 # What: Persist a loud blocked proposal or execution result when checkpoint save fails.
 # Why: A mission must not report success while its newest experience is only in memory.
 # How: Return a narrow save error from the wrapper and write it into the durable envelope.
+# [2026-09-13] Codex — Preserve blocked state in the proposal envelope.
+# What: Map blocked, failed, and rejected execution results to matching durable states.
+# Why: Labeling a failed checkpoint as executed hides the continuity failure and
+#      makes the proposal look successfully consumed.
+# How: Only a successful terminal result receives the executed envelope state.
 # [2026-09-12] Codex — Preserve raw Mission Control input in the substrate.
 # What: Deposit the exact intent and optional constraints before calling the
 #       planner or constructing a proposal envelope.
@@ -195,11 +200,13 @@ class MissionService:
                 "status": "blocked",
                 "substrate_save_error": save_error,
             }
-        durable["status"] = (
-            "planned" if result.get("status") in {
-                "awaiting_mutation_approval", "awaiting_human_approval",
-            } else "executed"
-        )
+        result_status = result.get("status")
+        if result_status in {"awaiting_mutation_approval", "awaiting_human_approval"}:
+            durable["status"] = "planned"
+        elif result_status in {"blocked", "failed", "rejected"}:
+            durable["status"] = result_status
+        else:
+            durable["status"] = "executed"
         durable["execution_finished_at"] = time.time()
         durable["execution"] = result
         self._atomic_json(proposal_path, durable)

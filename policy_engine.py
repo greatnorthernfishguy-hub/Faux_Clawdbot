@@ -3,6 +3,13 @@
 # What: Deny writes to all current vendored substrate files and the retired peer bridge.
 # Why: Plan validation alone cannot be the final constitutional boundary.
 # How: Apply the immutable filename deny set in write-mode path authorization.
+# [2026-09-13] Codex — Close secret-read and process/Git authority gaps.
+# What: Deny sensitive reads, dangerous allowlisted subcommands, environment
+#       assignments, and direct Git mutation tools at the constitutional Rim.
+# Why: Binary-name allowlisting still admitted Python code, find -exec, Git push,
+#      and child-process secret exposure outside Mission Control.
+# How: Validate argv semantics and keep Git mutation authority inside Mission's
+#      deterministic coordinator.
 # [2026-09-12] Codex — Make shell allowlisting structural
 # What: Parse commands with shlex, reject shell grammar, validate exact binaries,
 #       and expose the parsed argv/environment for shell=False execution.
@@ -102,6 +109,11 @@ _SENSITIVE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"\.env\.", re.IGNORECASE),
     re.compile(r".*\.key$", re.IGNORECASE),
     re.compile(r"^credentials\..*", re.IGNORECASE),
+    re.compile(r"^\.git-credentials$", re.IGNORECASE),
+    re.compile(r"^\.netrc$", re.IGNORECASE),
+    re.compile(r"^\.npmrc$", re.IGNORECASE),
+    re.compile(r"^\.pypirc$", re.IGNORECASE),
+    re.compile(r"^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$", re.IGNORECASE),
 )
 
 _VENDORED_FILES = frozenset({
@@ -201,21 +213,21 @@ def can_access_path(
             f"is not inside '{workspace_resolved}'."
         )
 
-    # Write-mode: block sensitive files
+    filename = resolved.name
+    for pat in _SENSITIVE_PATTERNS:
+        if pat.search(filename):
+            return False, (
+                f"{mode.capitalize()} denied — '{filename}' matches sensitive file "
+                f"pattern '{pat.pattern}'."
+            )
+
+    # Write-mode: additionally block vendored files
     if mode == "write":
-        filename = resolved.name
         if filename in _VENDORED_FILES:
             return False, (
                 f"Write denied — '{filename}' is vendored or retired; repair the "
                 "canonical source through its required gates."
             )
-        for pat in _SENSITIVE_PATTERNS:
-            if pat.search(filename):
-                return False, (
-                    f"Write denied — '{filename}' matches sensitive file "
-                    f"pattern '{pat.pattern}'."
-                )
-
     return True, "Path access permitted."
 
 
@@ -282,7 +294,7 @@ def can_execute_shell(command: str) -> tuple[bool, str]:
         (allowed, reason)
     """
     try:
-        tokens, _environment = parse_shell_command(command)
+        tokens, environment = parse_shell_command(command)
     except ValueError as exc:
         return False, str(exc)
 
@@ -291,13 +303,41 @@ def can_execute_shell(command: str) -> tuple[bool, str]:
     # Strip any path prefix so `/usr/bin/python` matches `python`
     binary = os.path.basename(first_token)
 
-    if shell_binary_allowed(binary, _SHELL_ALLOWLIST):
-        return True, f"Shell command permitted ('{binary}')."
+    if not shell_binary_allowed(binary, _SHELL_ALLOWLIST):
+        return False, (
+            f"Shell command denied — '{binary}' is not on the allowlist. "
+            f"Allowed: {', '.join(_SHELL_ALLOWLIST)}."
+        )
 
-    return False, (
-        f"Shell command denied — '{binary}' is not on the allowlist. "
-        f"Allowed: {', '.join(_SHELL_ALLOWLIST)}."
-    )
+    if environment:
+        return False, "Leading environment assignments are not permitted."
+
+    arguments = tokens[1:]
+    if re.fullmatch(r"python[0-9]+(?:\.[0-9]+)?", binary) or binary == "python":
+        if "-c" in arguments:
+            return False, "Inline Python execution is not permitted."
+        if "-m" in arguments:
+            index = arguments.index("-m")
+            module = arguments[index + 1] if index + 1 < len(arguments) else ""
+            if module not in {"pytest", "compileall", "py_compile"}:
+                return False, f"Python module execution is not permitted: {module or '(missing)'}"
+
+    if binary == "git":
+        subcommand = next((item for item in arguments if not item.startswith("-")), "")
+        if subcommand not in {"diff", "status", "show", "log", "rev-parse", "ls-files"}:
+            return False, f"Git subcommand is not read-only: {subcommand or '(missing)'}"
+
+    if binary == "find" and any(
+        item in {"-exec", "-execdir", "-ok", "-okdir", "-delete"}
+        for item in arguments
+    ):
+        return False, "Mutating or executable find actions are not permitted."
+
+    if binary.startswith("pip") or binary == "npm":
+        if arguments not in (["--version"], ["-v"], ["--help"], ["-h"]):
+            return False, f"Package-manager mutation is not permitted through {binary}."
+
+    return True, f"Shell command permitted ('{binary}')."
 
 
 def can_write_content(path: str, content: str) -> tuple[bool, str]:
@@ -400,6 +440,12 @@ def check_tool_call(
     if allowed and tool_name == "shell_execute":
         command = args.get("command", "")
         allowed, reason = can_execute_shell(command)
+
+    if allowed and tool_name in {
+        "push_to_github", "pull_from_github", "create_shadow_branch",
+    }:
+        allowed = False
+        reason = "Direct Git mutation is prohibited; use Mission Control."
 
     _audit_log(tool_name, args, allowed, reason)
     return allowed, reason

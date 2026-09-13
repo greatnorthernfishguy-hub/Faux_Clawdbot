@@ -33,22 +33,47 @@ def test_binary_prefix_smuggling_is_denied():
     assert allowed is False
 
 
-def test_versioned_python_and_leading_environment_are_parsed():
+def test_versioned_python_is_allowed_but_leading_environment_is_denied():
     allowed, _reason = policy_engine.can_execute_shell(
         "PYTHONPATH=/workspace python3.12 -m pytest -q"
     )
     argv, environment = policy_engine.parse_shell_command(
         "PYTHONPATH=/workspace python3.12 -m pytest -q"
     )
-    assert allowed is True
+    assert allowed is False
     assert argv == ["python3.12", "-m", "pytest", "-q"]
     assert environment == {"PYTHONPATH": "/workspace"}
 
 
 def test_shell_tool_does_not_interpret_metacharacters(tmp_path):
+    (tmp_path / "probe.py").write_text("print('safe')\n")
     tool = ShellTool(Path(tmp_path), policy_engine)
-    result = tool.shell_execute("python3 -c 'print(\"safe\")'")
+    result = tool.shell_execute("python3 probe.py")
 
     assert "EXIT_CODE: 0" in result
     assert "safe" in result
     assert not (tmp_path / "unexpected").exists()
+
+
+def test_inline_python_git_mutation_and_find_execution_are_denied():
+    for command in (
+        "python3 -c 'print(1)'",
+        "git push origin main",
+        "find . -exec rm {} ;",
+        "pip install package",
+        "npm install package",
+    ):
+        allowed, _reason = policy_engine.can_execute_shell(command)
+        assert allowed is False
+
+
+def test_shell_tool_removes_provider_secrets_from_child_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-reach-child")
+    (tmp_path / "probe.py").write_text(
+        "import os\nprint('OPENROUTER_API_KEY' in os.environ)\n"
+    )
+    result = ShellTool(Path(tmp_path), policy_engine).shell_execute("python3 probe.py")
+
+    assert "EXIT_CODE: 0" in result
+    assert "False" in result
+    assert "must-not-reach-child" not in result

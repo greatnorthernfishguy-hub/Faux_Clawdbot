@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Remove the facade's independent Graph constructor.
+# What: Require the one worker_ng-owned instance as a constructor argument.
+# Why: A second creation path could bypass preservation and split one substrate.
+# How: Fail immediately when the application does not inject its shared Graph.
 # [2026-04-06] Josh + Claude — Add edit_file facade method
 # What: Delegate edit_file to FilesystemTool
 # Why: New edit_file tool needs facade wiring like read_file/write_file
@@ -15,7 +19,6 @@ from pathlib import Path
 from typing import List, Dict
 from huggingface_hub import HfApi, hf_hub_download
 
-from openclaw_hook import NeuroGraphMemory
 from tools import FilesystemTool, GitTool, NotebookTool, NeurographTool, ShellTool, WorkspaceTool
 
 logger = logging.getLogger("recursive_context")
@@ -29,15 +32,9 @@ class RecursiveContextManager:
         self.token = os.getenv("HF_TOKEN")
         self.dataset_id = os.getenv("DATASET_ID", "Executor-Tyrant-Framework/clawdbot-memory")
 
-        # Use the passed-in NG instance (owned by worker_ng) or fall back to creating one
-        if ng is not None:
-            self.ng = ng
-        else:
-            neurograph_workspace = os.getenv(
-                "NEUROGRAPH_WORKSPACE_DIR",
-                str(self.repo_path / "data" / "neurograph_worker")
-            )
-            self.ng = NeuroGraphMemory.get_instance(workspace_dir=neurograph_workspace)
+        if ng is None:
+            raise ValueError("RecursiveContextManager requires the worker-owned shared Graph")
+        self.ng = ng
         logger.info("NeuroGraph Memory Loaded.")
 
         self._saves_since_ng_backup = 0
@@ -102,7 +99,6 @@ class RecursiveContextManager:
             logger.warning("NeuroGraph checkpoint upload failed: %s", e)
 
     def save_conversation_turn(self, user_msg: str, assist_msg: str, turn_id: int):
-        from openclaw_hook import NeuroGraphMemory
         from universal_ingestor import SourceType
         combined = f"USER: {user_msg}\n\nASSISTANT: {assist_msg}"
         self.ng.on_message(combined, source_type=SourceType.TEXT)

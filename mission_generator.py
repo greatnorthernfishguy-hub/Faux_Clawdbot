@@ -5,6 +5,11 @@
 # What: Give the read-only planner an explicit `.` scope.
 # Why: Specialist reads now enforce the paths declared by their MissionPlan.
 # How: The leader may inspect the repository but still receives no write tools.
+# [2026-09-13] Codex — Preserve each TQB specialist's actual job.
+# What: Restrict writable MissionPlan blocks to Wrench or Forge.
+# Why: Strategist, Tracker, Razor, and Reviewer are planning/investigation/review
+#      lenses; treating every persona as a generic grunt erases their purpose.
+# How: State the role boundary in the planning contract and validate it in code.
 # [2026-09-12] Codex — Deposit Bethany's raw response before plan validation.
 # What: Send the untouched planning response to the shared substrate before
 #       parsing its JSON or applying the MissionPlan schema.
@@ -86,7 +91,8 @@ TRUSTED VALIDATION CATALOG
 Inspect the actual repository with your read-only tools before planning. Use
 only relative repository paths. Assign every block to exactly one of:
 strategist, tracker, wrench, forge, razor, reviewer. Any specialist may be a
-bounded implementation grunt. Blocks that can run together must have disjoint
+bounded read-only investigator or reviewer; only wrench and forge may receive
+write paths. Blocks that can run together must have disjoint
 write paths. Express every required ordering edge in depends_on. A writable
 block must select at least one validation ID from the catalog. Do not invent
 commands or validation IDs.

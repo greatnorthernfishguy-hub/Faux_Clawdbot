@@ -273,5 +273,6 @@ def test_execute_preserves_result_but_blocks_when_graph_save_fails(tmp_path):
     assert result["artifact"] == "kept"
     assert "Shared NeuroGraph save failed" in result["substrate_save_error"]
     persisted = json.loads(proposal_path.read_text())
+    assert persisted["status"] == "blocked"
     assert persisted["execution"]["status"] == "blocked"
     assert persisted["execution"]["artifact"] == "kept"

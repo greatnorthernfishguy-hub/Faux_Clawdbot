@@ -210,6 +210,8 @@ def test_reviewer_iteration_returns_to_worker_with_findings(tmp_path):
             }
         else:
             review_calls += 1
+            diff = runtime.execute("git_diff", {})
+            assert diff["status"] == "executed"
             structured = (
                 {"decision": "iterate", "findings": ["Reviewer-specific correction"]}
                 if review_calls == 1
@@ -293,6 +295,8 @@ def test_blocked_work_is_preserved_as_durable_wip_patch(tmp_path):
                 "evidence": ["VALUE is 9"], "blockers": [],
             }
         else:
+            diff = kwargs["tool_runtime"].execute("git_diff", {})
+            assert diff["status"] == "executed"
             structured = {"decision": "escalate", "findings": ["Needs external judgment"]}
         return {"structured": structured, "response": str(structured), "tool_events": []}
 
@@ -307,3 +311,27 @@ def test_blocked_work_is_preserved_as_durable_wip_patch(tmp_path):
     assert result["status"] == "blocked"
     assert block["wip_patch"] is not None
     assert "+VALUE = 9" in Path(block["wip_patch"]["path"]).read_text()
+
+
+def test_reviewer_cannot_approve_without_reading_diff(tmp_path):
+    repo = make_repo(tmp_path)
+
+    def rubber_stamp_persona(**kwargs):
+        if kwargs["role"] == "forge":
+            return approving_persona(**kwargs)
+        return {
+            "structured": {"decision": "approve", "findings": []},
+            "response": "approved without inspection", "tool_events": [],
+        }
+
+    result = MissionDispatcher(
+        repo=repo, worker_ng=RecordingGraph(),
+        validation_catalog={"check": ("python3", "-c", "pass")},
+        mission_root=tmp_path / "missions", persona_call=rubber_stamp_persona,
+        worktree_root=tmp_path / "worktrees",
+    ).dispatch(plan(), mutations_approved=True)
+
+    assert result["status"] == "blocked"
+    review = result["blocks"]["forge-change"]["reviews"][0]
+    assert review["decision"] == "escalate"
+    assert "without inspecting git_diff" in review["findings"][0]

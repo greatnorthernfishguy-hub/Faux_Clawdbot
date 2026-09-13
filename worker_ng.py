@@ -18,6 +18,10 @@
 # How: The wrapper owns the runtime policy through CODEMINE_TONIC_MODE. A future
 #      transformer/shared-body implementation must add and validate a new mode
 #      here before it may start Tonic.
+# [2026-09-13] Codex — Require normal-boot authorization before Graph creation
+# What: Check the shared Python boot guard before resolving the singleton.
+# Why: Direct callers must not bypass the preservation-only entrypoint contract.
+# How: Refuse before NeuroGraphMemory.get_instance can mkdir, restore, or backfill.
 # [2026-04-16] Claude (Sonnet 4.6) — Tonic enabled (heuristic mode) [superseded]
 # What: tonic.enabled False→True in WORKER_SNN_CONFIG.
 # Why: Gradio process is long-lived — substrate was dormant between spec
@@ -132,6 +136,9 @@ def get_worker_ng() -> NeuroGraphMemory:
     Uses a separate workspace dir from any ecosystem NG.
     Persists to /data/ on HF Spaces (survives container restarts).
     """
+    from boot_mode import require_normal_boot
+
+    require_normal_boot()
     _require_safe_tonic_mode()
     instance = NeuroGraphMemory.get_instance(
         workspace_dir=WORKER_NG_WORKSPACE,

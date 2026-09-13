@@ -3,6 +3,10 @@
 <!--
 Changelog
 2026-09-13 — Codex
+What: Added the independent Python normal-start acknowledgement to the runbook.
+Why: Direct imports and a single mistyped mode must not bypass preservation.
+How: Normal mode requires two exact controls after the stated evidence exists.
+2026-09-13 — Codex
 What: Made preservation dry-run the documented image default and removed the
       retired topology-sync path from the startup contract.
 Why: The first delivery must fail closed even when Space variables are absent.
@@ -54,6 +58,7 @@ The image defaults to `CODEMINE_BOOT_MODE=preserve` and
 `CODEMINE_PRESERVATION_DRY_RUN=1`. Before delivery, verify that no existing
 Space variable overrides either fail-closed default.
 The script refuses to run when any required path variable is missing.
+The image deliberately does not set `CODEMINE_NORMAL_BOOT_ACK`.
 
 ## Controlled sequence
 
@@ -97,9 +102,20 @@ The script refuses to run when any required path variable is missing.
 
    `VERIFIED: ...` is the required result. Retain the Space log, archive name,
    local path, file count, byte count, and deployed code revision as the receipt.
-9. Keep `CODEMINE_BOOT_MODE=preserve` until the graph has also passed offline
-   compatibility inspection and the normal-start modernization has its own
-   review gate.
+9. Keep `CODEMINE_BOOT_MODE=preserve` and leave `CODEMINE_NORMAL_BOOT_ACK`
+   unset until the graph has two verified copies, has passed offline
+   compatibility inspection, and the normal-start modernization has its own
+   review gate. Only then may both exact normal-start values be set:
+
+   ```text
+   CODEMINE_BOOT_MODE=normal
+   CODEMINE_NORMAL_BOOT_ACK=two-verified-copies-and-compatibility-reviewed
+   ```
+
+   Normal boot also requires `CODEMINE_TONIC_MODE=transformer`. This preservation
+   revision deliberately does not implement that runtime mode, so a later
+   reviewed Tonic revision is required. The entrypoint and direct Python Graph
+   accessor independently enforce these controls before live construction.
 
 Hugging Face documents that attached buckets are mounted into the container at
 their configured paths and that Dev Mode supplies SSH access for Pro accounts.

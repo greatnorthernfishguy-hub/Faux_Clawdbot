@@ -190,10 +190,10 @@ OPENCLAW_SNN_CONFIG = {
     "prediction_max_active": 1000,
     "surprise_sprouting_weight": 0.1,
     "three_factor_enabled": True,   # reward learning enabled — inject_reward wired in worker_ng
-    # Tonic enabled — Gradio process is long-lived; TonicEngine runs in heuristic mode
-    # (no transformer weights on HF Spaces → _use_heuristic=True automatically).
-    # Background thread fires every 2s (idle) / 0.5s (active spec execution).
-    "tonic": {"enabled": True},
+    # [2026-09-13] Heuristic Tonic is prohibited for this embedded hemisphere.
+    # Disabled is the only safe state until a validated transformer-backed route
+    # exists; direct NeuroGraphMemory construction must fail inert, too.
+    "tonic": {"enabled": False},
     # Hypergraph
     "he_pattern_completion_strength": 0.3,
     "he_member_weight_lr": 0.05,
@@ -427,13 +427,12 @@ class NeuroGraphMemory:
                 logger.info("CES not available: %s", exc)
 
         # --- The Tonic: Latent Thread + Engine ---
-        # Keeps the substrate alive between spec executions via continuous
-        # heuristic inference (thread continuity + attractor pull + prediction
-        # tension + exploration). No transformer weights needed — heuristic
-        # mode is the designed path for Codemine.
+        # A future transformer-backed implementation may own wall-clock activity.
+        # The bundled heuristic is incompatible with the embedded topology and
+        # therefore defaults inert even for callers outside worker_ng.
         self._tonic_thread = None
         tonic_conf = snn_config.get("tonic", {})
-        if tonic_conf.get("enabled", True):
+        if tonic_conf.get("enabled", False):
             try:
                 from tonic_thread import TonicThread, TonicConfig
                 tonic_config = TonicConfig()

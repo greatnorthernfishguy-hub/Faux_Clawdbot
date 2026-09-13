@@ -52,8 +52,8 @@ def plan():
             {
                 "id": "docs",
                 "name": "Update usage",
-                "role": "reviewer",
-                "task": "Update the bounded documentation file as a grunt.",
+                "role": "wrench",
+                "task": "Implement the bounded documentation update.",
                 "read_paths": ["README.md"],
                 "write_paths": ["README.md"],
                 "depends_on": ["tracker"],
@@ -156,3 +156,12 @@ def test_writable_block_requires_at_least_one_validation():
 
     assert valid is False
     assert "writable block requires validation IDs" in errors[0]
+
+
+def test_planning_investigation_and_review_roles_cannot_write():
+    for role in ("strategist", "tracker", "razor", "reviewer"):
+        candidate = plan()
+        candidate["blocks"][1]["role"] = role
+        valid, errors = validate_mission_plan(candidate)
+        assert valid is False
+        assert f"role {role} is review/planning-only" in errors[0]

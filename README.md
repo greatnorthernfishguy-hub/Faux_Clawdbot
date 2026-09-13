@@ -11,6 +11,11 @@ license: mit
 
 <!--
 Changelog
+2026-09-13 — Codex
+What: Documented the post-review normal-boot acknowledgement, role authority,
+      read-only Chat surface, and retired Spec runtime.
+Why: Operator instructions must match the mechanical boundaries in the image.
+How: Named the second boot control and the two implementation-capable lenses.
 2026-09-12 — Codex
 What: Replaced prototype claims with the current shared-Graph, multi-model,
       review-gated Codemine architecture and preservation hold.
@@ -33,8 +38,9 @@ six durable Team Queen Bitch specialists:
 | Razor | Security, policy, and attack surface |
 | Reviewer | Quality, completeness, and routine approval |
 
-Any specialist can perform implementation work when a MissionPlan gives that
-block explicit write paths. A role supplies a lens; it does not grant authority.
+Wrench and Forge are the implementation-capable lenses. Strategist, Tracker,
+Razor, and Reviewer remain read-only planners, investigators, and reviewers.
+MissionPlan validation and the runtime tool registry enforce that boundary.
 
 Bethany and all six specialists use **one shared Codemine NeuroGraph**. The
 personas are stable viewpoints over one learned substrate, not separate agents
@@ -51,9 +57,10 @@ changes. Recalled material is memory and must be checked against current files.
 
 Codemine has three user-facing paths:
 
-- **Chat** uses the shared model/tool loop for interactive investigation.
-- **Spec** retains the legacy deterministic WorkBlockSpec executor for existing
-  work orders.
+- **Chat** uses the shared model/tool loop for interactive, read-only
+  investigation; it has no shell, Git mutation, or bulk-ingestion tools.
+- Legacy WorkBlockSpec execution is retained only as historical source and is
+  absent from the runtime image. Mission Control is the sole build path.
 - **Mission** uses the new plan-then-execute flow. Bethany inspects the actual
   repository, creates a mechanically validated MissionPlan, and persists it for
   review. A separate Execute action runs approved blocks.
@@ -71,7 +78,8 @@ Mission execution applies these boundaries:
    invent executable commands.
 6. The coordinator runs selected validations on each block and reruns their
    union against the assembled integration worktree.
-7. Reviewer reads each block diff and the actual combined diff. Sensitive work
+7. Reviewer must invoke the coordinator's `git_diff` tool for each block and
+   the actual combined diff before an approval is accepted. Sensitive work
    also requires Razor; command work requires the explicit human gate plus
    Strategist and Bethany review.
 8. Approved block commits are cherry-picked into a separate integration
@@ -111,9 +119,10 @@ requested and the provider/model actually used.
 | Variable | Purpose | Image default |
 |---|---|---|
 | `CODEMINE_BOOT_MODE` | `preserve` runs preservation only; `normal` permits application startup | `preserve` |
+| `CODEMINE_NORMAL_BOOT_ACK` | Exact second acknowledgement required with `normal` after two verified copies and compatibility review | unset |
 | `CODEMINE_PRESERVATION_DRY_RUN` | Validate the live graph without creating an archive during preservation boot | `1` |
 | `NEUROGRAPH_WORKSPACE_DIR` | One shared Codemine Graph workspace | `/data/neurograph_worker` |
-| `CODEMINE_TONIC_MODE` | Tonic policy; currently only `disabled` is accepted | `disabled` |
+| `CODEMINE_TONIC_MODE` | Tonic policy; preservation uses `disabled`, while normal operation requires a future reviewed `transformer` implementation | `disabled` |
 | `CODEMINE_PRESERVATION_DIR` | Same-volume preservation archives | `/data/codemine-preservation` |
 | `CODEMINE_PERSISTENT_ROOT` | Required persistent mount | `/data` |
 | `CODEMINE_MISSION_ROOT` | Durable proposals, receipts, and recovery patches | `/data/codemine-missions` |
@@ -142,8 +151,13 @@ its Tonic and embedding path is a separate restore decision; do not substitute
 heuristic execution for embeddings.
 
 The image deliberately boots into a preservation dry-run. Normal startup
-requires explicit `CODEMINE_BOOT_MODE=normal`; leave that unset until the
-preservation and compatibility gates in `PRESERVATION.md` have passed.
+requires `CODEMINE_BOOT_MODE=normal`,
+`CODEMINE_NORMAL_BOOT_ACK=two-verified-copies-and-compatibility-reviewed`, and
+`CODEMINE_TONIC_MODE=transformer`. The image does not set the acknowledgement.
+Leave these controls unchanged until the preservation and compatibility gates
+in `PRESERVATION.md` have passed. This revision requires transformer Tonic, but
+`worker_ng` deliberately does not implement that mode yet. A later reviewed
+revision must supply the real wall-clock transformer Tonic before normal operation.
 
 ## Development checks
 

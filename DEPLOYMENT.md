@@ -3,6 +3,10 @@
 <!--
 Changelog
 2026-09-13 — Codex
+What: Added the second normal-start control and current execution surfaces.
+Why: One environment switch must not bypass preservation or revive legacy Spec.
+How: Require the exact acknowledgement after the backup/compatibility evidence.
+2026-09-13 — Codex
 What: Made preservation dry-run the fail-closed image default and retired the
       legacy topology-sync wording.
 Why: Missing Space overrides must not wake the unpreserved Codemine Graph.
@@ -91,10 +95,10 @@ switch the restored Space to a heuristic path.
 
 ## Gate 5: normal-start readiness
 
-The image already defaults to both values above. Verify that no existing Space
-variable overrides them before the first build. Before setting
-`CODEMINE_BOOT_MODE=normal`, verify the image owns these runtime
-paths and provider routes:
+The image already defaults to both preservation values above. Verify that no
+existing Space variable overrides them before the first build. Before setting
+either normal-start control, verify the image owns these runtime paths and
+provider routes:
 
 ```text
 NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
@@ -108,23 +112,40 @@ CODEMINE_WORKSPACE_ROOTS=/workspace
 CODEMINE_VALIDATIONS_JSON={...reviewed named validation commands...}
 ```
 
+After two verified copies and compatibility review are recorded, normal startup
+requires this exact pair:
+
+```text
+CODEMINE_BOOT_MODE=normal
+CODEMINE_NORMAL_BOOT_ACK=two-verified-copies-and-compatibility-reviewed
+```
+
+The image never supplies the acknowledgement by default. The entrypoint and
+direct Python Graph accessor both refuse normal startup if either value differs.
+They also require `CODEMINE_TONIC_MODE=transformer`. The current `worker_ng`
+revision deliberately rejects that unimplemented mode, so this preservation
+delivery cannot be turned into a normal boot by environment changes alone. A
+later reviewed revision must implement and validate the wall-clock transformer
+Tonic before Gate 6 can begin.
+
 Also verify `/data` is the attached persistent mount, the target Git repository
 exists, configured provider credentials are present as Space secrets, and the
-selected model IDs are available. Normal startup must retain
-`CODEMINE_TONIC_MODE=disabled`; the wrapper rejects every other value until a
-transformer-backed Codemine Tonic path has been implemented and validated.
+selected model IDs are available. Preservation retains
+`CODEMINE_TONIC_MODE=disabled`; normal startup remains mechanically unavailable
+until a transformer-backed Codemine Tonic path has been implemented and validated.
 
 ## Gate 6: bounded smoke test
 
 After normal-start approval:
 
-1. Open Chat and perform one read-only repository inspection.
+1. Open Chat and perform one read-only repository inspection. Confirm Chat has
+   no shell, Git mutation, or bulk-ingestion tools.
 2. Use Mission Control to create a read-only MissionPlan.
 3. Confirm the proposal appears under
    `/data/codemine-missions/proposals` and includes route receipts.
 4. Execute a disposable or documentation-only standard-risk plan.
 5. Confirm each block has a separate worktree, selected validations ran, Reviewer
-   inspected the actual diff, and the integration worktree reached
+   invoked `git_diff` for the block and assembled result, and the integration worktree reached
    `ready_for_external_review`.
 6. Confirm the source checkout status before and after is identical.
 7. Do not merge or push the smoke-test integration branch from Codemine.

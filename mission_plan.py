@@ -6,6 +6,10 @@
 #       set, including the retired peer bridge.
 # Why: A broad model-authored scope could bypass Lego isolation and Law 2.
 # How: Validate every write target before any worktree is created.
+# [2026-09-13] Codex — Keep planning and review lenses read-only.
+# What: Reject writable blocks assigned to Strategist, Tracker, Razor, or Reviewer.
+# Why: The six specialist jobs must survive as operating boundaries, not names.
+# How: Only canonical implementation lenses Wrench and Forge may receive writes.
 # [2026-09-12] Codex — Keep executable validations outside model-authored plans.
 # What: Mission blocks reference coordinator-owned validation IDs instead of
 #       embedding arbitrary argv selected by the planning model.
@@ -27,7 +31,7 @@ from pathlib import PurePosixPath
 
 from jsonschema import Draft202012Validator
 
-from persona_client import TQB_ROLES
+from persona_client import TQB_ROLES, WRITE_CAPABLE_ROLES
 
 
 PROHIBITED_WRITE_BASENAMES = frozenset({
@@ -138,6 +142,11 @@ def validate_mission_plan(
             errors.append(f"{block['id']}: unknown dependencies: {', '.join(sorted(unknown))}")
         if block["id"] in block["depends_on"]:
             errors.append(f"{block['id']}: block cannot depend on itself")
+        if block["write_paths"] and block["role"] not in WRITE_CAPABLE_ROLES:
+            errors.append(
+                f"{block['id']}: role {block['role']} is review/planning-only and "
+                "cannot receive write paths"
+            )
         for field in ("read_paths", "write_paths"):
             for path in block[field]:
                 if not _safe_relative_path(path):

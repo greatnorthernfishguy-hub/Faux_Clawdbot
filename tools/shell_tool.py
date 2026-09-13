@@ -3,6 +3,10 @@
 # What: Use PolicyEngine's canonical argv parser and subprocess shell=False.
 # Why: The former allowlist-plus-shell=True combination admitted command chaining.
 # How: Apply leading environment assignments explicitly and return the exit code.
+# [2026-09-13] Codex — Remove secrets from child-process environments.
+# What: Build the child environment with the same credential filter as specialists.
+# Why: An allowed command must not inherit provider tokens or webhook credentials.
+# How: Strip credential-shaped variable names before applying already-approved args.
 # [2026-03-29] Chisel/TQB — Block C: ShellTool
 # What: shell_execute extracted from RecursiveContextManager
 # Why: PRD Block C — single-responsibility tool classes
@@ -45,7 +49,11 @@ class ShellTool:
         try:
             from policy_engine import parse_shell_command
             argv, assignments = parse_shell_command(command)
-            process_env = os.environ.copy()
+            blocked = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "WEBHOOK", "CREDENTIAL")
+            process_env = {
+                key: value for key, value in os.environ.items()
+                if not any(fragment in key.upper() for fragment in blocked)
+            }
             process_env.update(assignments)
             result = subprocess.run(
                 argv,

@@ -6,6 +6,11 @@
 #       risk-shaped reviewers to inspect the actual combined diff.
 # Why: Independently valid blocks can still conflict or fail mission-level intent.
 # How: Use the integration worktree, pinned baseline, and durable receipt fields.
+# [2026-09-13] Codex — Require observable diff inspection before approval.
+# What: Reject any block or integration review that did not actually invoke the
+#       coordinator-owned git_diff tool during that review call.
+# Why: A prompt asking for inspection cannot prevent a rubber-stamp approval.
+# How: Check SpecialistToolRuntime's local execution events before accepting JSON.
 # [2026-09-12] Codex — Dispatch TQB blocks into isolated Git worktrees.
 # What: Execute dependency levels concurrently, constrain writes to plan paths,
 #       rerun trusted validations, obtain risk-shaped reviews, commit each block,
@@ -517,6 +522,13 @@ class MissionDispatcher:
                 "model": self._model_receipt(response),
             }
         structured = response.get("structured") or _extract_json(response.get("response", ""))
+        if not self._review_read_diff(runtime):
+            return {
+                "role": role,
+                "decision": "escalate",
+                "findings": ["Review produced a verdict without inspecting git_diff"],
+                "model": self._model_receipt(response),
+            }
         errors = [error.message for error in _review_result_validator.iter_errors(structured or {})]
         if errors:
             return {
@@ -577,6 +589,15 @@ class MissionDispatcher:
                 "model": self._model_receipt(response),
             }
         structured = response.get("structured") or _extract_json(response.get("response", ""))
+        if not self._review_read_diff(runtime):
+            return {
+                "role": role,
+                "decision": "escalate",
+                "findings": [
+                    "Integration review produced a verdict without inspecting git_diff"
+                ],
+                "model": self._model_receipt(response),
+            }
         errors = [
             error.message
             for error in _review_result_validator.iter_errors(structured or {})
@@ -589,6 +610,13 @@ class MissionDispatcher:
                 "model": self._model_receipt(response),
             }
         return {"role": role, **structured, "model": self._model_receipt(response)}
+
+    @staticmethod
+    def _review_read_diff(runtime: SpecialistToolRuntime) -> bool:
+        return any(
+            event.get("tool") == "git_diff" and event.get("status") == "executed"
+            for event in runtime.execution_events
+        )
 
     def _block_prompt(self, block: dict, dependency_evidence: dict, feedback: list[str]) -> str:
         return (

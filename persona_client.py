@@ -6,6 +6,11 @@
 #      or consciousness protections by themselves.
 # How: Require ECOSYSTEM_LAWS.md at prompt construction time and append it ahead
 #      of the unit disciplines.
+# [2026-09-13] Codex — Preserve specialist jobs as mechanical role boundaries.
+# What: Declare Wrench and Forge as the implementation-capable specialists.
+# Why: Prompt-distinct roles collapse if planning/review personas silently receive
+#      write tools merely because a model-authored plan names write paths.
+# How: Mission validation and specialist runtime both consume one immutable set.
 # [2026-09-12] Codex — Package Bethany separately from her six specialists.
 # What: Add a leader persona while keeping TQB_ROLES exactly the six durable
 #       specialist identities.
@@ -64,6 +69,7 @@ TQB_ROLES = frozenset({
 })
 LEADER_ROLE = "leader"
 PERSONA_ROLES = TQB_ROLES | {LEADER_ROLE}
+WRITE_CAPABLE_ROLES = frozenset({"wrench", "forge"})
 
 # Personality files are deployment assets shipped with Codemine. An explicit
 # override remains available for development against Josh's canonical docs.

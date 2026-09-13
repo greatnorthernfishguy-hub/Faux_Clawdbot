@@ -6,6 +6,11 @@
 #       a coordinator-owned baseline when invoking git_diff.
 # Why: MissionPlan read scopes and assembled-diff review must be mechanical.
 # How: Resolve read prefixes below the worktree and inject the trusted base SHA.
+# [2026-09-13] Codex — Enforce role authority and record review evidence locally.
+# What: Refuse write tools for non-implementation personas and retain each actual
+#       tool dispatch in coordinator-owned runtime state.
+# Why: A model response must not grant itself another role or claim it read a diff.
+# How: Use the canonical writable-role set and an append-only per-call event list.
 # [2026-09-12] Codex — Enforce each block's declared write set.
 # What: Bind mutating tools to the exact relative path prefixes approved in the
 #       MissionPlan, in addition to the surrounding worktree boundary.
@@ -32,6 +37,7 @@ import time
 from pathlib import Path
 
 from policy_engine import check_tool_call
+from persona_client import WRITE_CAPABLE_ROLES
 from tools.filesystem_tool import FilesystemTool
 
 logger = logging.getLogger("specialist_tools")
@@ -153,9 +159,12 @@ SPECIALIST_TOOL_DEFINITIONS = [
 
 
 def tool_definitions_for(role: str, allow_write_tools: bool = False) -> list[dict]:
-    allowed = ROLE_TOOLS.get(role.strip().lower())
+    normalized_role = role.strip().lower()
+    allowed = ROLE_TOOLS.get(normalized_role)
     if allowed is None:
         raise ValueError(f"Unknown TQB role: {role}")
+    if allow_write_tools and normalized_role not in WRITE_CAPABLE_ROLES:
+        raise ValueError(f"Role {normalized_role} cannot receive write tools")
     if allow_write_tools:
         allowed = allowed | WRITE_TOOLS
     return [item for item in SPECIALIST_TOOL_DEFINITIONS if item["name"] in allowed]
@@ -189,6 +198,8 @@ class SpecialistToolRuntime:
         self.role = role.strip().lower()
         if self.role not in ROLE_TOOLS:
             raise ValueError(f"Unknown TQB role: {role}")
+        if allow_write_tools and self.role not in WRITE_CAPABLE_ROLES:
+            raise ValueError(f"Role {self.role} cannot receive write tools")
         self.workspace = Path(workspace).resolve()
         if not self.workspace.is_dir():
             raise ValueError(f"Workspace does not exist: {self.workspace}")
@@ -203,6 +214,7 @@ class SpecialistToolRuntime:
         self.allow_write_tools = allow_write_tools
         self.mutations_approved = mutations_approved
         self.substrate_failure: str | None = None
+        self.execution_events: list[dict] = []
         self._recall_gate_cache = {}
         self._fs = FilesystemTool(
             self.workspace, policy_engine=True, read_only_paths=self.read_only_paths,
@@ -253,7 +265,14 @@ class SpecialistToolRuntime:
         else:
             result_text = str(result)
             status = "executed"
+        event = {
+            "tool": tool_name,
+            "status": status,
+            "at": time.time(),
+        }
+        self.execution_events.append(event)
         if not self._deposit(tool_name, args, result_text):
+            event["status"] = "deposit_failed"
             return self._error(
                 tool_name,
                 "Substrate deposit failed after tool execution; stop and escalate",

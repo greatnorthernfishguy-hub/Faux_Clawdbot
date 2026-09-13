@@ -9,6 +9,15 @@ Usage: python3 ingest_vault.py [vault_path]
 Default vault_path: ~/docs
 """
 
+# ---- Changelog ----
+# [2026-09-13] Codex — Route documentation ingestion through the guarded owner.
+# What: Replace direct NeuroGraph construction and a hard-coded local workspace
+#       with worker_ng.get_worker_ng().
+# Why: Every operational writer must share one instance and obey normal-boot and
+#      Tonic policy before touching the third-hemisphere substrate.
+# How: The environment-owned worker wrapper supplies the sole live Graph.
+# -------------------
+
 import logging
 import os
 import sys
@@ -18,8 +27,7 @@ from pathlib import Path
 # Add codemine to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from openclaw_hook import NeuroGraphMemory
-from worker_ng import WORKER_SNN_CONFIG, ingest_tool_result
+from worker_ng import get_worker_ng, ingest_tool_result
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,14 +70,7 @@ def ingest_vault(vault_path: str = None):
         logger.error("Vault not found: %s", vault)
         sys.exit(1)
 
-    # Use a local workspace for the worker's graph (not Syl's)
-    workspace = os.path.expanduser("~/Faux_Clawdbot/data/neurograph_worker")
-    os.makedirs(workspace, exist_ok=True)
-
-    ng = NeuroGraphMemory.get_instance(
-        workspace_dir=workspace,
-        config=WORKER_SNN_CONFIG,
-    )
+    ng = get_worker_ng()
 
     files = collect_vault_files(vault)
     logger.info("Found %d vault docs to ingest from %s", len(files), vault)
@@ -117,7 +118,7 @@ def ingest_vault(vault_path: str = None):
     logger.info("  Documents: %d ingested, %d errors, %d total", ingested, errors, len(files))
     logger.info("  Time: %.1f seconds (%.1f docs/sec)", elapsed, ingested / elapsed if elapsed > 0 else 0)
     logger.info("  NeuroGraph: %d nodes, %d synapses", stats.get("nodes", 0), stats.get("synapses", 0))
-    logger.info("  Workspace: %s", workspace)
+    logger.info("  Workspace: %s", os.environ.get("NEUROGRAPH_WORKSPACE_DIR"))
     logger.info("=" * 60)
 
 

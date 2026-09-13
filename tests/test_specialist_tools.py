@@ -14,6 +14,8 @@
 
 import subprocess
 
+import pytest
+
 from specialist_tools import SpecialistToolRuntime, tool_definitions_for
 
 
@@ -31,15 +33,26 @@ def runtime(tmp_path, role="forge", approved=False, validations=None, allow_writ
 
 
 def test_planning_and_review_roles_have_no_write_tools():
-    for role in ("strategist", "tracker", "wrench", "razor", "reviewer"):
+    for role in ("strategist", "tracker", "razor", "reviewer"):
         names = {tool["name"] for tool in tool_definitions_for(role)}
         assert "write_file" not in names
         assert "edit_file" not in names
         assert "git_diff" in names
 
-    assert "write_file" in {
-        tool["name"] for tool in tool_definitions_for("tracker", allow_write_tools=True)
-    }
+    for role in ("wrench", "forge"):
+        names = {tool["name"] for tool in tool_definitions_for(role, allow_write_tools=True)}
+        assert "write_file" in names
+
+
+def test_nonimplementation_roles_refuse_write_authority(tmp_path):
+    for role in ("leader", "strategist", "tracker", "razor", "reviewer"):
+        with pytest.raises(ValueError, match="cannot receive write tools"):
+            SpecialistToolRuntime(
+                role=role, workspace=tmp_path, worker_ng=None,
+                allow_write_tools=True, write_paths=["new.py"],
+            )
+        with pytest.raises(ValueError, match="cannot receive write tools"):
+            tool_definitions_for(role, allow_write_tools=True)
 
 
 def test_unapproved_forge_write_is_staged(tmp_path):
@@ -128,6 +141,7 @@ def test_tool_execution_becomes_error_when_raw_deposit_fails(tmp_path):
     assert result["status"] == "error"
     assert "Substrate deposit failed" in result["result"]
     assert worker.substrate_failure
+    assert worker.execution_events[-1]["status"] == "deposit_failed"
 
 
 def test_named_validation_runs_exact_argv_with_secrets_removed(tmp_path, monkeypatch):
@@ -160,7 +174,7 @@ def test_git_evidence_reads_actual_worktree(tmp_path):
     subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / "tracked.txt").write_text("after\n")
 
-    worker = runtime(tmp_path, role="reviewer")
+    worker = runtime(tmp_path, role="reviewer", allow_writes=False)
     result = worker.execute("git_diff", {})
 
     assert result["status"] == "executed"

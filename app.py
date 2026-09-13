@@ -1,4 +1,18 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Refuse unauthorized Python application startup and retire
+# the legacy Spec execution surface.
+# What: Run the stdlib-only normal-boot guard before dotenv, Gradio, or Graph imports.
+#       Remove the direct WorkBlockSpec tab; Mission Control is the sole build path.
+# Why: Direct app imports must not bypass preservation mode or construct the Graph.
+#      A pasted legacy spec could bypass Mission worktrees, routes, and review gates.
+# How: The exact mode plus preservation acknowledgement are mandatory.
+#      Historical spec code remains in Git but is absent from startup and packaging.
+# [2026-09-13] Codex — Make Mission Control the sole process/Git authority.
+# What: Remove shell, Git, and bulk-ingestion tools from Chat and re-run Rim checks
+#       when a human releases a staged file/notebook mutation.
+# Why: A Chat approval must not become a bypass around Mission isolation or expose
+#      credentials through a child process; stale staged arguments must be rechecked.
+# How: Filter the provider tool surface and registry, then validate again at execution.
 # [2026-09-13] Codex — Retire the pre-callosum topology sync at startup.
 # What: Remove the Git/JSONL sync import and boot call; all TQB lenses continue
 #       through Codemine's one shared substrate instance.
@@ -51,6 +65,10 @@
 #        PolicyEngine.check_tool_call() on every tool; TOOL_REGISTRY dict dispatch
 # -------------------
 
+from boot_mode import require_normal_boot
+
+require_normal_boot()
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -70,8 +88,8 @@ from agent_runner import run_tool_loop
 from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context, filter_recall_results, surfacing_context, gate_repeat_recall
-from spec_executor import SpecExecutor
 from mission_service import MissionService
+from archive_safety import validated_zip_members
 
 logging.basicConfig(
     level=logging.INFO,
@@ -162,21 +180,21 @@ TOOL_REGISTRY = {
     "search_testament": lambda args: _format_testament_results(
         ctx.search_testament(args.get("query", ""), args.get("n", 5))
     ),
-    "ingest_workspace": lambda args: ctx.ingest_workspace(),
-    "shell_execute": lambda args: ctx.shell_execute(args.get("command") or ""),
-    "push_to_github": lambda args: ctx.push_to_github(
-        args.get("message") or "Manual Backup"
-    ),
-    "pull_from_github": lambda args: ctx.pull_from_github(
-        args.get("branch") or "main"
-    ),
-    "create_shadow_branch": lambda args: ctx.create_shadow_branch(),
     "notebook_read": lambda args: ctx.notebook_read(),
     "notebook_add": lambda args: ctx.notebook_add(args.get("content") or ""),
     "notebook_delete": lambda args: ctx.notebook_delete(args.get("index", 0)),
     "map_repository_structure": lambda args: ctx.map_repository_structure(),
     "get_stats": lambda args: ctx.get_stats(),
 }
+
+_CHAT_PROHIBITED_TOOLS = frozenset({
+    "ingest_workspace", "shell_execute", "push_to_github",
+    "pull_from_github", "create_shadow_branch",
+})
+CHAT_TOOL_DEFINITIONS = [
+    definition for definition in TOOL_DEFINITIONS
+    if definition.get("name") not in _CHAT_PROHIBITED_TOOLS
+]
 
 
 def _format_code_results(results: list) -> str:
@@ -281,6 +299,11 @@ def execute_tool(tool_name: str, args: dict) -> dict:
 
 def execute_staged_tool(tool_name: str, args: dict) -> str:
     """Execute a previously staged tool (user approved via gate)."""
+    allowed, reason = check_tool_call(
+        tool_name, args, REPO_PATH, _ECOSYSTEM_READ_PATHS,
+    )
+    if not allowed:
+        return f"Denied after approval recheck: {reason}"
     handler = TOOL_REGISTRY.get(tool_name)
     if not handler:
         return f"Unknown tool: {tool_name}"
@@ -348,10 +371,14 @@ def _process_zip(file_path: str, file_name: str) -> str:
                 )
 
             extract_to = REPO_PATH / "uploaded_assets" / file_name.replace(".zip", "")
+            try:
+                members = validated_zip_members(z, extract_to)
+            except ValueError as exc:
+                return f"ZIP rejected: {exc}"
             if extract_to.exists():
                 shutil.rmtree(extract_to)
             extract_to.mkdir(parents=True, exist_ok=True)
-            z.extractall(extract_to)
+            z.extractall(extract_to, members=members)
 
         file_list = [f.name for f in extract_to.glob('*')]
         preview = ", ".join(file_list[:10])
@@ -457,7 +484,7 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
     # Build system prompt
     stats = ctx.get_stats()
     notebook_text = ctx.notebook_read()
-    system_prompt = build_system_prompt(stats, notebook_text, TOOL_DEFINITIONS) + substrate_context
+    system_prompt = build_system_prompt(stats, notebook_text, CHAT_TOOL_DEFINITIONS) + substrate_context
 
     # Build token-aware message window
     api_messages = _build_api_messages(safe_hist, system_prompt)
@@ -467,7 +494,7 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
             client=client,
             system_prompt=system_prompt,
             messages=api_messages,
-            tools=TOOL_DEFINITIONS,
+            tools=CHAT_TOOL_DEFINITIONS,
             call_model_fn=call_model,
             execute_tool_fn=execute_tool,
             truncate_result_fn=_truncate_tool_result,
@@ -492,19 +519,37 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
 
     safe_hist.append({"role": "assistant", "content": final})
 
+    continuity_errors = []
+
     # Deposit response as raw experience — closes the signal loop (#192)
     try:
         ingest_tool_result(worker_ng, "assistant_response", {}, final)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         logger.warning("NG response deposit failed: %s", e)
+        continuity_errors.append(f"response deposit failed: {type(e).__name__}: {e}")
 
     try:
         ctx.save_conversation_turn(full_message, final, len(safe_hist))
-        # Explicit checkpoint at end of turn — auto_save_interval is high to avoid
-        # mid-turn I/O thrashing, so we save once when the turn is complete
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        logger.warning("Conversation experience save failed: %s", e)
+        continuity_errors.append(f"conversation deposit failed: {type(e).__name__}: {e}")
+
+    # Explicit checkpoint at end of turn — auto_save_interval is high to avoid
+    # mid-turn I/O thrashing, so we save once when the turn is complete.
+    try:
         worker_ng.save()
-    except (OSError, ValueError) as e:
-        logger.warning("Conversation save failed: %s", e)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        logger.warning("NeuroGraph checkpoint save failed: %s", e)
+        continuity_errors.append(f"checkpoint save failed: {type(e).__name__}: {e}")
+
+    if continuity_errors:
+        warning = (
+            "\n\n**CONTINUITY BLOCKED:** This response was produced, but its "
+            "NeuroGraph persistence did not complete. Do not treat the turn as "
+            "durable. " + " | ".join(continuity_errors)
+        )
+        final += warning
+        safe_hist[-1] = {"role": "assistant", "content": final}
 
     return (safe_hist, "", safe_props, _format_gate_choices(safe_props),
             _stats_label_files(), _stats_label_convos())
@@ -553,45 +598,6 @@ def _stats_label_convos():
 
 
 # ---------------------------------------------------------------------------
-# Spec Executor — structured work block execution
-# ---------------------------------------------------------------------------
-
-_spec_executor = SpecExecutor(
-    tool_registry=TOOL_REGISTRY,
-    policy_check_fn=check_tool_call,
-    worker_ng=worker_ng,
-    workspace=REPO_PATH,
-)
-
-
-def execute_spec(spec_json: str) -> str:
-    """Execute a structured work block spec. Returns JSON execution report."""
-    try:
-        spec = json.loads(spec_json)
-    except json.JSONDecodeError as e:
-        return json.dumps({"status": "rejected", "errors": [f"Invalid JSON: {e}"]}, indent=2)
-
-    report = _spec_executor.execute_block(spec)
-
-    # Log report to audit trail
-    try:
-        audit_dir = REPO_PATH / "data" / "audit"
-        audit_dir.mkdir(parents=True, exist_ok=True)
-        with open(audit_dir / "blocks.jsonl", "a") as f:
-            f.write(json.dumps(report, default=str) + "\n")
-    except OSError as e:
-        logger.warning("Failed to write block audit: %s", e)
-
-    # Save NG checkpoint after spec execution
-    try:
-        worker_ng.save()
-    except (OSError, ValueError) as e:
-        logger.warning("NG checkpoint after spec execution failed: %s", e)
-
-    return json.dumps(report, indent=2, default=str)
-
-
-# ---------------------------------------------------------------------------
 # Mission Control — durable plan, then approved isolated execution
 # ---------------------------------------------------------------------------
 
@@ -615,7 +621,12 @@ def execute_planned_mission(proposal: dict, command_approved: bool):
     result = _mission_service.execute(
         proposal or {}, command_approved=bool(command_approved),
     )
-    if result.get("status") not in {"awaiting_mutation_approval", "awaiting_human_approval"}:
+    result_status = result.get("status")
+    if result_status in {"awaiting_mutation_approval", "awaiting_human_approval"}:
+        proposal = {**(proposal or {}), "status": "planned"}
+    elif result_status in {"blocked", "failed", "rejected"}:
+        proposal = {**(proposal or {}), "status": result_status}
+    else:
         proposal = {**(proposal or {}), "status": "executed"}
     return json.dumps(result, indent=2, default=str), proposal
 
@@ -647,14 +658,6 @@ with gr.Blocks(title="TQB Worker") as demo:
                 btn_exec = gr.Button("Execute", variant="primary")
                 btn_clear = gr.Button("Clear")
             res_md = gr.Markdown()
-        with gr.Tab("Spec"):
-            gr.Markdown("### Work Block Spec Executor\nPaste a JSON spec and execute it mechanically.")
-            spec_input = gr.Textbox(
-                label="JSON Spec", lines=15,
-                placeholder='{"spec_version": "1.0.0", "block": {...}, ...}'
-            )
-            btn_spec = gr.Button("Execute Spec", variant="primary")
-            spec_output = gr.Textbox(label="Execution Report", lines=20, interactive=False)
         with gr.Tab("Mission"):
             gr.Markdown(
                 "### Mission Control\nBethany inspects and proposes a plan first. "
@@ -704,7 +707,6 @@ with gr.Blocks(title="TQB Worker") as demo:
         state_proposals,
         [res_md, state_proposals, gate]
     )
-    btn_spec.click(execute_spec, [spec_input], [spec_output])
     btn_plan_mission.click(
         plan_mission,
         [mission_intent, mission_constraints, mission_workspace],
