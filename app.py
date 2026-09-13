@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Replace one-click mission mutation with plan and execute gates.
+# What: Mission Control first persists Bethany's concrete MissionPlan, then an
+#       explicit second action dispatches it into isolated worktrees.
+# Why: The legacy button could generate, mutate, merge, and push without a
+#      reviewable boundary or external integration review.
+# How: Compose MissionService and retain the proposal in Gradio state.
 # [2026-09-12] Codex — Reuse one model/tool loop across Chat and TQB roles
 # What: Chat delegates response/tool iteration to agent_runner.run_tool_loop().
 # Why: Specialists need the same proven execution behavior without a parallel
@@ -60,7 +66,7 @@ from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context, filter_recall_results, surfacing_context, gate_repeat_recall
 from ng_topology_sync import run_sync as _run_ng_topology_sync
 from spec_executor import SpecExecutor
-from orchestrator import Orchestrator
+from mission_service import MissionService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -580,37 +586,32 @@ def execute_spec(spec_json: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator — full mission loop
+# Mission Control — durable plan, then approved isolated execution
 # ---------------------------------------------------------------------------
 
-_orchestrator = Orchestrator(
-    spec_executor=_spec_executor,
+_mission_service = MissionService(
     worker_ng=worker_ng,
-    workspace=REPO_PATH,
 )
 
 
-def run_mission(intent: str, constraints: str, workspace: str) -> str:
-    """Run a full mission from intent to completion. Returns JSON result."""
+def plan_mission(intent: str, constraints: str, workspace: str):
+    """Create and persist a concrete MissionPlan without mutating the target."""
     ws = workspace.strip() if workspace.strip() else None
     cs = constraints.strip() if constraints.strip() else None
-
-    if not intent.strip():
-        return json.dumps({"status": "failed", "error": "No intent provided"}, indent=2)
-
-    result = _orchestrator.orchestrate(
-        intent=intent.strip(),
-        constraints=cs,
-        workspace=ws,
+    result = _mission_service.plan(
+        intent=intent, constraints=cs, workspace=ws,
     )
+    return json.dumps(result, indent=2, default=str), result
 
-    # Save NG checkpoint after mission
-    try:
-        worker_ng.save()
-    except (OSError, ValueError) as e:
-        logger.warning("NG checkpoint after mission failed: %s", e)
 
-    return json.dumps(result, indent=2, default=str)
+def execute_planned_mission(proposal: dict, command_approved: bool):
+    """Execute the displayed proposal and stop at external integration review."""
+    result = _mission_service.execute(
+        proposal or {}, command_approved=bool(command_approved),
+    )
+    if result.get("status") not in {"awaiting_mutation_approval", "awaiting_human_approval"}:
+        proposal = {**(proposal or {}), "status": "executed"}
+    return json.dumps(result, indent=2, default=str), proposal
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +620,7 @@ def run_mission(intent: str, constraints: str, workspace: str) -> str:
 
 with gr.Blocks(title="TQB Worker") as demo:
     state_proposals = gr.State([])
+    state_mission_plan = gr.State({})
     gr.Markdown("# TQB Worker Command Center")
     with gr.Tabs():
         with gr.Tab("Chat"):
@@ -648,7 +650,10 @@ with gr.Blocks(title="TQB Worker") as demo:
             btn_spec = gr.Button("Execute Spec", variant="primary")
             spec_output = gr.Textbox(label="Execution Report", lines=20, interactive=False)
         with gr.Tab("Mission"):
-            gr.Markdown("### Mission Control\nDescribe what you want done. TQB handles the rest.")
+            gr.Markdown(
+                "### Mission Control\nBethany inspects and proposes a plan first. "
+                "Execution uses isolated worktrees and stops before source merge or push."
+            )
             mission_intent = gr.Textbox(
                 label="Intent", lines=3,
                 placeholder="What do you want built, fixed, or audited?"
@@ -661,8 +666,13 @@ with gr.Blocks(title="TQB Worker") as demo:
                 label="Workspace (optional)", lines=1,
                 placeholder="/home/josh (leave blank for default)"
             )
-            btn_mission = gr.Button("Go", variant="primary")
-            mission_output = gr.Textbox(label="Mission Result", lines=25, interactive=False)
+            btn_plan_mission = gr.Button("Create Plan", variant="primary")
+            command_approval = gr.Checkbox(
+                label="Approve command-level / constitutional scope if the plan contains it",
+                value=False,
+            )
+            btn_execute_mission = gr.Button("Execute Displayed Plan")
+            mission_output = gr.Textbox(label="Mission Plan / Result", lines=25, interactive=False)
 
     inputs = [txt, chat, state_proposals, file_in]
     outputs = [chat, txt, state_proposals, gate, stat_f, stat_c]
@@ -689,7 +699,16 @@ with gr.Blocks(title="TQB Worker") as demo:
         [res_md, state_proposals, gate]
     )
     btn_spec.click(execute_spec, [spec_input], [spec_output])
-    btn_mission.click(run_mission, [mission_intent, mission_constraints, mission_workspace], [mission_output])
+    btn_plan_mission.click(
+        plan_mission,
+        [mission_intent, mission_constraints, mission_workspace],
+        [mission_output, state_mission_plan],
+    )
+    btn_execute_mission.click(
+        execute_planned_mission,
+        [state_mission_plan, command_approval],
+        [mission_output, state_mission_plan],
+    )
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860, show_error=True)

@@ -1,0 +1,13 @@
+{
+  "catalog_version": "1.0.0",
+  "validations": {
+    "git-diff-check": {
+      "description": "Reject whitespace errors in the current uncommitted diff.",
+      "argv": ["git", "diff", "--check"]
+    },
+    "python-tests": {
+      "description": "Run the repository's Python pytest suite quietly.",
+      "argv": ["python3", "-m", "pytest", "-q"]
+    }
+  }
+}
