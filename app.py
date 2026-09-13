@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Reuse one model/tool loop across Chat and TQB roles
+# What: Chat delegates response/tool iteration to agent_runner.run_tool_loop().
+# Why: Specialists need the same proven execution behavior without a parallel
+#       implementation that can drift from the interactive agent.
+# How: Keep Chat's prompt, context, policy executor, gate UI, and persistence;
+#      extract only the provider-neutral response/tool iteration.
 # [2026-07-06] Weft (TQB) — Wire pattern-completion recall filter/compose/gate into call sites
 # What: (1) agent_loop()'s per-turn substrate context now runs .recall() output through
 #       filter_recall_results() + surfacing_context() instead of joining the raw vdb shards.
@@ -48,6 +54,7 @@ from pathlib import Path
 from recursive_context import RecursiveContextManager
 from policy_engine import check_tool_call, should_gate_for_review
 from model_client import get_client, call_model
+from agent_runner import run_tool_loop
 from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context, filter_recall_results, surfacing_context, gate_repeat_recall
@@ -443,106 +450,25 @@ def agent_loop(message: str, history: list, pending_proposals: list, uploaded_fi
     # Build token-aware message window
     api_messages = _build_api_messages(safe_hist, system_prompt)
 
-    accumulated_text = ""
-    staged_this_turn = []
-    tool_results_buffer = []
+    try:
+        run = run_tool_loop(
+            client=client,
+            system_prompt=system_prompt,
+            messages=api_messages,
+            tools=TOOL_DEFINITIONS,
+            call_model_fn=call_model,
+            execute_tool_fn=execute_tool,
+            truncate_result_fn=_truncate_tool_result,
+            max_iterations=MAX_ITERATIONS,
+        )
+    except (OSError, ConnectionError, ValueError) as e:
+        logger.error("API call failed: %s: %s", type(e).__name__, e, exc_info=True)
+        safe_hist.append({"role": "assistant", "content": f"API Error: {e}"})
+        return (safe_hist, "", safe_props, _format_gate_choices(safe_props),
+                _stats_label_files(), _stats_label_convos())
 
-    for iteration in range(MAX_ITERATIONS):
-        try:
-            resp = call_model(client, system_prompt, api_messages, TOOL_DEFINITIONS)
-        except (OSError, ConnectionError, ValueError) as e:
-            logger.error("API call failed: %s: %s", type(e).__name__, e, exc_info=True)
-            safe_hist.append({"role": "assistant", "content": f"API Error: {e}"})
-            return (safe_hist, "", safe_props, _format_gate_choices(safe_props),
-                    _stats_label_files(), _stats_label_convos())
-
-        # Process response content blocks
-        assistant_content = []
-        has_tool_use = False
-
-        for block in resp.content:
-            if block.type == "text":
-                accumulated_text += ("\n\n" if accumulated_text else "") + block.text
-                assistant_content.append({"type": "text", "text": block.text})
-
-            elif block.type == "tool_use":
-                has_tool_use = True
-                assistant_content.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
-
-        # If no tool calls, we're done
-        if not has_tool_use:
-            break
-
-        # Hard stop at max iterations — no advisory, just stop
-        if iteration >= MAX_ITERATIONS - 1:
-            break
-
-        # Append assistant message with all content blocks
-        api_messages.append({"role": "assistant", "content": assistant_content})
-
-        # Process tool calls and build tool results
-        tool_results = []
-        for block in resp.content:
-            if block.type != "tool_use":
-                continue
-
-            res = execute_tool(block.name, block.input)
-
-            if res["status"] == "executed":
-                result_text = _truncate_tool_result(str(res["result"]))
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_text,
-                })
-                tool_results_buffer.append(f"Used {block.name}: {str(res['result'])[:100]}...")
-
-            elif res["status"] == "staged":
-                p_id = f"p_{int(time.time())}_{block.name}"
-                staged_this_turn.append({
-                    "id": p_id,
-                    "tool": block.name,
-                    "args": res.get("args", block.input),
-                    "description": res.get("description", f"Staged: {block.name}"),
-                    "timestamp": time.strftime("%H:%M:%S"),
-                })
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": "This tool has been staged for review. Awaiting approval.",
-                })
-
-            elif res["status"] == "error":
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: {res.get('result', 'Unknown error')}",
-                    "is_error": True,
-                })
-
-        # Append tool results as user message
-        api_messages.append({"role": "user", "content": tool_results})
-
-    # If no text accumulated but tools ran, request summary
-    if not accumulated_text.strip() and tool_results_buffer:
-        try:
-            api_messages.append({
-                "role": "user",
-                "content": "You executed tools but produced no explanation. Summarize the results."
-            })
-            final_resp = call_model(client, system_prompt, api_messages, [])
-            for block in final_resp.content:
-                if block.type == "text":
-                    accumulated_text = block.text
-                    break
-        except (OSError, ConnectionError, ValueError) as e:
-            logger.warning("Summary request failed: %s: %s", type(e).__name__, e)
-            accumulated_text = "Actions completed."
+    accumulated_text = run["text"]
+    staged_this_turn = run["staged_actions"]
 
     final = accumulated_text
     if staged_this_turn:

@@ -76,6 +76,7 @@ COPY openclaw_hook.py .
 COPY neurograph_migrate.py .
 COPY policy_engine.py .
 COPY model_client.py .
+COPY agent_runner.py .
 COPY system_prompt.py .
 COPY tool_definitions.py .
 COPY worker_ng.py .
