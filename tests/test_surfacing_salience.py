@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Mark real-Graph tests as explicitly boot-authorized.
+# What: Apply the shared isolated-construction fixture to this module.
+# Why: Production now refuses direct Graph construction before side effects.
+# How: Use pytest's module fixture marker without changing substrate assertions.
 # [2026-07-08] Candor (TQB/QB build) — pin the honest salience label
 # What: New file. Pins SurfacingMonitor.format_context()'s render format:
 #       "(salience: {score:.2f})" — and the absence of the retired
@@ -20,6 +24,9 @@ import pytest
 
 from neuro_foundation import StepResult
 from openclaw_hook import NeuroGraphMemory
+
+
+pytestmark = pytest.mark.usefixtures("authorized_graph_construction")
 
 
 @pytest.fixture

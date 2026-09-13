@@ -12,6 +12,10 @@ license: mit
 <!--
 Changelog
 2026-09-13 — Codex
+What: Clarified Chat's repository-read boundary and scratch ZIP handling.
+Why: The preservation review found the former read-only claim was too broad.
+How: Documented the enforced tool registry and environment-owned upload root.
+2026-09-13 — Codex
 What: Documented the post-review normal-boot acknowledgement, role authority,
       read-only Chat surface, and retired Spec runtime.
 Why: Operator instructions must match the mechanical boundaries in the image.
@@ -57,8 +61,11 @@ changes. Recalled material is memory and must be checked against current files.
 
 Codemine has three user-facing paths:
 
-- **Chat** uses the shared model/tool loop for interactive, read-only
-  investigation; it has no shell, Git mutation, or bulk-ingestion tools.
+- **Chat** uses the shared model/tool loop for interactive repository
+  investigation. It cannot write repository files, run processes, mutate Git,
+  or bulk-ingest. Explicitly gated notebook notes remain available. Uploaded
+  archives are extracted into environment-owned scratch space outside the
+  repository.
 - Legacy WorkBlockSpec execution is retained only as historical source and is
   absent from the runtime image. Mission Control is the sole build path.
 - **Mission** uses the new plan-then-execute flow. Bethany inspects the actual

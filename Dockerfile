@@ -1,6 +1,9 @@
 # Dockerfile for TQB Worker on HuggingFace Spaces
 #
 # CHANGELOG [2026-09-13 - Codex]
+# SAFETY: Keep uploaded archives in environment-owned scratch outside source.
+#
+# CHANGELOG [2026-09-13 - Codex]
 # SAFETY: Default the image to preservation dry-run so deployment cannot wake an
 # unpreserved Codemine graph when Space variables are absent or stale.
 #
@@ -53,10 +56,12 @@ RUN pip uninstall -y gradio gradio-client 2>/dev/null; \
 
 # Create all directories the app needs to write to at runtime
 RUN mkdir -p /workspace/e-t-systems \
+             /tmp/codemine-uploads \
              /tmp/.cache/huggingface \
              /tmp/.cache/torch \
              /tmp/.neurograph/checkpoints \
              /data/neurograph_worker/checkpoints \
+             /data/codemine-memory \
              /data/codemine-missions \
              /data/audit
 
@@ -70,10 +75,12 @@ ENV NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
 ENV CODEMINE_TONIC_MODE=disabled
 ENV CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
 ENV CODEMINE_PERSISTENT_ROOT=/data
+ENV CODEMINE_NOTEBOOK_PATH=/data/codemine-memory/notebook.json
 ENV CODEMINE_BOOT_MODE=preserve
 ENV CODEMINE_PRESERVATION_DRY_RUN=1
 ENV CODEMINE_MISSION_ROOT=/data/codemine-missions
 ENV CODEMINE_WORKTREE_ROOT=/tmp/codemine-worktrees
+ENV CODEMINE_UPLOAD_ROOT=/tmp/codemine-uploads
 ENV CODEMINE_DEFAULT_WORKSPACE=/workspace/e-t-systems
 ENV CODEMINE_WORKSPACE_ROOTS=/workspace
 ENV CODEMINE_VALIDATIONS_JSON={"catalog_version":"1.0.0","validations":{"git-diff-check":{"description":"Reject_whitespace_errors_in_the_current_diff","argv":["git","diff","--check"]},"python-tests":{"description":"Run_the_Python_pytest_suite_quietly","argv":["python3","-m","pytest","-q"]}}}
@@ -136,7 +143,7 @@ COPY tools/ ./tools/
 # PERMISSIONS FOR HF SPACES (UID 1000)
 # =============================================================================
 RUN chmod +x entrypoint.sh && \
-    chown -R 1000:1000 /app /workspace /tmp/.cache /tmp/.neurograph /data
+    chown -R 1000:1000 /app /workspace /tmp/.cache /tmp/.neurograph /tmp/codemine-uploads /data
 
 # Expose Gradio port (HF Spaces standard)
 EXPOSE 7860

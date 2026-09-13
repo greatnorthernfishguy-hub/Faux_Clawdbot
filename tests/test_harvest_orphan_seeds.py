@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Mark real-Graph tests as explicitly boot-authorized.
+# What: Apply the shared isolated-construction fixture to this module.
+# Why: Production now refuses direct Graph construction before side effects.
+# How: Use pytest's module fixture marker without changing substrate assertions.
 # [2026-07-08] Meridian (TQB/QB build) — Orphan-seed harvest regression tests
 # What: New file. Regression coverage for the _harvest_associations() seed-loop
 #       membership guard (`entry_id in self.graph.nodes`): an orphaned top vdb
@@ -21,6 +25,9 @@ import numpy as np
 import pytest
 
 from openclaw_hook import NeuroGraphMemory
+
+
+pytestmark = pytest.mark.usefixtures("authorized_graph_construction")
 
 
 QUERY = "spreading activation harvest regression query"

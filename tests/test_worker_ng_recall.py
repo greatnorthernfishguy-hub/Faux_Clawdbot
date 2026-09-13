@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Mark real-Graph tests as explicitly boot-authorized.
+# What: Apply the shared isolated-construction fixture to this module.
+# Why: Production now refuses direct Graph construction before side effects.
+# How: Use pytest's module fixture marker without changing substrate assertions.
 # [2026-07-06] Weft (TQB) — Initial test suite for filter_recall_results(),
 #              surfacing_context(), and gate_repeat_recall()
 # What: New file. Covers the three pattern-completion recall helpers added to
@@ -23,6 +27,9 @@ from neuro_foundation import StepResult
 from openclaw_hook import NeuroGraphMemory
 from surfacing import SurfacingMonitor
 from worker_ng import filter_recall_results, gate_repeat_recall, surfacing_context
+
+
+pytestmark = pytest.mark.usefixtures("authorized_graph_construction")
 
 
 @pytest.fixture

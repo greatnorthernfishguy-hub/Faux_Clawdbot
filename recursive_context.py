@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Move Chat notebook state outside the source checkout.
+# What: Resolve the notebook from environment-owned persistent storage.
+# Why: A gated note update still dirtied REPO_PATH and bypassed Mission isolation.
+# How: Use CODEMINE_NOTEBOOK_PATH beneath CODEMINE_PERSISTENT_ROOT by default.
 # [2026-09-13] Codex — Remove the facade's independent Graph constructor.
 # What: Require the one worker_ng-owned instance as a constructor argument.
 # Why: A second creation path could bypass preservation and split one substrate.
@@ -27,8 +31,16 @@ logger = logging.getLogger("recursive_context")
 class RecursiveContextManager:
     def __init__(self, repo_path: str, ng=None):
         self.repo_path = Path(repo_path)
-        self.memory_path = self.repo_path / "memory"
-        self.notebook_file = self.memory_path / "notebook.json"
+        persistent_root = Path(
+            os.getenv("CODEMINE_PERSISTENT_ROOT", "/data")
+        ).expanduser().resolve()
+        self.notebook_file = Path(
+            os.getenv(
+                "CODEMINE_NOTEBOOK_PATH",
+                str(persistent_root / "codemine-memory" / "notebook.json"),
+            )
+        ).expanduser().resolve()
+        self.memory_path = self.notebook_file.parent
         self.token = os.getenv("HF_TOKEN")
         self.dataset_id = os.getenv("DATASET_ID", "Executor-Tyrant-Framework/clawdbot-memory")
 

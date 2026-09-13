@@ -1,6 +1,10 @@
 """Pure validation helpers for untrusted ZIP uploads."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Bound archive destination as well as archive members.
+# What: Derive a safe per-upload root outside the source repository.
+# Why: A basename such as ..zip could widen extraction to the checkout root.
+# How: Validate the environment root, extension, stem, and resolved destination.
 # [2026-09-13] Codex — Refuse ZIP traversal and symlink members before extraction.
 # What: Validate every member against the resolved extraction root.
 # Why: Size checks alone do not prevent an uploaded archive from writing elsewhere.
@@ -12,6 +16,33 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo
+
+
+def safe_upload_extract_root(
+    upload_root: Path,
+    archive_name: str,
+    *,
+    repository_root: Path,
+) -> Path:
+    """Return a stable extraction directory outside the source repository."""
+    root = Path(upload_root).expanduser().resolve()
+    repository = Path(repository_root).expanduser().resolve()
+    if root == repository or root.is_relative_to(repository):
+        raise ValueError("upload root must be outside the source repository")
+
+    basename = Path(archive_name).name
+    if not basename or "\x00" in basename or "\\" in basename:
+        raise ValueError("unsafe ZIP archive name")
+    if not basename.lower().endswith(".zip"):
+        raise ValueError("unsafe ZIP archive name")
+    stem = basename[:-4]
+    if stem in {"", ".", ".."}:
+        raise ValueError("unsafe ZIP archive name")
+
+    destination = (root / stem).resolve()
+    if destination == root or not destination.is_relative_to(root):
+        raise ValueError("ZIP extraction destination escapes upload root")
+    return destination
 
 
 def validated_zip_members(archive: ZipFile, extract_root: Path) -> list[ZipInfo]:

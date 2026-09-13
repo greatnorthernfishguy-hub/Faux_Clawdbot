@@ -1,6 +1,10 @@
 """Tests for role and workspace boundaries on specialist tools."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Verify coordinator-owned reviewer diff evidence.
+# What: Reject model-selected bases and failed Git revisions.
+# Why: Failed or unrelated diff calls must not satisfy approval evidence.
+# How: Exercise both unpinned and pinned reviewer runtimes.
 # [2026-09-13] Codex — Verify declared read-path enforcement.
 # What: Permit a declared file while refusing an undeclared file and broad list.
 # Why: MissionPlan read scopes must constrain actual specialist file tools.
@@ -180,3 +184,26 @@ def test_git_evidence_reads_actual_worktree(tmp_path):
     assert result["status"] == "executed"
     assert "-before" in result["result"]
     assert "+after" in result["result"]
+
+
+def test_git_evidence_rejects_model_chosen_base_and_failed_diff(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+
+    unpinned = runtime(tmp_path, role="reviewer", allow_writes=False)
+    assert unpinned.execute("git_diff", {"base": "HEAD~1"})["status"] == "error"
+
+    pinned = SpecialistToolRuntime(
+        role="reviewer", workspace=tmp_path, worker_ng=None,
+        read_paths=["tracked.txt"], git_diff_base="missing-revision",
+    )
+    failed = pinned.execute("git_diff", {"base": "missing-revision"})
+    assert failed["status"] == "error"
+    assert not any(
+        event["tool"] == "git_diff" and event["status"] == "executed"
+        for event in pinned.execution_events
+    )

@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Mark real-Graph tests as explicitly boot-authorized.
+# What: Apply the shared isolated-construction fixture to this module.
+# Why: Production now refuses direct Graph construction before side effects.
+# How: Use pytest's module fixture marker without changing substrate assertions.
 # [2026-07-08] Meridian (TQB/QB build) — GSG poincare_dir stamping + backfill tests
 # What: New file. Covers (1) init-time backfill: after constructing a
 #       NeuroGraphMemory over a workspace with pre-existing unstamped nodes,
@@ -23,6 +27,9 @@ import pytest
 
 import openclaw_hook
 from openclaw_hook import NeuroGraphMemory, _embed_to_poincare_dir
+
+
+pytestmark = pytest.mark.usefixtures("authorized_graph_construction")
 
 
 NG_CONFIG = {"tonic": {"enabled": False}}

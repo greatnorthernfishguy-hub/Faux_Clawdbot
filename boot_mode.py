@@ -2,6 +2,10 @@
 """Fail-closed boot authorization shared by shell and Python entry points."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Require a reviewed code change to enable normal runtime.
+# What: Mark the transformer-backed runtime unavailable in this preservation revision.
+# Why: The exact environment triplet previously reached startup writes before failing.
+# How: Add a code-owned readiness gate after all environment authorization checks.
 # [2026-09-13] Codex — Enforce preservation mode inside Python.
 # What: Require exact normal-mode, preservation acknowledgement, and transformer
 #       Tonic values before any application path may construct Codemine's Graph.
@@ -20,6 +24,10 @@ PRESERVE_MODE = "preserve"
 NORMAL_MODE = "normal"
 NORMAL_BOOT_ACK = "two-verified-copies-and-compatibility-reviewed"
 REQUIRED_NORMAL_TONIC_MODE = "transformer"
+# This preservation revision deliberately contains no runnable transformer
+# Tonic. A later reviewed implementation must change this code constant as part
+# of the same commit that supplies the runtime.
+NORMAL_RUNTIME_IMPLEMENTED = False
 
 
 class BootModeError(RuntimeError):
@@ -50,6 +58,11 @@ def require_normal_boot() -> None:
         raise BootModeError(
             "Codemine live startup refused: a reviewed transformer-backed Tonic "
             "is required for normal operation"
+        )
+    if not NORMAL_RUNTIME_IMPLEMENTED:
+        raise BootModeError(
+            "Codemine live startup refused: the transformer-backed Tonic runtime "
+            "is not implemented in this preservation revision"
         )
 
 

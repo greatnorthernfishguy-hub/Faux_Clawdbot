@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Apply sensitive-name denial after external allowlisting.
+# What: Preserve the matched read-only root without returning before Rim checks.
+# Why: An allowlisted sibling path could otherwise expose its .env or key files.
+# How: Defer the external-read success return until sensitive checks complete.
 # [2026-09-13] Codex — Enforce the vendored-file boundary at tool execution.
 # What: Deny writes to all current vendored substrate files and the retired peer bridge.
 # Why: Plan validation alone cannot be the final constitutional boundary.
@@ -103,7 +107,7 @@ def _audit_log(
 # runtime. Changing them requires a code change, a commit, and a review.
 # ---------------------------------------------------------------------------
 
-# Sensitive filename patterns (blocked for write)
+# Sensitive filename patterns (blocked for reads and writes)
 _SENSITIVE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"\.env$", re.IGNORECASE),
     re.compile(r"\.env\.", re.IGNORECASE),
@@ -196,7 +200,9 @@ def can_access_path(
 
     workspace_resolved = workspace.resolve()
 
-    # Path must be within the workspace
+    external_read_root: Path | None = None
+
+    # Path must be within the workspace unless it is an explicitly read-only root.
     try:
         resolved.relative_to(workspace_resolved)
     except ValueError:
@@ -205,13 +211,15 @@ def can_access_path(
             for ro_root in read_only_paths:
                 try:
                     resolved.relative_to(Path(ro_root).resolve())
-                    return True, f"Read permitted via external allowlist: {ro_root}"
+                    external_read_root = Path(ro_root).resolve()
+                    break
                 except ValueError:
                     continue
-        return False, (
-            f"Path escapes workspace. Resolved path '{resolved}' "
-            f"is not inside '{workspace_resolved}'."
-        )
+        if external_read_root is None:
+            return False, (
+                f"Path escapes workspace. Resolved path '{resolved}' "
+                f"is not inside '{workspace_resolved}'."
+            )
 
     filename = resolved.name
     for pat in _SENSITIVE_PATTERNS:
@@ -228,6 +236,8 @@ def can_access_path(
                 f"Write denied — '{filename}' is vendored or retired; repair the "
                 "canonical source through its required gates."
             )
+    if external_read_root is not None:
+        return True, f"Read permitted via external allowlist: {external_read_root}"
     return True, "Path access permitted."
 
 

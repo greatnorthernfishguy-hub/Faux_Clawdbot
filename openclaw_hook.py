@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Guard direct Graph construction before filesystem access.
+# What: Apply the shared boot guard in the constructor and singleton accessor.
+# Why: Ad-hoc Python could otherwise bypass app.py and worker_ng preservation gates.
+# How: Refuse before checkpoint mkdir, restore, backfill, or Graph creation.
 # [2026-07-08] Tabitha (TQB/QB build) — Vector DB restore failure now audible
 # What: The __init__ vdb-restore except (previously logger.warning with the
 #       exception only) is now logger.error and includes BOTH the path
@@ -300,6 +304,12 @@ class NeuroGraphMemory:
         workspace_dir: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
+        # Direct imports and ad-hoc scripts must obey the same fail-closed boot
+        # boundary as app.py and worker_ng. This runs before mkdir, restore,
+        # backfill, or any other substrate-affecting operation.
+        from boot_mode import require_normal_boot
+
+        require_normal_boot()
         self._workspace_dir = Path(
             workspace_dir
             or os.environ.get("NEUROGRAPH_WORKSPACE_DIR", "~/.openclaw/neurograph")
@@ -484,6 +494,9 @@ class NeuroGraphMemory:
         config: Optional[Dict[str, Any]] = None,
     ) -> NeuroGraphMemory:
         """Return the singleton instance, creating it if needed."""
+        from boot_mode import require_normal_boot
+
+        require_normal_boot()
         if cls._instance is None:
             cls._instance = cls(workspace_dir=workspace_dir, config=config)
         return cls._instance

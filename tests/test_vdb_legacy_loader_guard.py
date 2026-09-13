@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Mark real-Graph tests as explicitly boot-authorized.
+# What: Apply the shared isolated-construction fixture to this module.
+# Why: Production now refuses direct Graph construction before side effects.
+# How: Use pytest's module fixture marker without changing substrate assertions.
 # [2026-07-08] Tabitha (TQB/QB build) — Test suite for the vdb legacy-loader guard
 # What: New file. Covers PRD §7's four cases against the real SimpleVectorDB
 #       (no mocks): (1) legacy np.savez round-trip — synthetic archive built
@@ -38,6 +42,9 @@ import pytest
 
 from openclaw_hook import NeuroGraphMemory
 from universal_ingestor import SimpleVectorDB
+
+
+pytestmark = pytest.mark.usefixtures("authorized_graph_construction")
 
 
 NG_CONFIG = {"tonic": {"enabled": False}}

@@ -1,6 +1,10 @@
 """Workspace-bound tool surface for the six durable TQB specialists."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Pin reviewer diffs to coordinator-owned evidence.
+# What: Reject model-selected bases and nonzero git diff results.
+# Why: Any executed git_diff event previously satisfied the review gate.
+# How: Bind the base at runtime construction and record failures as errors.
 # [2026-09-13] Codex — Enforce declared read scopes and pin review diffs.
 # What: Bound file reads to approved paths and allow integration reviewers to use
 #       a coordinator-owned baseline when invoking git_diff.
@@ -347,14 +351,16 @@ class SpecialistToolRuntime:
     def _git_status(self) -> str:
         return self._run_fixed(["git", "status", "--short", "--branch"])
 
-    def _git_diff(self, base: str) -> str:
-        base = base or self.git_diff_base
+    def _git_diff(self, requested_base: str) -> str:
+        if requested_base and requested_base != self.git_diff_base:
+            raise ValueError("git_diff base must match the coordinator-pinned revision")
+        base = self.git_diff_base
         if base.startswith("-") or any(character.isspace() for character in base):
-            raise ValueError("Invalid git base revision")
+            raise ValueError("Invalid coordinator git base revision")
         argv = ["git", "diff", "--no-ext-diff", "--unified=80"]
         if base:
             argv.append(base)
-        return self._run_fixed(argv)
+        return self._run_fixed(argv, require_success=True)
 
     def _run_validation(self, validation_id: str) -> str:
         argv = self.validation_commands.get(validation_id)
@@ -364,7 +370,7 @@ class SpecialistToolRuntime:
             raise ValueError(f"Invalid validation argv for: {validation_id}")
         return self._run_fixed(list(argv))
 
-    def _run_fixed(self, argv: list[str]) -> str:
+    def _run_fixed(self, argv: list[str], *, require_success: bool = False) -> str:
         result = subprocess.run(
             argv,
             cwd=self.workspace,
@@ -377,6 +383,10 @@ class SpecialistToolRuntime:
             f"EXIT_CODE: {result.returncode}\n"
             f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         )
+        if require_success and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, argv, output=result.stdout, stderr=result.stderr,
+            )
         return output[:MAX_RESULT_CHARS]
 
     def _recall(self, tool_name: str, args: dict) -> str:

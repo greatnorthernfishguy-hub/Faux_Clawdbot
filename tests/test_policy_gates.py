@@ -1,6 +1,10 @@
 """Regression tests for interactive mutation gates."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Verify external allowlists cannot expose secrets.
+# What: Exercise a sensitive file beneath an approved read-only root.
+# Why: The earlier success return bypassed the Rim's filename check.
+# How: Require denial after external-root matching.
 # [2026-09-13] Codex — Verify vendored writes fail at the tool boundary.
 # What: Exercise current, nested, and retired substrate filenames.
 # Why: The runtime boundary must hold independently of MissionPlan validation.
@@ -30,3 +34,19 @@ def test_vendored_and_retired_files_are_denied_at_tool_boundary(tmp_path):
         allowed, reason = policy_engine.can_access_path(path, "write", tmp_path)
         assert allowed is False
         assert "vendored or retired" in reason
+
+
+def test_external_allowlist_does_not_bypass_sensitive_filename_denial(tmp_path):
+    workspace = tmp_path / "workspace"
+    external = tmp_path / "external"
+    workspace.mkdir()
+    external.mkdir()
+    secret = external / ".env"
+    secret.write_text("TOKEN=must-not-be-read\n", encoding="utf-8")
+
+    allowed, reason = policy_engine.can_access_path(
+        str(secret), "read", workspace, [external],
+    )
+
+    assert allowed is False
+    assert "sensitive file" in reason

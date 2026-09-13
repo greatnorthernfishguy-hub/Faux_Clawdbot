@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Make Chat repository-read-only and isolate uploads.
+# What: Remove file mutation handlers/definitions and extract ZIPs to scratch.
+# Why: Human-gated Chat writes still bypassed Mission worktrees and source safety.
+# How: Filter mutation tools mechanically and use CODEMINE_UPLOAD_ROOT.
 # [2026-09-13] Codex — Refuse unauthorized Python application startup and retire
 # the legacy Spec execution surface.
 # What: Run the stdlib-only normal-boot guard before dotenv, Gradio, or Graph imports.
@@ -89,7 +93,7 @@ from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context, filter_recall_results, surfacing_context, gate_repeat_recall
 from mission_service import MissionService
-from archive_safety import validated_zip_members
+from archive_safety import safe_upload_extract_root, validated_zip_members
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +111,9 @@ logger = logging.getLogger("Clawdbot")
 
 APP_PATH = Path(os.path.dirname(os.path.abspath(__file__)))
 REPO_PATH = Path(os.getenv("REPO_PATH", str(APP_PATH))).expanduser().resolve()
+UPLOAD_ROOT = Path(
+    os.getenv("CODEMINE_UPLOAD_ROOT", "/tmp/codemine-uploads")
+).expanduser().resolve()
 
 # Ecosystem sibling repos that specs are allowed to READ (but not write).
 # These paths only exist on VPS; on HF Space they resolve but won't be found
@@ -129,6 +136,7 @@ _ECOSYSTEM_READ_PATHS: list[Path] = [
     Path("/home/josh/UniOS"),
     Path("/home/josh/portal-v2"),
     Path("/home/josh/docs"),
+    UPLOAD_ROOT,
 ]
 worker_ng = get_worker_ng()          # one shared Codemine substrate for every lens
 _recall_gate_cache: dict = {}        # per-target TTL dedup for execute_tool()'s recall gate
@@ -162,12 +170,6 @@ TOOL_REGISTRY = {
     "read_file": lambda args: ctx.read_file(
         args.get("path") or "", args.get("start_line"), args.get("end_line")
     ),
-    "write_file": lambda args: ctx.write_file(
-        args.get("path") or "", args.get("content") or ""
-    ),
-    "edit_file": lambda args: ctx.edit_file(
-        args.get("path") or "", args.get("old_text") or "", args.get("new_text") or ""
-    ),
     "list_files": lambda args: ctx.list_files(
         args.get("path", "."), args.get("max_depth", 3)
     ),
@@ -189,7 +191,7 @@ TOOL_REGISTRY = {
 
 _CHAT_PROHIBITED_TOOLS = frozenset({
     "ingest_workspace", "shell_execute", "push_to_github",
-    "pull_from_github", "create_shadow_branch",
+    "pull_from_github", "create_shadow_branch", "write_file", "edit_file",
 })
 CHAT_TOOL_DEFINITIONS = [
     definition for definition in TOOL_DEFINITIONS
@@ -370,11 +372,15 @@ def _process_zip(file_path: str, file_name: str) -> str:
                     f"({total_size:,} bytes) exceeds {MAX_ZIP_EXTRACT_SIZE:,} byte limit."
                 )
 
-            extract_to = REPO_PATH / "uploaded_assets" / file_name.replace(".zip", "")
             try:
+                extract_to = safe_upload_extract_root(
+                    UPLOAD_ROOT, file_name, repository_root=REPO_PATH,
+                )
                 members = validated_zip_members(z, extract_to)
             except ValueError as exc:
                 return f"ZIP rejected: {exc}"
+            if extract_to.is_symlink():
+                return "ZIP rejected: extraction destination is a symbolic link"
             if extract_to.exists():
                 shutil.rmtree(extract_to)
             extract_to.mkdir(parents=True, exist_ok=True)
@@ -385,7 +391,8 @@ def _process_zip(file_path: str, file_name: str) -> str:
         return (
             f"**Unzipped: {file_name}**\n"
             f"Location: `{extract_to}`\nContents: {preview}\n"
-            f"SYSTEM NOTE: Files extracted. Use list_files('{extract_to.name}') to explore."
+            f"SYSTEM NOTE: Files extracted outside the repository. "
+            f"Use list_files('{extract_to}') to explore."
         )
     except zipfile.BadZipFile:
         return f"Failed: {file_name} is not a valid ZIP file."
