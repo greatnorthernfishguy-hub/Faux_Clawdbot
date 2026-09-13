@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Route provider and model independently for every role
+# What: Replace the import-time provider singleton with immutable per-call routes.
+# Why: Concurrent TQB specialists must use different model families without
+#       mutating shared process state or silently changing the reviewing model.
+# How: Resolve role-specific environment settings, create clients by provider,
+#      and pass the route through the existing provider adapters.
 # [2026-04-17] Claude (Sonnet 4.6) — Enable Qwen3 thinking mode for OpenRouter + HuggingFace
 # What: /think prefix prepended to system prompt in _call_openrouter and _call_huggingface
 #   when QB_THINKING_ENABLED=true (default). Activates Qwen3's native chain-of-thought.
@@ -25,44 +31,101 @@
 import os
 import time
 import logging
+from dataclasses import dataclass
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Provider selection: "anthropic", "openrouter", or "huggingface"
-PROVIDER = os.getenv("CODEMINE_PROVIDER", "anthropic").lower()
+SUPPORTED_PROVIDERS = frozenset({"anthropic", "openrouter", "huggingface"})
 
 
-def get_client():
-    """Create and return a client instance based on CODEMINE_PROVIDER."""
-    if PROVIDER == "openrouter":
+@dataclass(frozen=True)
+class ModelRoute:
+    """One explicit provider/model assignment for a model call."""
+
+    provider: str
+    model_id: str
+    role: str = "default"
+
+
+def resolve_route(role: Optional[str] = None) -> ModelRoute:
+    """Resolve a role's provider and model from environment-owned config."""
+    normalized_role = (role or "default").strip().lower()
+    prefix = f"CODEMINE_{normalized_role.upper()}" if role else "CODEMINE"
+    provider = (
+        os.getenv(f"{prefix}_PROVIDER")
+        or os.getenv("CODEMINE_PROVIDER")
+        or ""
+    ).strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        raise ValueError(
+            f"Unsupported or unset provider for {normalized_role}: {provider or '<unset>'}"
+        )
+
+    if role:
+        model_id = os.getenv(f"{prefix}_MODEL_ID") or _shared_model_setting(provider)
+    elif provider == "huggingface":
+        model_id = os.getenv("HF_MODEL_ID", "")
+    elif provider == "anthropic":
+        model_id = os.getenv("CLAUDE_MODEL_ID", "")
+    else:
+        model_id = os.getenv("CODEMINE_MODEL_ID", "")
+    if not model_id:
+        raise ValueError(f"Model ID is unset for {normalized_role} ({provider})")
+    return ModelRoute(provider=provider, model_id=model_id.strip(), role=normalized_role)
+
+
+def _shared_model_setting(provider: str) -> str:
+    if provider == "huggingface":
+        return os.getenv("HF_MODEL_ID", "")
+    if provider == "anthropic":
+        return os.getenv("CLAUDE_MODEL_ID", "")
+    return (
+        os.getenv("CODEMINE_WORKER_MODEL_ID")
+        or os.getenv("CODEMINE_RP_MODEL_ID")
+        or os.getenv("CODEMINE_MODEL_ID", "")
+    )
+
+
+def _prepare_system_prompt(system_prompt: str, model_id: str) -> str:
+    """Apply only control syntax that belongs to the selected model family."""
+    if (
+        "qwen" in model_id.lower()
+        and os.getenv("QB_THINKING_ENABLED", "true").lower() == "true"
+    ):
+        return "/think\n" + system_prompt
+    return system_prompt
+
+
+def get_client(provider: Optional[str] = None):
+    """Create a client for one explicit provider or the default route."""
+    provider = (provider or resolve_route().provider).lower()
+    if provider == "openrouter":
         from openai import OpenAI
         return OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=os.getenv("OPENROUTER_API_KEY"),
         )
-    elif PROVIDER == "huggingface":
+    elif provider == "huggingface":
         from openai import OpenAI
         return OpenAI(
             base_url="https://api-inference.huggingface.co/v1",
             api_key=os.getenv("HF_TOKEN"),
         )
-    else:
+    elif provider == "anthropic":
         from anthropic import Anthropic
         return Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    raise ValueError(f"Unsupported provider: {provider}")
 
 
-def get_model_id() -> str:
+def get_model_id(role: Optional[str] = None) -> str:
     """Return the model ID, configurable via env var.
 
     HF model IDs use HuggingFace hub format (e.g. Qwen/Qwen3-Coder-480B-A35B-Instruct).
     OpenRouter uses its own slug format (e.g. qwen/qwen3-coder).
     Use HF_MODEL_ID and CODEMINE_MODEL_ID to override each independently.
     """
-    if PROVIDER == "huggingface":
-        return os.getenv("HF_MODEL_ID", "Qwen/Qwen3-Coder-480B-A35B-Instruct")
-    if PROVIDER == "openrouter":
-        return os.getenv("CODEMINE_MODEL_ID", "anthropic/claude-sonnet-4")
-    return os.getenv("CLAUDE_MODEL_ID", "claude-sonnet-4-6")
+    return resolve_route(role).model_id
 
 
 def call_model(
@@ -72,36 +135,61 @@ def call_model(
     tools: list,
     max_retries: int = 3,
     max_tokens: int = 8192,
+    route: Optional[ModelRoute] = None,
+    temperature: Optional[float] = None,
+    response_format: Optional[dict] = None,
 ):
     """Call the model API with native tool use and retry logic.
 
     Dispatches to Anthropic or OpenRouter based on CODEMINE_PROVIDER.
     Both support tool_use — OpenRouter via OpenAI-compatible format.
     """
-    if PROVIDER == "huggingface":
-        return _call_huggingface(client, system_prompt, messages, tools, max_retries, max_tokens)
-    if PROVIDER == "openrouter":
-        return _call_openrouter(client, system_prompt, messages, tools, max_retries, max_tokens)
-    return _call_anthropic(client, system_prompt, messages, tools, max_retries, max_tokens)
+    route = route or resolve_route()
+    if route.provider == "huggingface":
+        return _call_huggingface(
+            client, system_prompt, messages, tools, max_retries, max_tokens,
+            route.model_id, temperature, response_format,
+        )
+    if route.provider == "openrouter":
+        return _call_openrouter(
+            client, system_prompt, messages, tools, max_retries, max_tokens,
+            model_id=route.model_id, temperature=temperature,
+            response_format=response_format,
+        )
+    return _call_anthropic(
+        client, system_prompt, messages, tools, max_retries, max_tokens,
+        route.model_id, temperature,
+    )
 
 
-def _call_anthropic(client, system_prompt, messages, tools, max_retries, max_tokens):
+def _call_anthropic(
+    client, system_prompt, messages, tools, max_retries, max_tokens,
+    model_id, temperature,
+):
     """Anthropic native API call."""
     from anthropic import APIStatusError, APITimeoutError, APIConnectionError
 
-    model_id = get_model_id()
     last_error = None
 
     for attempt in range(max_retries):
         try:
-            response = client.messages.create(
+            kwargs = dict(
                 model=model_id,
                 max_tokens=max_tokens,
                 system=system_prompt,
                 messages=messages,
                 tools=tools if tools else [],
             )
-            return response
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            response = client.messages.create(**kwargs)
+            return _WrappedResponse(
+                content=response.content,
+                stop_reason=response.stop_reason,
+                provider="anthropic",
+                model=getattr(response, "model", model_id),
+                usage=getattr(response, "usage", None),
+            )
 
         except APITimeoutError as e:
             last_error = e
@@ -193,24 +281,24 @@ def _convert_messages_to_openai(messages: list) -> list:
     return converted
 
 
-def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_tokens, model_id=None):
+def _call_openrouter(
+    client, system_prompt, messages, tools, max_retries, max_tokens,
+    model_id, temperature=None, response_format=None,
+):
     """OpenRouter call via OpenAI-compatible SDK.
 
     OpenRouter supports tool_use for Claude and other models via the
     standard OpenAI tools format. We convert Anthropic-style tool defs
     to OpenAI format and wrap the response to match Anthropic's structure.
 
-    model_id: override for fallback callers (e.g. HF fallback needs OR model format).
+    model_id is explicit so simultaneous roles cannot alter one another's route.
     """
     from openai import APITimeoutError, APIConnectionError, APIStatusError
 
-    if model_id is None:
-        model_id = get_model_id()
     last_error = None
 
-    # Enable Qwen3 native thinking mode — prepend /think to activate chain-of-thought
-    if os.getenv("QB_THINKING_ENABLED", "true").lower() == "true":
-        system_prompt = "/think\n" + system_prompt
+    # /think is a Qwen control token, not a provider-wide instruction.
+    system_prompt = _prepare_system_prompt(system_prompt, model_id)
 
     # Convert Anthropic tool format to OpenAI format
     openai_tools = _convert_tools_to_openai(tools) if tools else []
@@ -227,10 +315,14 @@ def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_to
             }
             if openai_tools:
                 kwargs["tools"] = openai_tools
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            if response_format is not None:
+                kwargs["response_format"] = response_format
 
             response = client.chat.completions.create(**kwargs)
             # Wrap OpenAI response to match Anthropic's structure
-            return _wrap_openai_response(response)
+            return _wrap_openai_response(response, provider="openrouter")
 
         except (APITimeoutError, APIConnectionError) as e:
             last_error = e
@@ -250,7 +342,10 @@ def _call_openrouter(client, system_prompt, messages, tools, max_retries, max_to
     raise last_error
 
 
-def _call_huggingface(client, system_prompt, messages, tools, max_retries, max_tokens):
+def _call_huggingface(
+    client, system_prompt, messages, tools, max_retries, max_tokens,
+    model_id, temperature=None, response_format=None,
+):
     """HuggingFace Inference API call via OpenAI-compatible SDK.
 
     Same interface as OpenRouter. On 402 (credits exhausted or model unavailable),
@@ -258,11 +353,9 @@ def _call_huggingface(client, system_prompt, messages, tools, max_retries, max_t
     """
     from openai import OpenAI, APITimeoutError, APIConnectionError, APIStatusError
 
-    # Enable Qwen3 native thinking mode — prepend /think to activate chain-of-thought
-    if os.getenv("QB_THINKING_ENABLED", "true").lower() == "true":
-        system_prompt = "/think\n" + system_prompt
+    unmodified_system_prompt = system_prompt
+    system_prompt = _prepare_system_prompt(system_prompt, model_id)
 
-    model_id = get_model_id()
     openai_tools = _convert_tools_to_openai(tools) if tools else []
     full_messages = [{"role": "system", "content": system_prompt}] + _convert_messages_to_openai(messages)
     last_error = None
@@ -276,9 +369,13 @@ def _call_huggingface(client, system_prompt, messages, tools, max_retries, max_t
             }
             if openai_tools:
                 kwargs["tools"] = openai_tools
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            if response_format is not None:
+                kwargs["response_format"] = response_format
 
             response = client.chat.completions.create(**kwargs)
-            return _wrap_openai_response(response)
+            return _wrap_openai_response(response, provider="huggingface")
 
         except APIStatusError as e:
             if e.status_code < 500:
@@ -290,8 +387,14 @@ def _call_huggingface(client, system_prompt, messages, tools, max_retries, max_t
                     base_url="https://openrouter.ai/api/v1",
                     api_key=os.getenv("OPENROUTER_API_KEY"),
                 )
-                or_model = os.getenv("CODEMINE_MODEL_ID", "qwen/qwen3-coder")
-                return _call_openrouter(or_client, system_prompt, messages, tools, max_retries, max_tokens, model_id=or_model)
+                or_model = os.getenv("CODEMINE_FALLBACK_MODEL_ID", "").strip()
+                if not or_model:
+                    raise ValueError("CODEMINE_FALLBACK_MODEL_ID is required for HF fallback")
+                return _call_openrouter(
+                    or_client, unmodified_system_prompt, messages, tools, max_retries,
+                    max_tokens, model_id=or_model, temperature=temperature,
+                    response_format=response_format,
+                )
             elif e.status_code >= 500:
                 last_error = e
                 logger.warning("HF %d error on attempt %d/%d: %s", e.status_code, attempt + 1, max_retries, e)
@@ -339,12 +442,17 @@ class _ContentBlock:
 
 class _WrappedResponse:
     """Mimics Anthropic's Message response for OpenAI compatibility."""
-    def __init__(self, content, stop_reason):
+    def __init__(
+        self, content, stop_reason, provider=None, model=None, usage=None,
+    ):
         self.content = content
         self.stop_reason = stop_reason
+        self.provider = provider
+        self.model = model
+        self.usage = usage
 
 
-def _wrap_openai_response(response) -> _WrappedResponse:
+def _wrap_openai_response(response, provider="openrouter") -> _WrappedResponse:
     """Convert OpenAI ChatCompletion to Anthropic-like Message structure.
 
     The rest of app.py expects:
@@ -383,4 +491,10 @@ def _wrap_openai_response(response) -> _WrappedResponse:
     else:
         stop_reason = choice.finish_reason or "end_turn"
 
-    return _WrappedResponse(content_blocks, stop_reason)
+    return _WrappedResponse(
+        content_blocks,
+        stop_reason,
+        provider=provider,
+        model=getattr(response, "model", None),
+        usage=getattr(response, "usage", None),
+    )

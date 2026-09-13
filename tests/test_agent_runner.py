@@ -21,7 +21,12 @@ def tool(name="read_file", tool_id="tool-1", **arguments):
 
 
 def response(*blocks):
-    return SimpleNamespace(content=list(blocks))
+    return SimpleNamespace(
+        content=list(blocks),
+        provider="openrouter",
+        model="test/model",
+        usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, cost=0.001),
+    )
 
 
 def run(responses, executor):
@@ -54,6 +59,13 @@ def test_executes_tool_and_returns_followup_text():
     assert result["tool_events"] == [
         {"tool": "read_file", "status": "executed", "result_preview": "file contents"}
     ]
+    assert result["model_calls"][0] == {
+        "provider": "openrouter",
+        "model": "test/model",
+        "input_tokens": 5,
+        "output_tokens": 3,
+        "cost": 0.001,
+    }
     assert calls[1]["messages"][-1]["content"][0]["content"] == "file contents"
 
 

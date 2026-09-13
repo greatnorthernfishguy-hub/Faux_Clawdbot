@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,25 +59,33 @@ def test_unknown_role_is_rejected_before_path_resolution():
         persona_client.load_personality("../reviewer")
 
 
-def test_role_specific_model_wins(monkeypatch):
-    monkeypatch.setenv("CODEMINE_TRACKER_MODEL_ID", "provider/tracker-model")
-    monkeypatch.setenv("CODEMINE_WORKER_MODEL_ID", "provider/shared-worker")
-    monkeypatch.setenv("CODEMINE_RP_MODEL_ID", "provider/legacy")
-
-    assert persona_client._get_rp_model_id("tracker") == "provider/tracker-model"
-    assert persona_client._get_rp_model_id("forge") == "provider/shared-worker"
-
-
-def test_legacy_model_setting_remains_a_fallback(monkeypatch):
-    monkeypatch.delenv("CODEMINE_REVIEWER_MODEL_ID", raising=False)
-    monkeypatch.delenv("CODEMINE_WORKER_MODEL_ID", raising=False)
-    monkeypatch.setenv("CODEMINE_RP_MODEL_ID", "provider/legacy")
-
-    assert persona_client._get_rp_model_id("reviewer") == "provider/legacy"
-
-
 def test_docker_image_copies_the_persona_assets():
     dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text()
 
     assert "ENV TQB_PERSONALITY_DIR=/app/tqb-personalities" in dockerfile
     assert "COPY tqb-personalities/ ./tqb-personalities/" in dockerfile
+
+
+def test_persona_reports_requested_and_actual_route(monkeypatch):
+    requested = SimpleNamespace(
+        provider="huggingface", model_id="source/model", role="tracker"
+    )
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="Evidence found.")],
+        provider="openrouter",
+        model="fallback/model",
+        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=7, cost=0.004),
+    )
+    monkeypatch.setattr(persona_client, "resolve_route", lambda role: requested)
+    monkeypatch.setattr(persona_client, "get_client", lambda provider: object())
+    monkeypatch.setattr(persona_client, "call_model", lambda *args, **kwargs: response)
+
+    result = persona_client.call_persona("tracker", "Trace the bug.", max_retries=0)
+
+    assert result["provider"] == "openrouter"
+    assert result["model"] == "fallback/model"
+    assert result["requested_provider"] == "huggingface"
+    assert result["requested_model"] == "source/model"
+    assert result["input_tokens"] == 12
+    assert result["output_tokens"] == 7
+    assert result["cost"] == 0.004

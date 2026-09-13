@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Use shared per-role provider/model routing
+# What: Persona calls use model_client rather than a second OpenRouter-only path.
+# Why: The six durable specialists need independent, concurrent-safe routes and
+#       receipts that expose the provider/model actually used, including fallback.
+# How: Resolve an immutable role route, call the shared adapter, and normalize
+#      provider-specific usage counts into the persona result.
 # [2026-09-12] Codex — Ship and validate the complete six-person TQB unit
 # What: Load packaged persona files, reject unknown roles, inject the full shared
 #       disciplines, and support a model override for each specialist.
@@ -27,6 +33,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from model_client import call_model, get_client, resolve_route
+
 logger = logging.getLogger("persona_client")
 
 # The six durable TQB specialists. These are team roles, not interchangeable
@@ -49,31 +57,6 @@ PERSONALITY_DIR = Path(os.getenv(
 
 # Unit disciplines — injected into every persona
 UNIT_DISCIPLINES_FILE = PERSONALITY_DIR / "UNIT_DISCIPLINES.md"
-
-
-def _get_rp_client():
-    """Create OpenRouter client for the RP model."""
-    from openai import OpenAI
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-    )
-
-
-def _get_rp_model_id(role: str) -> str:
-    """Return the configured model ID for one specialist.
-
-    A role-specific setting wins, followed by the shared worker setting and the
-    legacy RP setting. This keeps deployment backward compatible while letting
-    each job use the model best suited to it.
-    """
-    role_key = f"CODEMINE_{role.upper()}_MODEL_ID"
-    return (
-        os.getenv(role_key)
-        or os.getenv("CODEMINE_WORKER_MODEL_ID")
-        or os.getenv("CODEMINE_RP_MODEL_ID")
-        or "nousresearch/hermes-3-llama-3.1-70b"
-    )
 
 
 def load_personality(role: str) -> tuple[str, str]:
@@ -187,27 +170,28 @@ def call_persona(
     graph_section = _format_graph_context(graph_context or [])
     user_content = f"{graph_section}\n\n{task}" if graph_section else task
 
-    client = _get_rp_client()
-    model_id = _get_rp_model_id(role.strip().lower())
+    route = resolve_route(role.strip().lower())
+    client = get_client(route.provider)
     last_error = None
     start = time.time()
 
     for attempt in range(max_retries + 1):
         try:
-            kwargs = {
-                "model": model_id,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-            }
-            if response_format:
-                kwargs["response_format"] = response_format
-
-            response = client.chat.completions.create(**kwargs)
-            raw_text = response.choices[0].message.content or ""
+            response = call_model(
+                client,
+                system_prompt,
+                [{"role": "user", "content": user_content}],
+                [],
+                max_retries=1,
+                max_tokens=max_tokens,
+                route=route,
+                temperature=temperature,
+                response_format=response_format,
+            )
+            raw_text = "\n".join(
+                block.text for block in response.content
+                if block.type == "text" and block.text
+            )
 
             # Try to parse as JSON if structured output was requested
             structured = None
@@ -226,14 +210,33 @@ def call_persona(
                         structured = json.loads(raw_text[start_idx:end_idx].strip())
 
             elapsed = round(time.time() - start, 2)
-            logger.info("Persona %s responded in %.1fs (%d tokens)", role, elapsed,
-                       response.usage.completion_tokens if response.usage else 0)
+            usage = getattr(response, "usage", None)
+            output_tokens = 0
+            input_tokens = 0
+            if usage is not None:
+                output_tokens = getattr(
+                    usage, "completion_tokens", getattr(usage, "output_tokens", 0)
+                ) or 0
+                input_tokens = getattr(
+                    usage, "prompt_tokens", getattr(usage, "input_tokens", 0)
+                ) or 0
+            cost = getattr(usage, "cost", None) if usage is not None else None
+            logger.info(
+                "Persona %s responded in %.1fs (%d output tokens)",
+                role, elapsed, output_tokens,
+            )
 
             return {
                 "role": role,
                 "response": raw_text,
                 "structured": structured,
-                "model": model_id,
+                "provider": getattr(response, "provider", None) or route.provider,
+                "model": getattr(response, "model", None) or route.model_id,
+                "requested_provider": route.provider,
+                "requested_model": route.model_id,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost": cost,
                 "elapsed_seconds": elapsed,
             }
 
@@ -248,7 +251,13 @@ def call_persona(
         "role": role,
         "response": f"Error: {last_error}",
         "structured": None,
-        "model": model_id,
+        "provider": route.provider,
+        "model": route.model_id,
+        "requested_provider": route.provider,
+        "requested_model": route.model_id,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost": None,
         "elapsed_seconds": round(time.time() - start, 2),
     }
 

@@ -17,6 +17,23 @@ import uuid
 from typing import Callable
 
 
+def _model_receipt(response) -> dict:
+    usage = getattr(response, "usage", None)
+    return {
+        "provider": getattr(response, "provider", None),
+        "model": getattr(response, "model", None),
+        "input_tokens": (
+            getattr(usage, "prompt_tokens", getattr(usage, "input_tokens", 0)) or 0
+            if usage is not None else 0
+        ),
+        "output_tokens": (
+            getattr(usage, "completion_tokens", getattr(usage, "output_tokens", 0)) or 0
+            if usage is not None else 0
+        ),
+        "cost": getattr(usage, "cost", None) if usage is not None else None,
+    }
+
+
 def run_tool_loop(
     *,
     client,
@@ -33,11 +50,13 @@ def run_tool_loop(
     accumulated_text = ""
     staged_actions = []
     tool_events = []
+    model_calls = []
     iterations = 0
 
     for iteration in range(max_iterations):
         iterations = iteration + 1
         response = call_model_fn(client, system_prompt, api_messages, tools)
+        model_calls.append(_model_receipt(response))
         assistant_content = []
         tool_blocks = []
 
@@ -118,6 +137,7 @@ def run_tool_loop(
         )
         try:
             response = call_model_fn(client, system_prompt, api_messages, [])
+            model_calls.append(_model_receipt(response))
             for block in response.content:
                 if block.type == "text":
                     accumulated_text = block.text
@@ -129,6 +149,7 @@ def run_tool_loop(
         "text": accumulated_text,
         "staged_actions": staged_actions,
         "tool_events": tool_events,
+        "model_calls": model_calls,
         "messages": api_messages,
         "iterations": iterations,
     }
