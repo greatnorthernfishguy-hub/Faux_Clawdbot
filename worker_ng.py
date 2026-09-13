@@ -9,7 +9,16 @@
 #      surface_resolver.resolve_surface_content() against the live graph node.
 #      surfacing_context() joins SurfacingMonitor.format_context() with the filtered
 #      pattern-completion block. gate_repeat_recall() is a pure TTL dedup gate.
-# [2026-04-16] Claude (Sonnet 4.6) — Tonic enabled (heuristic mode)
+# [2026-09-13] Codex — Prohibit heuristic Tonic execution
+# What: Codemine's wrapper now keeps Tonic disabled and rejects every requested
+#       mode except the explicit safe value "disabled".
+# Why: This embedded hemisphere must never fall back to heuristic inference.
+#       The vendored Tonic automatically chooses that fallback when no compatible
+#       transformer is available, so merely setting enabled=True is unsafe.
+# How: The wrapper owns the runtime policy through CODEMINE_TONIC_MODE. A future
+#      transformer/shared-body implementation must add and validate a new mode
+#      here before it may start Tonic.
+# [2026-04-16] Claude (Sonnet 4.6) — Tonic enabled (heuristic mode) [superseded]
 # What: tonic.enabled False→True in WORKER_SNN_CONFIG.
 # Why: Gradio process is long-lived — substrate was dormant between spec
 #      executions, nodes never warmed up, zeros everywhere. TonicEngine heuristic
@@ -97,15 +106,24 @@ WORKER_SNN_CONFIG = {
     "he_discovery_min_nodes": 3,
     "he_consolidation_overlap": 0.8,
     "he_experience_threshold": 100,
-    # Tonic enabled — Gradio process is long-lived (same reasoning as CC daemon).
-    # No transformer weights on HF Spaces → TonicEngine runs heuristic mode
-    # automatically. Background loop at 2s idle / 0.5s active.
-    "tonic": {"enabled": True},
+    # Heuristic Tonic is incompatible with an embedded hemisphere. Keep this
+    # disabled until Codemine has an explicitly validated transformer path.
+    "tonic": {"enabled": False},
 }
 
 # Default to local data/ dir. HF Spaces sets NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
 _DEFAULT_WORKSPACE = str(Path(__file__).resolve().parent / "data" / "neurograph_worker")
 WORKER_NG_WORKSPACE = os.getenv("NEUROGRAPH_WORKSPACE_DIR", _DEFAULT_WORKSPACE)
+
+
+def _require_safe_tonic_mode() -> None:
+    """Fail closed rather than allowing the vendored heuristic fallback."""
+    mode = os.getenv("CODEMINE_TONIC_MODE", "disabled").strip().lower()
+    if mode != "disabled":
+        raise RuntimeError(
+            "CODEMINE_TONIC_MODE must remain 'disabled' until Codemine has a "
+            "validated transformer-backed Tonic path; heuristic execution is prohibited"
+        )
 
 
 def get_worker_ng() -> NeuroGraphMemory:
@@ -114,6 +132,7 @@ def get_worker_ng() -> NeuroGraphMemory:
     Uses a separate workspace dir from any ecosystem NG.
     Persists to /data/ on HF Spaces (survives container restarts).
     """
+    _require_safe_tonic_mode()
     instance = NeuroGraphMemory.get_instance(
         workspace_dir=WORKER_NG_WORKSPACE,
         config=WORKER_SNN_CONFIG,

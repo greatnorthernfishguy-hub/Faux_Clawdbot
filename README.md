@@ -109,6 +109,7 @@ requested and the provider/model actually used.
 |---|---|---|
 | `CODEMINE_BOOT_MODE` | `preserve` runs preservation only; `normal` permits application startup | `normal` |
 | `NEUROGRAPH_WORKSPACE_DIR` | One shared Codemine Graph workspace | `/data/neurograph_worker` |
+| `CODEMINE_TONIC_MODE` | Tonic policy; currently only `disabled` is accepted | `disabled` |
 | `CODEMINE_PRESERVATION_DIR` | Same-volume preservation archives | `/data/codemine-preservation` |
 | `CODEMINE_PERSISTENT_ROOT` | Required persistent mount | `/data` |
 | `CODEMINE_MISSION_ROOT` | Durable proposals, receipts, and recovery patches | `/data/codemine-missions` |

@@ -59,6 +59,7 @@ ENV HF_HOME=/tmp/.cache/huggingface
 ENV XDG_CACHE_HOME=/tmp/.cache
 ENV TORCH_HOME=/tmp/.cache/torch
 ENV NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
+ENV CODEMINE_TONIC_MODE=disabled
 ENV CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
 ENV CODEMINE_PERSISTENT_ROOT=/data
 ENV CODEMINE_BOOT_MODE=normal

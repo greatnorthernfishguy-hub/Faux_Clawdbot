@@ -93,6 +93,7 @@ paths and provider routes:
 NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
 CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
 CODEMINE_PERSISTENT_ROOT=/data
+CODEMINE_TONIC_MODE=disabled
 CODEMINE_MISSION_ROOT=/data/codemine-missions
 CODEMINE_WORKTREE_ROOT=/tmp/codemine-worktrees
 CODEMINE_DEFAULT_WORKSPACE=/workspace/e-t-systems
@@ -102,7 +103,9 @@ CODEMINE_VALIDATIONS_JSON={...reviewed named validation commands...}
 
 Also verify `/data` is the attached persistent mount, the target Git repository
 exists, configured provider credentials are present as Space secrets, and the
-selected model IDs are available.
+selected model IDs are available. Normal startup must retain
+`CODEMINE_TONIC_MODE=disabled`; the wrapper rejects every other value until a
+transformer-backed Codemine Tonic path has been implemented and validated.
 
 ## Gate 6: bounded smoke test
 
