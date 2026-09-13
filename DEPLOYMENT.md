@@ -1,290 +1,127 @@
-# Deployment Guide: Clawdbot to HuggingFace Spaces
+# Codemine deployment gates
 
-## Quick Start (5 minutes)
+<!--
+Changelog
+2026-09-12 — Codex
+What: Replaced the obsolete generic Space quick-start with the actual gated
+      delivery sequence for the existing Codemine instance.
+Why: Pushing GitHub main can update and wake the live HF Space, whose existing
+     third-hemisphere NeuroGraph has not yet been independently preserved.
+How: Preservation, offline verification, compatibility, normal-start, and
+     mission smoke-test gates are separate and produce reviewable evidence.
+-->
 
-### Step 1: Create HuggingFace Account
-1. Go to https://huggingface.co
-2. Sign up (free tier available)
-3. Generate API token:
-   - Settings → Access Tokens
-   - Create "Read" token
-   - Copy token (you'll need it)
+The target is the existing private Hugging Face Space
+`Executor-Tyrant-Framework/Working-in-a-Codemine`. This is an upgrade of a
+stateful system, not a new stateless Space.
 
-### Step 2: Create New Space
-1. Click "+ New" → "Space"
-2. Configure:
-   - **Space name:** `clawdbot-dev` (or your choice)
-   - **License:** MIT
-   - **SDK:** Docker
-   - **Hardware:** CPU Basic (free) or upgrade for faster inference
-3. Click "Create Space"
+## Current stop condition
 
-### Step 3: Upload Files
-Upload these files to your Space:
-- `app.py`
-- `recursive_context.py`
-- `Dockerfile`
-- `requirements.txt`
-- `README.md`
-- `.gitignore`
+Do not push the modernization branch to the GitHub branch that mirrors the
+Space. That push can rebuild or wake the Space. Normal startup remains blocked
+until the existing graph has two verified copies and the runtime compatibility
+review is complete.
 
-**Via Git (Recommended):**
-```bash
-# Clone your new Space
-git clone https://huggingface.co/spaces/your-username/clawdbot-dev
-cd clawdbot-dev
+No deployment step may create a replacement graph merely because a checkpoint
+is absent or unreadable. Preserve and diagnose the existing state.
 
-# Copy all files from this directory
-cp /path/to/clawdbot-dev/* .
+## Gate 1: code review while the Space sleeps
 
-# Commit and push
-git add .
-git commit -m "Initial deployment of Clawdbot"
-git push
+Before any delivery:
+
+1. Review the complete modernization branch against its merge base.
+2. Run the full repository test suite and Python compilation checks.
+3. Run the NeuroGraph Law Enforcer against substrate boundaries, raw experience
+   flow, shared-Graph assumptions, vendored files, and autonomic behavior.
+4. Confirm the diff contains no secrets and no accidental edits to checkpoint,
+   activation, vector, or vendored files.
+5. Record the reviewed commit hash.
+
+## Gate 2: preservation-only delivery
+
+Follow [PRESERVATION.md](PRESERVATION.md). The only permitted first delivery
+mode is:
+
+```text
+CODEMINE_BOOT_MODE=preserve
+CODEMINE_PRESERVATION_DRY_RUN=1
 ```
 
-**Via Web Interface:**
-- Click "Files" tab
-- Click "Add file" → "Upload files"
-- Drag and drop all files
-- Commit changes
+The entrypoint checks this mode before cache probes, repository pulls, Python
+imports, NeuroGraph construction, topology sync, Tonic, or Gradio. A successful
+dry run establishes paths and mount identity but does not create an archive.
 
-### Step 4: Configure Secrets
-1. Go to Space Settings → Repository Secrets
-2. Add secrets:
-   ```
-   Name: HF_TOKEN
-   Value: [your HuggingFace API token from Step 1]
-   ```
-   
-   Optional - if you have E-T Systems on GitHub:
-   ```
-   Name: REPO_URL
-   Value: https://github.com/your-username/e-t-systems
-   ```
+After reviewing that receipt, run preservation mode once with the dry-run flag
+disabled. Keep the normal application stopped.
 
-### Step 5: Wait for Build
-- Space will automatically build (takes ~5-10 minutes)
-- Watch "Logs" tab for progress
-- Build complete when you see: "Running on local URL: http://0.0.0.0:7860"
+## Gate 3: independent backup
 
-### Step 6: Access Your Assistant
-- Click "App" tab
-- Your Clawdbot is live!
-- Access from iPhone browser: `https://your-username-clawdbot-dev.hf.space`
+The archive under `/data/codemine-preservation` shares the attached storage
+volume with the live graph. Copy that archive to the laptop and verify every
+file against `MANIFEST.csv` and `MANIFEST.json` with `preserve_codemine.py
+--verify`.
 
-## Troubleshooting
+The gate receipt must include:
 
-### Build Fails
-**Check logs for:**
-- Missing dependencies → Verify requirements.txt
-- Docker errors → Check Dockerfile syntax
-- Out of memory → Upgrade to paid tier or reduce context size
+- deployed code revision;
+- source graph path;
+- Space archive path;
+- laptop archive path;
+- file and byte counts;
+- verification result.
 
-**Common fixes:**
-```bash
-# View build logs
-# Settings → Logs
+## Gate 4: offline compatibility review
 
-# Restart build
-# Settings → Factory Reboot
+Inspect a copy, never the live graph. Establish:
+
+- checkpoint and vector sidecar formats;
+- topology/node/edge counts and metadata expectations;
+- activation and tract artifacts;
+- the exact Codemine Tonic and embedder path;
+- compatibility with the current shared CC/Codemine graph standard;
+- whether a migration is required and its reversible procedure.
+
+Heuristic execution is not an embedding-compatible fallback. Do not silently
+switch the restored Space to a heuristic path.
+
+## Gate 5: normal-start readiness
+
+Before setting `CODEMINE_BOOT_MODE=normal`, verify the image owns these runtime
+paths and provider routes:
+
+```text
+NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
+CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
+CODEMINE_PERSISTENT_ROOT=/data
+CODEMINE_MISSION_ROOT=/data/codemine-missions
+CODEMINE_WORKTREE_ROOT=/tmp/codemine-worktrees
+CODEMINE_DEFAULT_WORKSPACE=/workspace/e-t-systems
+CODEMINE_WORKSPACE_ROOTS=/workspace
+CODEMINE_VALIDATION_CATALOG_PATH=/app/validation_catalog.json
 ```
 
-### No Repository Access
-**If you see "No files indexed":**
+Also verify `/data` is the attached persistent mount, the target Git repository
+exists, configured provider credentials are present as Space secrets, and the
+selected model IDs are available.
 
-1. **Option A: Mount via Secret**
-   - Add `REPO_URL` secret with your GitHub repo
-   - Restart Space
-   - Repository will be cloned on startup
+## Gate 6: bounded smoke test
 
-2. **Option B: Direct Upload**
-   ```bash
-   # In your Space's git clone
-   mkdir -p workspace/e-t-systems
-   cp -r /path/to/your/e-t-systems/* workspace/e-t-systems/
-   git add workspace/
-   git commit -m "Add E-T Systems codebase"
-   git push
-   ```
+After normal-start approval:
 
-3. **Option C: Demo Mode**
-   - Space creates minimal demo structure
-   - Upload files via chat interface
-   - Good for testing
+1. Open Chat and perform one read-only repository inspection.
+2. Use Mission Control to create a read-only MissionPlan.
+3. Confirm the proposal appears under
+   `/data/codemine-missions/proposals` and includes route receipts.
+4. Execute a disposable or documentation-only standard-risk plan.
+5. Confirm each block has a separate worktree, selected validations ran, Reviewer
+   inspected the actual diff, and the integration worktree reached
+   `ready_for_external_review`.
+6. Confirm the source checkout status before and after is identical.
+7. Do not merge or push the smoke-test integration branch from Codemine.
 
-### Slow Responses
-**Qwen2.5-Coder-32B on free tier has cold starts.**
+## Delivery authority
 
-Solutions:
-- Upgrade to GPU (paid tier) for faster inference
-- Switch to smaller model (edit app.py):
-  ```python
-  client = InferenceClient(
-      model="bigcode/starcoder2-15b",  # Smaller, faster
-      token=os.getenv("HF_TOKEN")
-  )
-  ```
-- Use HF Pro subscription for priority access
-
-### Rate Limits
-**Free tier has inference limits.**
-
-Solutions:
-- Upgrade to HF Pro ($9/month)
-- Add delays between requests
-- Use local model (requires GPU tier)
-
-## Advanced Configuration
-
-### Custom Model
-Edit `app.py` line 20:
-```python
-client = InferenceClient(
-    model="YOUR_MODEL_HERE",  # e.g., "codellama/CodeLlama-34b-Instruct-hf"
-    token=os.getenv("HF_TOKEN")
-)
-```
-
-### Adjust Recursion Depth
-Edit `app.py` line 121:
-```python
-max_iterations = 10  # Increase for more complex queries
-```
-
-### Add New Tools
-In `recursive_context.py`, add method:
-```python
-def your_new_tool(self, arg1, arg2):
-    """Your tool description."""
-    # Implementation
-    return result
-```
-
-Then in `app.py`, add to TOOLS list:
-```python
-{
-    "type": "function",
-    "function": {
-        "name": "your_new_tool",
-        "description": "What it does",
-        "parameters": {
-            # Parameter schema
-        }
-    }
-}
-```
-
-And add to execute_tool():
-```python
-elif tool_name == "your_new_tool":
-    return ctx.your_new_tool(arguments['arg1'], arguments['arg2'])
-```
-
-## Cost Optimization
-
-### Free Tier Strategy
-- Use CPU Basic (free)
-- HF Inference free tier (rate limited)
-- Only index essential files
-- **Total: $0/month**
-
-### Minimal Paid Tier
-- CPU Basic (free)
-- HF Pro subscription ($9/month)
-- Unlimited inference
-- **Total: $9/month**
-
-### Performance Tier
-- GPU T4 Small ($0.60/hour, pause when not using)
-- HF Pro ($9/month)
-- Fast inference, local models
-- **Total: ~$15-30/month** depending on usage
-
-## iPhone Access
-
-### Bookmark for Easy Access
-1. Open Space URL in Safari
-2. Tap Share → Add to Home Screen
-3. Now appears as app icon
-
-### Shortcuts Integration
-Create iOS Shortcut:
-```
-1. Get text from input
-2. Get contents of URL:
-   https://your-username-clawdbot-dev.hf.space/api/chat
-   Method: POST
-   Body: {"message": [text from step 1]}
-3. Show result
-```
-
-## Monitoring
-
-### Check Health
-```
-https://your-username-clawdbot-dev.hf.space/health
-```
-
-### View Logs
-- Settings → Logs (real-time)
-- Download for analysis
-
-### Stats
-- Check "Context Info" panel in UI
-- Shows files indexed, model status
-
-## Updates
-
-### Update Code
-```bash
-cd clawdbot-dev
-# Make changes
-git add .
-git commit -m "Update: [what changed]"
-git push
-# Space rebuilds automatically
-```
-
-### Update Dependencies
-Edit requirements.txt, commit, push.
-
-### Update Repository
-If using REPO_URL secret:
-- Space pulls latest on restart
-- Or: Settings → Factory Reboot
-
-## Security
-
-### Secrets Management
-- Never commit API tokens
-- Use Space secrets only
-- Rotate tokens periodically
-
-### Access Control
-- Spaces are public by default
-- For private: Settings → Change visibility to "Private"
-- Requires HF Pro subscription
-
-## Support Resources
-
-- **HuggingFace Docs:** https://huggingface.co/docs/hub/spaces
-- **Gradio Docs:** https://www.gradio.app/docs
-- **Issues:** Post in Space "Community" tab
-
-## Next Steps
-
-1. ✅ Deploy Space
-2. ✅ Test with simple queries
-3. ✅ Upload your E-T Systems code
-4. ✅ Try coding requests
-5. 🎯 Integrate with E-T Systems workflow
-6. 🎯 Add custom tools for your needs
-7. 🎯 Connect to Observatory API
-8. 🎯 Enable autonomous coding
-
----
-
-Need help? Check Space logs or create discussion in Community tab.
-
-Happy coding! 🦞
+A `ready_for_external_review` result means Codemine completed its bounded build.
+It is not permission to merge, push, deploy, restart a service, modify a
+vendored canonical file, or propagate that file to modules. Those actions stay
+with the external development manager and the applicable human/Law gates.

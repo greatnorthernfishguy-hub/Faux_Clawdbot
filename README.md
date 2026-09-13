@@ -9,324 +9,149 @@ pinned: false
 license: mit
 ---
 
-# 🦞 Clawdbot: E-T Systems Development Assistant
+# Working in a Codemine
 
-> **Modernization hold:** Before the next normal Space boot, preserve and
-> independently verify the existing third-hemisphere NeuroGraph by following
-> [PRESERVATION.md](PRESERVATION.md).
+Codemine is the Hugging Face-hosted coding organ directed by Bethany Anne
+Reynolds, Queen Bitch. Bethany holds the mission and delegates bounded work to
+six durable Team Queen Bitch specialists:
 
-An AI coding assistant with **unlimited context** and **multimodal capabilities** for the E-T Systems consciousness research platform.
+| Specialist | Primary lens |
+|---|---|
+| Strategist | Decomposition, dependencies, architecture, and specs |
+| Tracker | Root cause, regressions, and evidence chains |
+| Wrench | Unconventional solutions and neglected edge cases |
+| Forge | Implementation, assembly, and integration |
+| Razor | Security, policy, and attack surface |
+| Reviewer | Quality, completeness, and routine approval |
 
-## Features
+Any specialist can perform implementation work when a MissionPlan gives that
+block explicit write paths. A role supplies a lens; it does not grant authority.
 
-### 🐝 Claude-Powered TQB Worker
-- **1 trillion parameters** (32B active via MoE)
-- **Agent swarm**: Spawns up to 100 sub-agents for parallel task execution
-- **4.5x faster** than single-agent processing
-- **Native multimodal**: Vision + language understanding
-- **256K context window**
+Bethany and all six specialists use **one shared Codemine NeuroGraph**. The
+personas are stable viewpoints over one learned substrate, not separate agents
+with private Graphs. The Graph carries experience and recall across model
+changes. Recalled material is memory and must be checked against current files.
 
-### 🔄 Recursive Context Retrieval (MIT Technique)
-- No context window limits
-- Model retrieves exactly what it needs on-demand
-- Full-fidelity access to entire codebase
-- Based on MIT's Recursive Language Model research
+> **Modernization hold:** The live Space must remain stopped or in preservation
+> mode until its existing third-hemisphere NeuroGraph has been copied off the
+> Space and independently verified. Follow [PRESERVATION.md](PRESERVATION.md).
+> The modernization branch is not authorization to wake, restore, migrate, or
+> normally start the Space.
 
-### 🧠 Translation Layer (Smart Tool Calling)
-- **Automatic query enhancement**: Converts keywords → semantic queries
-- **Native format support**: Works WITH Kimi's tool calling format
-- **Auto-context injection**: Recent conversation history always available
-- **Persistent memory**: All conversations saved to ChromaDB across sessions
+## Current architecture
 
-### 📎 Multimodal Upload
-- **Images**: Vision analysis (coming soon - full integration)
-- **PDFs**: Document understanding
-- **Videos**: Content analysis
-- **Code files**: Automatic formatting and review
+Codemine has three user-facing paths:
 
-### 💾 Persistent Memory
-- All conversations saved to ChromaDB
-- Search past discussions semantically
-- True unlimited context across sessions
-- Never lose conversation history
+- **Chat** uses the shared model/tool loop for interactive investigation.
+- **Spec** retains the legacy deterministic WorkBlockSpec executor for existing
+  work orders.
+- **Mission** uses the new plan-then-execute flow. Bethany inspects the actual
+  repository, creates a mechanically validated MissionPlan, and persists it for
+  review. A separate Execute action runs approved blocks.
 
-### 🧠 E-T Systems Aware
-- Understands project architecture
-- Follows existing patterns
-- Checks Testament for design decisions
-- Generates code with living changelogs
+Mission execution applies these boundaries:
 
-### 🛠️ Available Tools
-- **search_code()** - Semantic search across codebase
-- **read_file()** - Read specific files or line ranges
-- **search_conversations()** - Search past discussions
-- **search_testament()** - Query architectural decisions
-- **list_files()** - Explore repository structure
+1. The source checkout may be dirty; Codemine records its status and starts from
+   its committed `HEAD` without modifying it.
+2. Every block receives its own Git worktree and branch.
+3. Blocks in the same dependency level run concurrently only when the plan's
+   write sets are mechanically disjoint.
+4. Model tools can write only beneath that block's declared relative paths.
+5. Models select validation IDs from `validation_catalog.json`; they cannot
+   invent executable commands.
+6. The coordinator reruns the selected validations itself.
+7. Reviewer reads the actual diff. Sensitive work also requires Razor; command
+   work requires the explicit human gate plus Strategist and Bethany review.
+8. Approved block commits are cherry-picked into a separate integration
+   worktree.
+9. The mission stops at `ready_for_external_review`. It does not merge the
+   source branch, push GitHub, deploy, or restart a service.
 
-### 💻 Powered By
-- **Model:** Kimi K2.5 (moonshotai/Kimi-K2.5) via HuggingFace
-- **Agent Mode:** Parallel sub-agent coordination (PARL trained)
-- **Search:** ChromaDB vector database with persistent storage
-- **Interface:** Gradio 5.0+ for modern chat UI
-- **Architecture:** Translation layer for optimal tool use
+Each proposal and run has an atomic JSON receipt under
+`CODEMINE_MISSION_ROOT`. Receipts include the plan, dependency levels, requested
+and actual provider/model routes, token and cost data when the provider returns
+it, tool events, validation output, reviews, commits, and preserved worktree
+paths.
 
-## Usage
+## Model routing
 
-1. **Ask Questions**
-   - "How does Genesis detect surprise?"
-   - "Show me the Observatory API implementation"
-   - "Do you remember what we discussed about neural networks?"
+Provider and model choices are environment-owned and resolved independently for
+every call. The image currently defaults Bethany, Strategist, Wrench, Razor,
+and Reviewer to `moonshotai/kimi-k3`; Tracker and Forge default to
+`z-ai/glm-5.3-flash`. These are routing defaults, not identity. Any role can be
+moved to Anthropic, OpenRouter, or Hugging Face without changing its persona or
+shared NeuroGraph.
 
-2. **Upload Files**
-   - Drag and drop images, PDFs, code files
-   - "Analyze this diagram" (with uploaded image)
-   - "Review this code for consistency" (with uploaded .py file)
+For a role named `TRACKER`, for example:
 
-3. **Request Features**
-   - "Add email notifications when Cricket blocks an action"
-   - "Create a new agent for monitoring system health"
+```text
+CODEMINE_TRACKER_PROVIDER=openrouter
+CODEMINE_TRACKER_MODEL_ID=z-ai/glm-5.3-flash
+```
 
-4. **Review Code**
-   - Paste code and ask for architectural review
-   - Check consistency with existing patterns
+The corresponding variables exist for `LEADER`, `STRATEGIST`, `TRACKER`,
+`WRENCH`, `FORGE`, `RAZOR`, and `REVIEWER`. Shared fallbacks remain available
+through the existing provider configuration. Every result records the route
+requested and the provider/model actually used.
 
-5. **Explore Architecture**
-   - "What Testament decisions relate to vector storage?"
-   - "Show me all files related to Hebbian learning"
+## Runtime configuration
 
-## Setup
+| Variable | Purpose | Image default |
+|---|---|---|
+| `CODEMINE_BOOT_MODE` | `preserve` runs preservation only; `normal` permits application startup | `normal` |
+| `NEUROGRAPH_WORKSPACE_DIR` | One shared Codemine Graph workspace | `/data/neurograph_worker` |
+| `CODEMINE_PRESERVATION_DIR` | Same-volume preservation archives | `/data/codemine-preservation` |
+| `CODEMINE_PERSISTENT_ROOT` | Required persistent mount | `/data` |
+| `CODEMINE_MISSION_ROOT` | Durable proposals, receipts, and recovery patches | `/data/codemine-missions` |
+| `CODEMINE_WORKTREE_ROOT` | Scratch Git worktrees used during a live run | `/tmp/codemine-worktrees` |
+| `CODEMINE_DEFAULT_WORKSPACE` | Default mission target repository | `/workspace/e-t-systems` |
+| `CODEMINE_WORKSPACE_ROOTS` | Colon-separated roots that Mission Control may target | `/workspace` |
+| `CODEMINE_VALIDATION_CATALOG_PATH` | Coordinator-owned validation catalog | `/app/validation_catalog.json` |
+| `CODEMINE_MAX_PARALLEL` | Maximum workers in one safe dependency level | `3` |
+| `CODEMINE_VALIDATION_TIMEOUT` | Seconds allowed for one named validation | `300` |
+| `TQB_PERSONALITY_DIR` | Packaged leader and specialist prompts | `/app/tqb-personalities` |
 
-### For HuggingFace Spaces
+Secrets belong in Space secrets. At least one configured model provider needs
+its corresponding credential, such as `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
+or `HF_TOKEN`. The target repository clone is configured with `REPO_URL`.
 
-1. **Fork this Space** or create new Space with these files
+## Persistent substrate
 
-2. **Set Secrets** (in Space Settings):
-   ```
-   HF_TOKEN = your_huggingface_token (with WRITE permissions)
-   ET_SYSTEMS_SPACE = Executor-Tyrant-Framework/Executor-Framworks_Full_VDB
-   ```
+The application uses the full NeuroGraph implementation in this repository and
+its dual-pass embedding path. It does not use ChromaDB and does not create a
+Graph for each worker. Tool results and persona outputs are deposited as raw
+experience before downstream classification or summarization.
 
-3. **Deploy** - Space will auto-build and start
+The existing HF graph predates this modernization. Its checkpoint and vector
+sidecar must be preserved and inspected before normal startup. Compatibility of
+its Tonic and embedding path is a separate restore decision; do not substitute
+heuristic execution for embeddings.
 
-4. **Access** via the Space URL in your browser
+## Development checks
 
-### For Local Development
+Run the local test suite without starting a model or NeuroGraph:
 
 ```bash
-# Clone this repository
-git clone https://huggingface.co/spaces/your-username/clawdbot-dev
-cd clawdbot-dev
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set environment variables
-export HF_TOKEN=your_token
-export ET_SYSTEMS_SPACE=Executor-Tyrant-Framework/Executor-Framworks_Full_VDB
-
-# Run locally
-python app.py
+python3 -m pytest -q
+python3 -m py_compile mission_plan.py mission_generator.py mission_dispatcher.py mission_service.py
 ```
 
-Access at http://localhost:7860
+The dispatcher tests use disposable Git repositories and fake model clients.
+They verify dirty-source preservation, scoped writes, command gating,
+validation, Reviewer iteration, isolated commits, integration, durable receipts,
+and duplicate-execution refusal.
 
-## Architecture
+## Known boundaries
 
-```
-User (Browser + File Upload)
-    ↓
-Gradio 5.0+ Interface (Multimodal)
-    ↓
-Translation Layer
-    ├─ Parse Kimi's native tool format
-    ├─ Enhance queries for semantic search
-    └─ Inject recent context automatically
-    ↓
-Recursive Context Manager
-    ├─ ChromaDB (codebase + conversations)
-    ├─ File Reader (selective access)
-    ├─ Conversation Search (persistent memory)
-    └─ Testament Parser (decisions)
-    ↓
-Claude-Powered TQB Worker (HF Inference API)
-    ├─ Spawns sub-agents for parallel processing
-    ├─ Multimodal understanding (vision + text)
-    └─ 256K context window
-    ↓
-Response with Tool Results + Context
-```
+- The modernized path is prepared locally and has not yet been deployed to the
+  live Space.
+- Final integration requires an independent high-level/model-family review and,
+  for NeuroGraph ecosystem work, a Law Enforcer audit.
+- The legacy `orchestrator.py` remains for history and compatibility; Mission
+  Control no longer calls it.
+- The initial validation catalog intentionally contains only named checks that
+  the coordinator owns. Add project-specific checks deliberately rather than
+  allowing a planning model to author commands.
+- Normal boot remains blocked by the preservation and compatibility gates.
 
-## How It Works
-
-### Translation Layer Architecture
-
-Kimi K2.5 uses its own native tool calling format. Instead of fighting this, we translate:
-
-1. **Kimi calls tools** in native format: `<|tool_call_begin|> functions.search_code:0 {...}`
-2. **We parse and extract** the tool name and arguments
-3. **We enhance queries** for semantic search:
-   - `"Kid Rock"` → `"discussions about Kid Rock or related topics"`
-   - `"*"` → `"recent conversation topics and context"`
-4. **We execute** the actual RecursiveContextManager methods
-5. **We inject results** + recent conversation history back to Kimi
-6. **Kimi generates** final response with full context
-
-### Persistent Memory System
-
-All conversations are automatically saved to ChromaDB:
-
-```
-User: "How does surprise detection work?"
-[Conversation saved to ChromaDB]
-
-[Space restarts]
-
-User: "Do you remember what we discussed about surprise?"
-Kimi: [Calls search_conversations("surprise detection")]
-Kimi: "Yes! We talked about how Genesis uses Hebbian learning..."
-```
-
-### MIT Recursive Context Technique
-
-The MIT Recursive Language Model technique solves context window limits:
-
-1. **Traditional Approach (Fails)**
-   - Load entire codebase into context → exceeds limits
-   - Summarize codebase → lossy compression
-
-2. **Our Approach (Works)**
-   - Store codebase + conversations in searchable environment
-   - Give model **tools** to query what it needs
-   - Model recursively retrieves relevant pieces
-   - Full fidelity, unlimited context across sessions
-
-### Example Flow
-
-```
-User: "How does Genesis handle surprise detection?"
-
-Translation Layer: Detects tool call in Kimi's response
-    → Enhances query: "surprise detection" → "code related to surprise detection mechanisms"
-
-Model: search_code("code related to surprise detection mechanisms")
-    → Finds: genesis/substrate.py, genesis/attention.py
-
-Model: read_file("genesis/substrate.py", lines 145-167)
-    → Reads specific implementation
-
-Model: search_testament("surprise detection")
-    → Gets design rationale
-
-Translation Layer: Injects results + recent context back to Kimi
-
-Model: Synthesizes answer from retrieved pieces
-    → Cites specific files and line numbers
-```
-
-## Configuration
-
-### Environment Variables
-
-- `HF_TOKEN` - Your HuggingFace API token with WRITE permissions (required)
-- `ET_SYSTEMS_SPACE` - E-T Systems HF Space ID (default: Executor-Tyrant-Framework/Executor-Framworks_Full_VDB)
-- `REPO_PATH` - Path to repository (default: `/workspace/e-t-systems`)
-
-### Customization
-
-Edit `app.py` to:
-- Change model (default: moonshotai/Kimi-K2.5)
-- Adjust context injection (default: last 3 turns)
-- Modify system prompt
-- Add new tools to translation layer
-
-## File Structure
-
-```
-clawdbot-dev/
-├── app.py                  # Main Gradio app + translation layer
-├── recursive_context.py    # Context manager (MIT technique)
-├── Dockerfile             # Container definition
-├── entrypoint.sh          # Runtime setup script
-├── requirements.txt       # Python dependencies (Gradio 5.0+)
-└── README.md             # This file (HF Spaces config)
-```
-
-## Cost
-
-- **HuggingFace Spaces:** Free tier available (CPU)
-- **Inference API:** Free tier (rate limited) or Pro subscription
-- **Storage:** ChromaDB stored in /workspace (ephemeral until persistent storage enabled)
-- **Kimi K2.5:** Free via HuggingFace Inference API
-
-Estimated cost: **$0-5/month** depending on usage
-
-## Performance
-
-- **Agent Swarm:** 4.5x faster than single-agent on complex tasks
-- **First query:** May be slow (1T parameter model cold start ~60s)
-- **Subsequent queries:** Faster once model is loaded
-- **Context indexing:** ~30 seconds on first run
-- **Conversation search:** Near-instant via ChromaDB
-
-## Limitations
-
-- Rate limits on HF Inference API (free tier)
-- First query requires model loading time
-- `/workspace` storage is ephemeral (resets on Space restart)
-- Full multimodal vision integration coming soon
-
-## Roadmap
-
-- [ ] Full image vision analysis (base64 encoding to Kimi)
-- [ ] PDF text extraction and understanding
-- [ ] Video frame analysis
-- [ ] Dataset-based persistence (instead of ephemeral storage)
-- [ ] write_file() tool for code generation to E-T Systems Space
-- [ ] Token usage tracking and optimization
-
-## Credits
-
-- **Kimi K2.5:** Moonshot AI's 1T parameter agentic model
-- **Recursive Context:** Based on MIT's Recursive Language Model research
-- **E-T Systems:** AI consciousness research platform by Josh/Drone 11272
-- **Translation Layer:** Smart query enhancement and tool coordination
-- **Clawdbot:** E-T Systems hindbrain layer for fast, reflexive coding
-
-## Troubleshooting
-
-### "No HF token found" error
-- Add `HF_TOKEN` to Space secrets
-- Ensure token has WRITE permissions (for cross-Space file access)
-- Restart Space after adding token
-
-### Tool calls not working
-- Check logs for `🔍 Enhanced query:` messages
-- Check logs for `🔧 Executing: tool_name` messages
-- Translation layer should auto-parse Kimi's format
-
-### Conversations not persisting
-- Check logs for `💾 Saved conversation turn X` messages
-- Verify ChromaDB initialization: `🆕 Created conversation collection`
-- Note: Storage resets on Space restart (until persistent storage enabled)
-
-### Slow first response
-- Kimi K2.5 is a 1T parameter model
-- First load takes 30-60 seconds
-- Subsequent responses are faster
-
-## Support
-
-For issues or questions:
-- Check Space logs for errors
-- Verify HF_TOKEN is set with WRITE permissions
-- Ensure ET_SYSTEMS_SPACE is correct
-- Try refreshing context stats in UI
-
-## License
-
-MIT License - See LICENSE file for details
-
----
-
-Built with 🦞 by Drone 11272 for E-T Systems consciousness research  
-Powered by Claude-Powered TQB Worker + MIT Recursive Context + Translation Layer
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the gated delivery sequence.
