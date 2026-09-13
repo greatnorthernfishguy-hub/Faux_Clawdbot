@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Make shell allowlisting structural
+# What: Parse commands with shlex, reject shell grammar, validate exact binaries,
+#       and expose the parsed argv/environment for shell=False execution.
+# Why: Checking only the first word while executing with shell=True allowed a
+#      permitted command to smuggle arbitrary follow-on commands.
+# How: One canonical parser now serves PolicyEngine, ShellTool, and SpecExecutor.
 # [2026-04-17] Claude (Sonnet 4.6) — read_only_paths: ecosystem sibling repo read access (#168)
 # What: can_access_path + check_tool_call gain optional read_only_paths param (list[Path]).
 #   Paths outside workspace are permitted for read_file if they fall under a read_only_paths root.
@@ -30,6 +36,7 @@ Audit: persistent JSONL log of every tool call and its outcome.
 import json
 import os
 import re
+import shlex
 import time
 from pathlib import Path
 
@@ -190,6 +197,58 @@ def can_access_path(
     return True, "Path access permitted."
 
 
+_SHELL_CONTROL_TOKENS = frozenset({";", "&&", "||", "|", "&", ">", ">>", "<", "<<"})
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$", re.DOTALL)
+
+
+def parse_shell_command(command: str) -> tuple[list[str], dict[str, str]]:
+    """Parse one command into argv and leading environment assignments.
+
+    Shell grammar and command substitution are refused because callers execute
+    the returned argv with ``shell=False``.
+    """
+    if "`" in command or "$(" in command:
+        raise ValueError("Shell command substitution is not permitted.")
+    if "\n" in command or "\r" in command:
+        raise ValueError("Multiline shell commands are not permitted.")
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError as exc:
+        raise ValueError(f"Invalid shell quoting: {exc}") from exc
+    if not tokens:
+        raise ValueError("Empty command denied.")
+    forbidden = [
+        token for token in tokens
+        if token in _SHELL_CONTROL_TOKENS
+        or (token and all(character in ";&|<>" for character in token))
+    ]
+    if forbidden:
+        raise ValueError(f"Shell control token is not permitted: {forbidden[0]}")
+
+    environment: dict[str, str] = {}
+    while tokens:
+        match = _ENV_ASSIGNMENT.fullmatch(tokens[0])
+        if not match:
+            break
+        key, value = tokens.pop(0).split("=", 1)
+        environment[key] = value
+    if not tokens:
+        raise ValueError("Command is only environment assignments — no binary found.")
+    return tokens, environment
+
+
+def shell_binary_allowed(binary: str, allowlist: tuple[str, ...] | list[str]) -> bool:
+    """Match exact binary names, allowing only numeric Python/pip suffixes."""
+    if binary in allowlist:
+        return True
+    for base in ("python", "pip"):
+        if base in allowlist and re.fullmatch(rf"{base}[0-9]+(?:\.[0-9]+)?", binary):
+            return True
+    return False
+
+
 def can_execute_shell(command: str) -> tuple[bool, str]:
     """Check whether *command* is on the shell allowlist.
 
@@ -200,27 +259,18 @@ def can_execute_shell(command: str) -> tuple[bool, str]:
     tuple[bool, str]
         (allowed, reason)
     """
-    stripped = command.strip()
-    if not stripped:
-        return False, "Empty command denied."
-
-    # Strip leading env var assignments (KEY=value) before finding the binary.
-    # e.g. PYTHONPATH=/foo python3 -m pytest → check 'python3', not 'PYTHONPATH'
-    tokens = stripped.split()
-    while tokens and "=" in tokens[0] and not tokens[0].startswith("="):
-        tokens = tokens[1:]
-    if not tokens:
-        return False, "Command is only env var assignments — no binary found."
+    try:
+        tokens, _environment = parse_shell_command(command)
+    except ValueError as exc:
+        return False, str(exc)
 
     # Extract the first token (the binary / command name)
     first_token = tokens[0]
     # Strip any path prefix so `/usr/bin/python` matches `python`
     binary = os.path.basename(first_token)
 
-    for allowed_prefix in _SHELL_ALLOWLIST:
-        # Match exactly or as a prefix (e.g. `python3` matches `python`)
-        if binary == allowed_prefix or binary.startswith(allowed_prefix):
-            return True, f"Shell command permitted (matched '{allowed_prefix}')."
+    if shell_binary_allowed(binary, _SHELL_ALLOWLIST):
+        return True, f"Shell command permitted ('{binary}')."
 
     return False, (
         f"Shell command denied — '{binary}' is not on the allowlist. "

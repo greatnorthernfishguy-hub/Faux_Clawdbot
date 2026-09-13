@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Remove shell interpretation from workspace dispatch
+# What: Direct spec shell execution uses PolicyEngine's parsed argv and explicit env.
+# Why: Workspace override previously bypassed ShellTool and executed with shell=True.
+# How: Keep spec allowlist authority while sharing the canonical safe parser.
 # [2026-09-12] Codex — Make human and QB gates stop execution
 # What: Added explicit paused execution state and propagated it through nested
 #       conditions, loops, groups, and execution reports.
@@ -187,7 +191,8 @@ class SpecExecutor:
                 cmd = (params.get("command") or "").strip()
                 if cmd:
                     binary = _os.path.basename(cmd.split()[0])
-                    if any(binary == a or binary.startswith(a) for a in spec_shell_allowlist):
+                    from policy_engine import shell_binary_allowed
+                    if shell_binary_allowed(binary, spec_shell_allowlist):
                         _skip_policy_shell = True
                         logger.info("  [%s] Shell command '%s' approved by spec allowlist", step_id, binary)
 
@@ -447,15 +452,23 @@ class SpecExecutor:
             return new_content
 
         elif tool_name == "shell_execute":
+            import os as _os
             import subprocess as _sp
+            from policy_engine import parse_shell_command
             command = params.get("command", "")
             if not command:
                 return {"status": "error", "error": "Empty command"}
+            argv, assignments = parse_shell_command(command)
+            process_env = _os.environ.copy()
+            process_env.update(assignments)
             result = _sp.run(
-                command, shell=True, capture_output=True, text=True,
-                cwd=str(self.workspace), timeout=120,
+                argv, shell=False, capture_output=True, text=True,
+                cwd=str(self.workspace), timeout=120, env=process_env,
             )
-            return (result.stdout + result.stderr).strip()
+            return (
+                f"EXIT_CODE: {result.returncode}\n"
+                f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
 
         elif tool_name == "notebook_add":
             content = params.get("content", "")

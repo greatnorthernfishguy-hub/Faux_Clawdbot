@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Execute allowed commands without a shell
+# What: Use PolicyEngine's canonical argv parser and subprocess shell=False.
+# Why: The former allowlist-plus-shell=True combination admitted command chaining.
+# How: Apply leading environment assignments explicitly and return the exit code.
 # [2026-03-29] Chisel/TQB — Block C: ShellTool
 # What: shell_execute extracted from RecursiveContextManager
 # Why: PRD Block C — single-responsibility tool classes
@@ -39,15 +43,18 @@ class ShellTool:
                 return {"status": "error", "tool": "shell", "error": reason, "type": "PermissionError"}
 
         try:
-            # shell=True — pipes and redirects work. Safety is enforced by
-            # PolicyEngine's command allowlist, not by shell=False.
+            from policy_engine import parse_shell_command
+            argv, assignments = parse_shell_command(command)
+            process_env = os.environ.copy()
+            process_env.update(assignments)
             result = subprocess.run(
-                command,
-                shell=True,
+                argv,
+                shell=False,
                 cwd=str(self.repo_path),
                 capture_output=True,
                 text=True,
                 timeout=SHELL_TIMEOUT,
+                env=process_env,
             )
             stdout = result.stdout
             stderr = result.stderr
@@ -58,7 +65,7 @@ class ShellTool:
             if len(stderr) > MAX_OUTPUT_SIZE:
                 stderr = stderr[:MAX_OUTPUT_SIZE] + "\n...[truncated]"
 
-            return f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+            return f"EXIT_CODE: {result.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         except subprocess.TimeoutExpired:
             logger.warning("shell_execute timeout: %s", command[:100])
             return {"status": "error", "tool": "shell", "error": f"Command timed out ({SHELL_TIMEOUT}s limit)", "type": "TimeoutError"}
