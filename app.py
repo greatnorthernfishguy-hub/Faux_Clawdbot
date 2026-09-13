@@ -82,7 +82,8 @@ logger = logging.getLogger("Clawdbot")
 # Init
 # ---------------------------------------------------------------------------
 
-REPO_PATH = Path(os.path.dirname(os.path.abspath(__file__)))
+APP_PATH = Path(os.path.dirname(os.path.abspath(__file__)))
+REPO_PATH = Path(os.getenv("REPO_PATH", str(APP_PATH))).expanduser().resolve()
 
 # Ecosystem sibling repos that specs are allowed to READ (but not write).
 # These paths only exist on VPS; on HF Space they resolve but won't be found

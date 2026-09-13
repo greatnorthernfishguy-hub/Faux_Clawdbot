@@ -49,6 +49,7 @@ RUN mkdir -p /workspace/e-t-systems \
              /tmp/.cache/torch \
              /tmp/.neurograph/checkpoints \
              /data/neurograph_worker/checkpoints \
+             /data/codemine-missions \
              /data/audit
 
 # =============================================================================
@@ -61,6 +62,13 @@ ENV NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
 ENV CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
 ENV CODEMINE_PERSISTENT_ROOT=/data
 ENV CODEMINE_BOOT_MODE=normal
+ENV CODEMINE_MISSION_ROOT=/data/codemine-missions
+ENV CODEMINE_WORKTREE_ROOT=/tmp/codemine-worktrees
+ENV CODEMINE_DEFAULT_WORKSPACE=/workspace/e-t-systems
+ENV CODEMINE_WORKSPACE_ROOTS=/workspace
+ENV CODEMINE_VALIDATION_CATALOG_PATH=/app/validation_catalog.json
+ENV CODEMINE_MAX_PARALLEL=3
+ENV CODEMINE_VALIDATION_TIMEOUT=300
 ENV CODEMINE_PROVIDER=openrouter
 ENV CODEMINE_MODEL_ID=moonshotai/kimi-k3
 ENV CODEMINE_LEADER_PROVIDER=openrouter

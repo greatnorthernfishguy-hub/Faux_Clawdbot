@@ -60,6 +60,7 @@ class MissionService:
         worker_ng,
         validation_catalog_path: Optional[Path] = None,
         mission_root: Optional[Path] = None,
+        worktree_root: Optional[Path] = None,
         workspace_roots: Optional[list[Path]] = None,
         generator_fn=generate_mission_plan,
         dispatcher_cls=MissionDispatcher,
@@ -72,6 +73,10 @@ class MissionService:
             "CODEMINE_MISSION_ROOT", "/data/codemine-missions"
         )
         self.mission_root = Path(mission_root or configured_mission_root).resolve()
+        configured_worktrees = os.getenv(
+            "CODEMINE_WORKTREE_ROOT", "/tmp/codemine-worktrees"
+        )
+        self.worktree_root = Path(worktree_root or configured_worktrees).resolve()
         self.workspace_roots = [
             Path(root).resolve() for root in (workspace_roots or configured_workspace_roots())
         ]
@@ -155,6 +160,7 @@ class MissionService:
                 worker_ng=self.ng,
                 validation_catalog=self.validation_commands,
                 mission_root=self.mission_root,
+                worktree_root=self.worktree_root,
             )
             result = dispatcher.dispatch(
                 plan, mutations_approved=True, command_approved=command_approved,

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -80,6 +81,7 @@ class MissionDispatcher:
         worker_ng,
         validation_catalog: dict[str, tuple[str, ...]],
         mission_root: Optional[Path] = None,
+        worktree_root: Optional[Path] = None,
         persona_call=call_persona,
         max_parallel: Optional[int] = None,
     ):
@@ -90,12 +92,16 @@ class MissionDispatcher:
         }
         configured_root = os.getenv("CODEMINE_MISSION_ROOT", "/data/codemine-missions")
         self.mission_root = Path(mission_root or configured_root).resolve()
+        configured_worktrees = os.getenv("CODEMINE_WORKTREE_ROOT", "/tmp/codemine-worktrees")
+        self.worktree_root = Path(worktree_root or configured_worktrees).resolve()
         self.persona_call = persona_call
         self.max_parallel = max_parallel or int(os.getenv("CODEMINE_MAX_PARALLEL", "3"))
         self._mission_dir: Optional[Path] = None
         self._receipt: dict = {}
         if self.mission_root == self.repo or self.mission_root.is_relative_to(self.repo):
             raise ValueError("Mission worktrees and receipts must live outside the source repository")
+        if self.worktree_root == self.repo or self.worktree_root.is_relative_to(self.repo):
+            raise ValueError("Mission worktrees must live outside the source repository")
         if self.max_parallel < 1:
             raise ValueError("max_parallel must be at least 1")
         for validation_id, argv in self.validation_catalog.items():
@@ -149,7 +155,7 @@ class MissionDispatcher:
             ["status", "--short", "--branch"], cwd=self.repo,
         ).stdout
         integration = self._create_worktree(
-            path=self._mission_dir / "integration",
+            path=self.worktree_root / run_id / "integration",
             branch=f"tqb/{run_id}/integration",
             start_point=baseline,
         )
@@ -168,6 +174,7 @@ class MissionDispatcher:
             "risk_by_block": risks,
             "dependency_levels": dependency_levels(plan),
             "integration": integration,
+            "artifacts": {},
             "blocks": {},
         }
         self._save_receipt()
@@ -191,11 +198,12 @@ class MissionDispatcher:
                 block = by_id[block_id]
                 block_slug = f"{_slug(block_id, 'block')}-{uuid.uuid4().hex[:6]}"
                 prepared[block_id] = self._create_worktree(
-                    path=self._mission_dir / "blocks" / block_slug,
+                    path=self.worktree_root / run_id / "blocks" / block_slug,
                     branch=f"tqb/{run_id}/{block_slug}",
                     start_point=integration_head,
                 )
                 prepared[block_id]["level"] = level_number
+                prepared[block_id]["artifact_name"] = block_slug
 
             worker_results = {}
             with ThreadPoolExecutor(max_workers=min(self.max_parallel, len(block_ids))) as pool:
@@ -379,6 +387,10 @@ class MissionDispatcher:
     def _finalize_block(self, block: dict, worktree: dict, worker_result: dict, risk: str) -> dict:
         result = {**worktree, "risk": risk, **worker_result, "integrated": False}
         if worker_result.get("status") != "worker_complete":
+            result["wip_patch"] = self._write_wip_artifact(
+                name=f"block-{worktree['artifact_name']}-wip",
+                cwd=Path(worktree["path"]),
+            )
             return result
         workspace = Path(worktree["path"])
         commit = None
@@ -400,6 +412,11 @@ class MissionDispatcher:
                 })
                 return result
             commit = self._git(["rev-parse", "HEAD"], cwd=workspace).stdout.strip()
+            result["patch"] = self._write_patch_artifact(
+                name=f"block-{worktree['artifact_name']}",
+                argv=["format-patch", "--stdout", "--binary", "-1", commit],
+                cwd=workspace,
+            )
         result.update({"status": "approved", "commit": commit})
         return result
 
@@ -537,6 +554,34 @@ class MissionDispatcher:
         )
         return {"path": str(path), "branch": branch, "start_point": start_point}
 
+    def _write_patch_artifact(self, *, name: str, argv: list[str], cwd: Path) -> dict:
+        completed = self._git(argv, cwd=cwd)
+        content = completed.stdout.encode("utf-8")
+        artifact_dir = self._mission_dir / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        destination = artifact_dir / f"{name}.patch"
+        temporary = destination.with_suffix(".patch.tmp")
+        temporary.write_bytes(content)
+        os.replace(temporary, destination)
+        return {
+            "path": str(destination),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "bytes": len(content),
+        }
+
+    def _write_wip_artifact(self, *, name: str, cwd: Path) -> Optional[dict]:
+        untracked = self._git(
+            ["ls-files", "--others", "--exclude-standard", "-z"], cwd=cwd,
+        ).stdout.split("\0")
+        untracked = [path for path in untracked if path]
+        if untracked:
+            self._git(["add", "-N", "--", *untracked], cwd=cwd)
+        if not self._changed_paths(cwd):
+            return None
+        return self._write_patch_artifact(
+            name=name, argv=["diff", "--binary", "HEAD"], cwd=cwd,
+        )
+
     def _is_git_repo(self) -> bool:
         result = self._git(["rev-parse", "--git-dir"], cwd=self.repo, check=False)
         return result.returncode == 0
@@ -572,6 +617,15 @@ class MissionDispatcher:
         self._receipt["source"]["modified"] = (
             ending_status != self._receipt["source"]["status_at_start"]
         )
+        if status == "ready_for_external_review":
+            integration = Path(self._receipt["integration"]["path"])
+            baseline = self._receipt["source"]["baseline"]
+            head = self._receipt["integration"]["head"]
+            self._receipt["artifacts"]["integration_patch"] = self._write_patch_artifact(
+                name="integration",
+                argv=["diff", "--binary", baseline, head],
+                cwd=integration,
+            )
         self._receipt["status"] = status
         self._receipt["finished_at"] = time.time()
         self._receipt["elapsed_seconds"] = round(time.time() - started, 2)

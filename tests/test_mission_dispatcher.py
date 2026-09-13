@@ -94,6 +94,7 @@ def test_dispatch_preserves_dirty_source_and_stops_at_external_review(tmp_path):
             "check": ("python3", "-c", "from pathlib import Path; assert Path('src/feature.py').read_text() == 'VALUE = 2\\n'"),
         },
         mission_root=tmp_path / "missions", persona_call=approving_persona,
+        worktree_root=tmp_path / "worktrees",
     )
 
     result = dispatcher.dispatch(plan(), mutations_approved=True)
@@ -105,7 +106,11 @@ def test_dispatch_preserves_dirty_source_and_stops_at_external_review(tmp_path):
     integration = Path(result["integration"]["path"])
     assert (integration / "src" / "feature.py").read_text() == "VALUE = 2\n"
     assert result["blocks"]["forge-change"]["integrated"] is True
-    assert (Path(result["integration"]["path"]).parent / "RECEIPT.json").is_file()
+    receipt_path = next((tmp_path / "missions").glob("*/RECEIPT.json"))
+    assert receipt_path.is_file()
+    patch = Path(result["artifacts"]["integration_patch"]["path"])
+    assert patch.is_file()
+    assert "+VALUE = 2" in patch.read_text()
     assert graph.messages
 
 
@@ -130,6 +135,7 @@ def test_write_attempt_outside_block_scope_is_blocked(tmp_path):
         repo=repo, worker_ng=None,
         validation_catalog={"check": ("python3", "-c", "pass")},
         mission_root=tmp_path / "missions", persona_call=escaping_persona,
+        worktree_root=tmp_path / "worktrees",
     ).dispatch(plan(), mutations_approved=True)
 
     assert result["status"] == "blocked"
@@ -147,6 +153,7 @@ def test_unknown_validation_rejected_before_worktree_creation(tmp_path):
         repo=repo, worker_ng=None,
         validation_catalog={"check": ("python3", "-c", "pass")},
         mission_root=missions, persona_call=approving_persona,
+        worktree_root=tmp_path / "worktrees",
     ).dispatch(candidate, mutations_approved=True)
 
     assert result["status"] == "rejected"
@@ -162,6 +169,7 @@ def test_command_risk_stops_before_worktree_without_human_gate(tmp_path):
         repo=repo, worker_ng=RecordingGraph(),
         validation_catalog={"check": ("python3", "-c", "pass")},
         mission_root=missions, persona_call=approving_persona,
+        worktree_root=tmp_path / "worktrees",
     ).dispatch(candidate, mutations_approved=True)
 
     assert result["status"] == "awaiting_human_approval"
@@ -200,8 +208,38 @@ def test_reviewer_iteration_returns_to_worker_with_findings(tmp_path):
         repo=repo, worker_ng=RecordingGraph(),
         validation_catalog={"check": ("python3", "-c", "pass")},
         mission_root=tmp_path / "missions", persona_call=iterating_persona,
+        worktree_root=tmp_path / "worktrees",
     ).dispatch(plan(), mutations_approved=True)
 
     assert result["status"] == "ready_for_external_review"
     assert worker_calls == 2
     assert review_calls == 2
+
+
+def test_blocked_work_is_preserved_as_durable_wip_patch(tmp_path):
+    repo = make_repo(tmp_path)
+
+    def escalating_persona(**kwargs):
+        if kwargs["role"] == "forge":
+            kwargs["tool_runtime"].execute(
+                "write_file", {"path": "src/feature.py", "content": "VALUE = 9\n"},
+            )
+            structured = {
+                "status": "complete", "summary": "Risky change.",
+                "evidence": ["VALUE is 9"], "blockers": [],
+            }
+        else:
+            structured = {"decision": "escalate", "findings": ["Needs external judgment"]}
+        return {"structured": structured, "response": str(structured), "tool_events": []}
+
+    result = MissionDispatcher(
+        repo=repo, worker_ng=RecordingGraph(),
+        validation_catalog={"check": ("python3", "-c", "pass")},
+        mission_root=tmp_path / "missions", persona_call=escalating_persona,
+        worktree_root=tmp_path / "worktrees",
+    ).dispatch(plan(), mutations_approved=True)
+
+    block = result["blocks"]["forge-change"]
+    assert result["status"] == "blocked"
+    assert block["wip_patch"] is not None
+    assert "+VALUE = 9" in Path(block["wip_patch"]["path"]).read_text()

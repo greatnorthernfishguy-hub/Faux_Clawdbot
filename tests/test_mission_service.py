@@ -36,6 +36,7 @@ def test_plan_is_persisted_before_execution(tmp_path):
         worker_ng=None,
         validation_catalog_path=write_catalog(tmp_path),
         mission_root=tmp_path / "missions",
+        worktree_root=tmp_path / "worktrees",
         workspace_roots=[tmp_path],
         generator_fn=generator,
     )
@@ -58,6 +59,7 @@ def test_workspace_outside_environment_roots_is_rejected(tmp_path):
         worker_ng=None,
         validation_catalog_path=write_catalog(tmp_path),
         mission_root=tmp_path / "missions",
+        worktree_root=tmp_path / "worktrees",
         workspace_roots=[allowed],
     )
 
@@ -85,6 +87,7 @@ def test_execute_passes_only_reviewed_proposal_to_dispatcher(tmp_path):
         worker_ng=None,
         validation_catalog_path=write_catalog(tmp_path),
         mission_root=tmp_path / "missions",
+        worktree_root=tmp_path / "worktrees",
         workspace_roots=[tmp_path],
         dispatcher_cls=FakeDispatcher,
     )
@@ -103,6 +106,7 @@ def test_execute_passes_only_reviewed_proposal_to_dispatcher(tmp_path):
     assert captured["dispatch"] == {
         "mutations_approved": True, "command_approved": True,
     }
+    assert captured["init"]["worktree_root"] == tmp_path / "worktrees"
     assert json.loads(proposal_path.read_text())["status"] == "executed"
 
 
@@ -124,6 +128,7 @@ def test_same_proposal_cannot_execute_twice(tmp_path):
         worker_ng=None,
         validation_catalog_path=write_catalog(tmp_path),
         mission_root=tmp_path / "missions",
+        worktree_root=tmp_path / "worktrees",
         workspace_roots=[tmp_path],
         generator_fn=lambda **_kwargs: {
             "success": True, "plan": {"plan_version": "1.0.0"}, "attempts": [],
