@@ -48,6 +48,37 @@ def test_plan_is_persisted_before_execution(tmp_path):
     assert persisted["proposal_path"] == result["proposal_path"]
 
 
+def test_plan_deposits_raw_intent_and_constraints_before_generation(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    events = []
+
+    class Graph:
+        def on_message(self, text):
+            events.append(("deposit", text))
+
+        def save(self):
+            pass
+
+    def generator(**_kwargs):
+        events.append(("generate", None))
+        return {"success": False, "plan": None, "attempts": [], "errors": ["stop"]}
+
+    service = MissionService(
+        worker_ng=Graph(), validation_catalog_json=catalog_json(),
+        mission_root=tmp_path / "missions", worktree_root=tmp_path / "worktrees",
+        workspace_roots=[tmp_path], generator_fn=generator,
+    )
+
+    service.plan(intent="exact intent", constraints="exact constraint", workspace=str(workspace))
+
+    assert events[:3] == [
+        ("deposit", "exact intent"),
+        ("deposit", "exact constraint"),
+        ("generate", None),
+    ]
+
+
 def test_workspace_outside_environment_roots_is_rejected(tmp_path):
     allowed = tmp_path / "allowed"
     outside = tmp_path / "outside"

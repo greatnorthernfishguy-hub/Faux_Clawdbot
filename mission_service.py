@@ -1,6 +1,12 @@
 """Durable plan-then-execute service for Codemine Mission Control."""
 
 # ---- Changelog ----
+# [2026-09-12] Codex — Preserve raw Mission Control input in the substrate.
+# What: Deposit the exact intent and optional constraints before calling the
+#       planner or constructing a proposal envelope.
+# Why: Mission Control bypasses Chat, so these turns otherwise never reached the
+#      shared NeuroGraph; a validated plan is not a substitute for raw input.
+# How: Call the existing on_message pathway before any plan classification.
 # [2026-09-12] Codex — Put a reviewable gate between mission planning and work.
 # What: Resolve bounded workspaces, load coordinator-owned validations, persist
 #       Bethany's proposal, and dispatch only after an explicit execute action.
@@ -100,6 +106,9 @@ class MissionService:
             target = self.resolve_workspace(workspace)
         except ValueError as exc:
             return {"status": "rejected", "errors": [str(exc)]}
+        self._deposit_raw(intent)
+        if constraints and constraints.strip():
+            self._deposit_raw(constraints)
         generated = self.generator_fn(
             intent=intent.strip(),
             constraints=constraints.strip() if constraints and constraints.strip() else None,
@@ -187,6 +196,14 @@ class MissionService:
             return
         try:
             self.ng.save()
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    def _deposit_raw(self, text: str) -> None:
+        if self.ng is None or not text:
+            return
+        try:
+            self.ng.on_message(text)
         except (OSError, ValueError, KeyError, TypeError):
             pass
 

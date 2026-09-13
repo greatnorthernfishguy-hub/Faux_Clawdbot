@@ -96,3 +96,24 @@ def test_fails_closed_after_retry_budget(tmp_path):
     assert result["success"] is False
     assert len(result["attempts"]) == 2
     assert result["errors"]
+
+
+def test_raw_planner_response_reaches_graph_before_parsing(tmp_path):
+    events = []
+
+    class Graph:
+        def on_message(self, text):
+            events.append(("deposit", text))
+
+    def fake_persona_call(**_kwargs):
+        events.append(("response", None))
+        return {"structured": None, "response": json.dumps(valid_plan()), "tool_events": []}
+
+    result = generate_mission_plan(
+        intent="Repair it", workspace=tmp_path, worker_ng=Graph(),
+        persona_call=fake_persona_call,
+    )
+
+    assert result["success"] is True
+    assert events[0][0] == "response"
+    assert events[1] == ("deposit", json.dumps(valid_plan()))

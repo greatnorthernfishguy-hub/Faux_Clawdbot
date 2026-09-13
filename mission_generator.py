@@ -1,6 +1,11 @@
 """Bethany's evidence-first MissionPlan generator."""
 
 # ---- Changelog ----
+# [2026-09-12] Codex — Deposit Bethany's raw response before plan validation.
+# What: Send the untouched planning response to the shared substrate before
+#       parsing its JSON or applying the MissionPlan schema.
+# Why: A structured control artifact cannot replace raw experience under Law 7.
+# How: Use the existing Graph on_message pathway; parsing happens afterward.
 # [2026-09-12] Codex — Give Bethany the multi-block planning contract.
 # What: Generate, parse, and mechanically validate MissionPlans after read-only
 #       repository inspection through the shared specialist tool loop.
@@ -124,7 +129,13 @@ def generate_mission_plan(
             max_tokens=8192,
             tool_runtime=runtime,
         )
-        candidate = result.get("structured") or _extract_json(result.get("response", ""))
+        raw_response = result.get("response", "")
+        if worker_ng is not None and raw_response:
+            try:
+                worker_ng.on_message(raw_response)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        candidate = result.get("structured") or _extract_json(raw_response)
         valid, errors = validate_mission_plan(candidate or {}, set(catalog))
         attempts.append({
             "attempt": attempt_number,
