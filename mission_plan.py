@@ -81,7 +81,14 @@ _validator = Draft202012Validator(MISSION_PLAN_SCHEMA)
 
 def _safe_relative_path(value: str) -> bool:
     path = PurePosixPath(value)
-    return bool(value) and not path.is_absolute() and ".." not in path.parts
+    return (
+        bool(value)
+        and not path.is_absolute()
+        and ".." not in path.parts
+        and ".git" not in path.parts
+        and "\\" not in value
+        and "\x00" not in value
+    )
 
 
 def _paths_overlap(left: str, right: str) -> bool:

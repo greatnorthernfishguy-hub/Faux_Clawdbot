@@ -1,6 +1,13 @@
 """Workspace-bound tool surface for the six durable TQB specialists."""
 
 # ---- Changelog ----
+# [2026-09-12] Codex — Enforce each block's declared write set.
+# What: Bind mutating tools to the exact relative path prefixes approved in the
+#       MissionPlan, in addition to the surrounding worktree boundary.
+# Why: A worktree prevents host escape but does not stop one Lego block from
+#      editing another block's files and invalidating parallel isolation.
+# How: Resolve requested and declared targets below the worktree and deny writes
+#      outside every declared prefix before PolicyEngine or filesystem dispatch.
 # [2026-09-12] Codex — Bind specialist tools to approved block workspaces.
 # What: Add role-scoped file, git evidence, and named validation tools with
 #       PolicyEngine checks and shared-Graph recall/experience.
@@ -167,6 +174,7 @@ class SpecialistToolRuntime:
         workspace: Path,
         worker_ng,
         read_only_paths=None,
+        write_paths=None,
         validation_commands=None,
         allow_write_tools: bool = False,
         mutations_approved: bool = False,
@@ -179,6 +187,7 @@ class SpecialistToolRuntime:
             raise ValueError(f"Workspace does not exist: {self.workspace}")
         self.ng = worker_ng
         self.read_only_paths = [Path(path).resolve() for path in (read_only_paths or [])]
+        self.write_paths = tuple(write_paths or ())
         self.validation_commands = {
             key: tuple(argv) for key, argv in (validation_commands or {}).items()
         }
@@ -202,6 +211,8 @@ class SpecialistToolRuntime:
             allowed_tools = allowed_tools | WRITE_TOOLS
         if tool_name not in allowed_tools:
             return self._error(tool_name, f"Tool is unavailable to {self.role}")
+        if tool_name in WRITE_TOOLS and not self._write_path_allowed(args.get("path", "")):
+            return self._error(tool_name, "Write is outside this block's declared write paths")
 
         allowed, reason = check_tool_call(
             tool_name, args, self.workspace, self.read_only_paths,
@@ -232,6 +243,22 @@ class SpecialistToolRuntime:
         if recall_text:
             result_text = f"[Substrate recall]\n{recall_text}\n\n[Result]\n{result_text}"
         return {"status": status, "tool": tool_name, "result": result_text}
+
+    def _write_path_allowed(self, requested: str) -> bool:
+        if not requested or not self.write_paths:
+            return False
+        try:
+            target = (self.workspace / requested).resolve()
+            workspace = self.workspace.resolve()
+            target.relative_to(workspace)
+            for declared in self.write_paths:
+                allowed_root = (workspace / declared).resolve()
+                allowed_root.relative_to(workspace)
+                if target == allowed_root or target.is_relative_to(allowed_root):
+                    return True
+        except (OSError, ValueError):
+            return False
+        return False
 
     def _dispatch(self, tool_name: str, args: dict):
         handlers = {

@@ -19,6 +19,7 @@ def runtime(tmp_path, role="forge", approved=False, validations=None, allow_writ
         workspace=tmp_path,
         worker_ng=None,
         allow_write_tools=allow_writes,
+        write_paths=["new.py", "src"],
         mutations_approved=approved,
         validation_commands=validations,
     )
@@ -65,6 +66,7 @@ def test_declared_external_root_is_read_only(tmp_path):
         workspace=workspace,
         worker_ng=None,
         read_only_paths=[reference],
+        write_paths=["new.py"],
         allow_write_tools=True,
         mutations_approved=True,
     )
@@ -76,6 +78,17 @@ def test_declared_external_root_is_read_only(tmp_path):
     assert "canonical" in read["result"]
     assert write["status"] == "error"
     assert source.read_text() == "canonical\n"
+
+
+def test_write_tools_cannot_escape_declared_block_scope(tmp_path):
+    worker = runtime(tmp_path, approved=True)
+
+    inside = worker.execute("write_file", {"path": "src/owned.py", "content": "ok\n"})
+    outside = worker.execute("write_file", {"path": "other.py", "content": "bad\n"})
+
+    assert inside["status"] == "executed"
+    assert outside["status"] == "error"
+    assert not (tmp_path / "other.py").exists()
 
 
 def test_named_validation_runs_exact_argv_with_secrets_removed(tmp_path, monkeypatch):

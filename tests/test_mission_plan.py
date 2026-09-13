@@ -98,6 +98,10 @@ def test_unsafe_paths_are_rejected():
     assert valid is False
     assert "unsafe relative path" in errors[0]
 
+    candidate = plan()
+    candidate["blocks"][1]["write_paths"] = [".git/config"]
+    assert validate_mission_plan(candidate)[0] is False
+
 
 def test_parallel_write_overlap_requires_dependency():
     candidate = plan()
