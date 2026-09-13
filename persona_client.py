@@ -1,4 +1,11 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Package Bethany separately from her six specialists.
+# What: Add a leader persona while keeping TQB_ROLES exactly the six durable
+#       specialist identities.
+# Why: Bethany owns mission judgment and decomposition; treating her as a
+#      seventh interchangeable worker would erase the chain of command.
+# How: Validate persona loading against PERSONA_ROLES and keep worker assignment
+#      validation tied to TQB_ROLES.
 # [2026-09-12] Codex — Use shared per-role provider/model routing
 # What: Persona calls use model_client rather than a second OpenRouter-only path.
 # Why: The six durable specialists need independent, concurrent-safe routes and
@@ -48,6 +55,8 @@ TQB_ROLES = frozenset({
     "razor",
     "reviewer",
 })
+LEADER_ROLE = "leader"
+PERSONA_ROLES = TQB_ROLES | {LEADER_ROLE}
 
 # Personality files are deployment assets shipped with Codemine. An explicit
 # override remains available for development against Josh's canonical docs.
@@ -67,8 +76,8 @@ def load_personality(role: str) -> tuple[str, str]:
     Includes unit disciplines.
     """
     normalized_role = role.strip().lower()
-    if normalized_role not in TQB_ROLES:
-        available = ", ".join(sorted(TQB_ROLES))
+    if normalized_role not in PERSONA_ROLES:
+        available = ", ".join(sorted(PERSONA_ROLES))
         raise ValueError(f"Unknown TQB role '{role}'. Available roles: {available}")
 
     personality_file = PERSONALITY_DIR / f"{normalized_role}.md"

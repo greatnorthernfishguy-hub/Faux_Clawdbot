@@ -33,7 +33,7 @@ READ_TOOLS = frozenset({
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 
 ROLE_TOOLS = {role: READ_TOOLS for role in (
-    "strategist", "tracker", "wrench", "forge", "razor", "reviewer",
+    "leader", "strategist", "tracker", "wrench", "forge", "razor", "reviewer",
 )}
 
 SPECIALIST_TOOL_DEFINITIONS = [

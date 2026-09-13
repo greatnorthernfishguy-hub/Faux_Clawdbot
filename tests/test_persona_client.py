@@ -21,6 +21,16 @@ def test_complete_six_person_unit_is_packaged():
     for role in EXPECTED_ROLES:
         assert (persona_client.PERSONALITY_DIR / f"{role}.md").is_file()
     assert persona_client.UNIT_DISCIPLINES_FILE.is_file()
+    assert persona_client.LEADER_ROLE not in persona_client.TQB_ROLES
+    assert (persona_client.PERSONALITY_DIR / "leader.md").is_file()
+
+
+def test_bethany_is_loaded_as_leader_not_interchangeable_specialist():
+    personality, disciplines = persona_client.load_personality("leader")
+
+    assert "Bethany Anne Reynolds" in personality
+    assert "six durable specialists" in personality
+    assert "Verify Before Asserting" in disciplines
 
 
 @pytest.mark.parametrize(

@@ -54,7 +54,7 @@ def plan():
                 "write_paths": ["README.md"],
                 "depends_on": ["tracker"],
                 "acceptance_criteria": ["Usage is current"],
-                "validations": [],
+                "validations": ["diff-check"],
             },
             {
                 "id": "review",
@@ -123,3 +123,13 @@ def test_model_can_only_select_coordinator_owned_validations():
 
     assert valid is False
     assert "unknown validation IDs: invented-command" in errors[0]
+
+
+def test_writable_block_requires_at_least_one_validation():
+    candidate = plan()
+    candidate["blocks"][1]["validations"] = []
+
+    valid, errors = validate_mission_plan(candidate)
+
+    assert valid is False
+    assert "writable block requires validation IDs" in errors[0]

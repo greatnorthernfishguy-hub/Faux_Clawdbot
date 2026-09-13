@@ -117,6 +117,8 @@ def validate_mission_plan(
             for path in block[field]:
                 if not _safe_relative_path(path):
                     errors.append(f"{block['id']}.{field}: unsafe relative path: {path}")
+        if block["write_paths"] and not block["validations"]:
+            errors.append(f"{block['id']}: writable block requires validation IDs")
         selected_validations = block["validations"]
         if len(selected_validations) != len(set(selected_validations)):
             errors.append(f"{block['id']}: validation IDs must be unique")
