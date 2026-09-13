@@ -1,5 +1,8 @@
 # Dockerfile for TQB Worker on HuggingFace Spaces
 #
+# CHANGELOG [2026-09-12 - Codex]
+# SHIPPED: Complete six-person TQB personality set and unit disciplines.
+#
 # CHANGELOG [2025-01-30 - Josh]
 # REBUILD: Updated to Gradio 5.0+ for type="messages" support
 #
@@ -53,6 +56,7 @@ ENV NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
 ENV HOME=/tmp
 ENV PYTHONUNBUFFERED=1
 ENV REPO_PATH=/workspace/e-t-systems
+ENV TQB_PERSONALITY_DIR=/app/tqb-personalities
 
 # Copy application files
 COPY recursive_context.py .
@@ -77,6 +81,7 @@ COPY risk_authority.py .
 COPY spec_generator.py .
 COPY orchestrator.py .
 COPY ng_topology_sync.py .
+COPY tqb-personalities/ ./tqb-personalities/
 
 # Copy tools directory
 COPY tools/ ./tools/

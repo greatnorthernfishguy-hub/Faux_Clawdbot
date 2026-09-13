@@ -1,4 +1,12 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Ship and validate the complete six-person TQB unit
+# What: Load packaged persona files, reject unknown roles, inject the full shared
+#       disciplines, and support a model override for each specialist.
+# Why: The Space's HOME is /tmp, so the prior ~/docs default could not load any
+#      persona. Codemine also needs to preserve the six specialists as distinct
+#      team roles and route models by role instead of forcing one model on all.
+# How: Resolve assets beside this module, expose TQB_ROLES, compose the canonical
+#      prompt with UNIT_DISCIPLINES.md, and read CODEMINE_<ROLE>_MODEL_ID first.
 # [2026-04-07] Josh + Claude — Persona client for TQB roleplay model integration
 # What: Calls RP model with personality + Graph context + task prompt, returns structured response
 # Why: Phase 2 of autonomous build organ — the model is the lens, the Graph is the brain
@@ -21,10 +29,22 @@ from typing import Optional
 
 logger = logging.getLogger("persona_client")
 
-# Personality files directory
+# The six durable TQB specialists. These are team roles, not interchangeable
+# labels and not temporary names assigned per build.
+TQB_ROLES = frozenset({
+    "strategist",
+    "tracker",
+    "wrench",
+    "forge",
+    "razor",
+    "reviewer",
+})
+
+# Personality files are deployment assets shipped with Codemine. An explicit
+# override remains available for development against Josh's canonical docs.
 PERSONALITY_DIR = Path(os.getenv(
     "TQB_PERSONALITY_DIR",
-    os.path.expanduser("~/docs/queen-bitch/tqb-personalities")
+    str(Path(__file__).resolve().parent / "tqb-personalities"),
 ))
 
 # Unit disciplines — injected into every persona
@@ -40,18 +60,34 @@ def _get_rp_client():
     )
 
 
-def _get_rp_model_id() -> str:
-    """Return the RP model ID from env."""
-    return os.getenv("CODEMINE_RP_MODEL_ID", "nousresearch/hermes-3-llama-3.1-70b")
+def _get_rp_model_id(role: str) -> str:
+    """Return the configured model ID for one specialist.
+
+    A role-specific setting wins, followed by the shared worker setting and the
+    legacy RP setting. This keeps deployment backward compatible while letting
+    each job use the model best suited to it.
+    """
+    role_key = f"CODEMINE_{role.upper()}_MODEL_ID"
+    return (
+        os.getenv(role_key)
+        or os.getenv("CODEMINE_WORKER_MODEL_ID")
+        or os.getenv("CODEMINE_RP_MODEL_ID")
+        or "nousresearch/hermes-3-llama-3.1-70b"
+    )
 
 
-def load_personality(role: str) -> str:
+def load_personality(role: str) -> tuple[str, str]:
     """Load a personality file by role name.
 
     Returns the full markdown content for system prompt injection.
     Includes unit disciplines.
     """
-    personality_file = PERSONALITY_DIR / f"{role.lower()}.md"
+    normalized_role = role.strip().lower()
+    if normalized_role not in TQB_ROLES:
+        available = ", ".join(sorted(TQB_ROLES))
+        raise ValueError(f"Unknown TQB role '{role}'. Available roles: {available}")
+
+    personality_file = PERSONALITY_DIR / f"{normalized_role}.md"
     if not personality_file.exists():
         raise FileNotFoundError(f"No personality file for role '{role}' at {personality_file}")
 
@@ -88,7 +124,18 @@ def _build_system_prompt(role: str, personality: str, disciplines: str) -> str:
         # Use the whole personality as the system prompt
         injection = personality
 
-    return injection
+    # Persona files carry a short reminder of the disciplines inside their
+    # injection block. Replace that reminder with the complete canonical file
+    # so every specialist receives the actual unit standard.
+    if "\nUNIT DISCIPLINES" in injection:
+        injection = injection.split("\nUNIT DISCIPLINES", 1)[0].rstrip()
+
+    if not disciplines.strip():
+        raise FileNotFoundError(
+            f"TQB unit disciplines are missing at {UNIT_DISCIPLINES_FILE}"
+        )
+
+    return f"{injection}\n\n{disciplines.strip()}"
 
 
 def _format_graph_context(recalls: list, max_chars: int = 4000) -> str:
@@ -141,7 +188,7 @@ def call_persona(
     user_content = f"{graph_section}\n\n{task}" if graph_section else task
 
     client = _get_rp_client()
-    model_id = _get_rp_model_id()
+    model_id = _get_rp_model_id(role.strip().lower())
     last_error = None
     start = time.time()
 
