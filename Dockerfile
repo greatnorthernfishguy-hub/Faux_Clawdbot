@@ -2,6 +2,7 @@
 #
 # CHANGELOG [2026-09-12 - Codex]
 # SHIPPED: Complete six-person TQB personality set and unit disciplines.
+# ADDED: Fail-closed preservation-only boot script and environment-owned paths.
 #
 # CHANGELOG [2025-01-30 - Josh]
 # REBUILD: Updated to Gradio 5.0+ for type="messages" support
@@ -26,9 +27,13 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
+    bash \
     git \
+    git-lfs \
     build-essential \
     curl \
+    wget \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first (for Docker layer caching)
@@ -53,6 +58,9 @@ ENV HF_HOME=/tmp/.cache/huggingface
 ENV XDG_CACHE_HOME=/tmp/.cache
 ENV TORCH_HOME=/tmp/.cache/torch
 ENV NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
+ENV CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
+ENV CODEMINE_PERSISTENT_ROOT=/data
+ENV CODEMINE_BOOT_MODE=normal
 ENV HOME=/tmp
 ENV PYTHONUNBUFFERED=1
 ENV REPO_PATH=/workspace/e-t-systems
@@ -81,6 +89,7 @@ COPY risk_authority.py .
 COPY spec_generator.py .
 COPY orchestrator.py .
 COPY ng_topology_sync.py .
+COPY preserve_codemine.py .
 COPY tqb-personalities/ ./tqb-personalities/
 
 # Copy tools directory

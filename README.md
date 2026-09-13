@@ -11,6 +11,10 @@ license: mit
 
 # 🦞 Clawdbot: E-T Systems Development Assistant
 
+> **Modernization hold:** Before the next normal Space boot, preserve and
+> independently verify the existing third-hemisphere NeuroGraph by following
+> [PRESERVATION.md](PRESERVATION.md).
+
 An AI coding assistant with **unlimited context** and **multimodal capabilities** for the E-T Systems consciousness research platform.
 
 ## Features
