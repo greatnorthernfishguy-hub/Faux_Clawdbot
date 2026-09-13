@@ -89,3 +89,37 @@ def test_persona_reports_requested_and_actual_route(monkeypatch):
     assert result["input_tokens"] == 12
     assert result["output_tokens"] == 7
     assert result["cost"] == 0.004
+
+
+def test_persona_uses_shared_runner_when_tool_runtime_is_bound(monkeypatch):
+    requested = SimpleNamespace(
+        provider="openrouter", model_id="worker/model", role="tracker"
+    )
+    tool_runtime = SimpleNamespace(
+        tool_definitions=[{"name": "read_file"}], execute=lambda name, args: None,
+    )
+    captured = {}
+    monkeypatch.setattr(persona_client, "resolve_route", lambda role: requested)
+    monkeypatch.setattr(persona_client, "get_client", lambda provider: object())
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        return {
+            "text": "Root cause found.",
+            "model_calls": [{
+                "provider": "openrouter", "model": "worker/model",
+                "input_tokens": 20, "output_tokens": 5, "cost": 0.002,
+            }],
+            "staged_actions": [],
+            "tool_events": [{"tool": "read_file", "status": "executed"}],
+        }
+
+    monkeypatch.setattr(persona_client, "run_tool_loop", fake_runner)
+    result = persona_client.call_persona(
+        "tracker", "Find the cause.", tool_runtime=tool_runtime,
+    )
+
+    assert captured["tools"] == tool_runtime.tool_definitions
+    assert captured["execute_tool_fn"] == tool_runtime.execute
+    assert result["response"] == "Root cause found."
+    assert result["tool_events"][0]["tool"] == "read_file"

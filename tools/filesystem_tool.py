@@ -1,4 +1,9 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Carry read-only roots into filesystem enforcement
+# What: FilesystemTool accepts external read roots and passes them to PolicyEngine.
+# Why: The caller's outer check allowed ecosystem reads, but this inner check
+#       denied the same path because it had lost the approved roots.
+# How: Bind immutable resolved roots at construction and reuse them for reads.
 # [2026-04-06] Josh + Claude — Add edit_file method (find-and-replace)
 # What: New edit_file method on FilesystemTool for targeted file edits
 # Why: Gap 3 — write_file does full overwrite which risks corruption on cross-repo work
@@ -25,9 +30,10 @@ MAX_READ_SIZE = 10 * 1024 * 1024  # 10MB
 class FilesystemTool:
     """Filesystem read/write/list operations scoped to repo_path."""
 
-    def __init__(self, repo_path: Path, policy_engine=None):
+    def __init__(self, repo_path: Path, policy_engine=None, read_only_paths=None):
         self.repo_path = repo_path
         self.policy_engine = policy_engine
+        self.read_only_paths = [Path(path).resolve() for path in (read_only_paths or [])]
 
     def _check_path(self, path: str, mode: str) -> tuple:
         """Resolve path and enforce workspace boundary.
@@ -35,7 +41,11 @@ class FilesystemTool:
         Returns (resolved_path, error_dict_or_None).
         """
         target = (self.repo_path / path).resolve()
-        if not target.is_relative_to(self.repo_path.resolve()):
+        inside_workspace = target.is_relative_to(self.repo_path.resolve())
+        inside_read_only = mode == "read" and any(
+            target.is_relative_to(root) for root in self.read_only_paths
+        )
+        if not inside_workspace and not inside_read_only:
             msg = f"Path outside workspace boundary: {path}"
             logger.warning(msg)
             return None, {"status": "error", "tool": "filesystem", "error": msg, "type": "PermissionError"}
@@ -44,7 +54,9 @@ class FilesystemTool:
             from policy_engine import check_tool_call
             tool_name = "read_file" if mode == "read" else "write_file"
             args = {"path": str(target)}
-            allowed, reason = check_tool_call(tool_name, args, self.repo_path)
+            allowed, reason = check_tool_call(
+                tool_name, args, self.repo_path, self.read_only_paths,
+            )
             if not allowed:
                 return None, {"status": "error", "tool": "filesystem", "error": reason, "type": "PermissionError"}
 

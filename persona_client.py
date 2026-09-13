@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from model_client import call_model, get_client, resolve_route
+from agent_runner import run_tool_loop
 
 logger = logging.getLogger("persona_client")
 
@@ -148,6 +149,8 @@ def call_persona(
     max_tokens: int = 4096,
     temperature: float = 0.7,
     max_retries: int = 2,
+    tool_runtime=None,
+    max_iterations: int = 15,
 ) -> dict:
     """Call the RP model as a specific TQB persona.
 
@@ -177,21 +180,57 @@ def call_persona(
 
     for attempt in range(max_retries + 1):
         try:
-            response = call_model(
-                client,
-                system_prompt,
-                [{"role": "user", "content": user_content}],
-                [],
-                max_retries=1,
-                max_tokens=max_tokens,
-                route=route,
-                temperature=temperature,
-                response_format=response_format,
-            )
-            raw_text = "\n".join(
-                block.text for block in response.content
-                if block.type == "text" and block.text
-            )
+            def routed_call(bound_client, prompt, messages, tools):
+                return call_model(
+                    bound_client,
+                    prompt,
+                    messages,
+                    tools,
+                    max_retries=1,
+                    max_tokens=max_tokens,
+                    route=route,
+                    temperature=temperature,
+                    response_format=response_format,
+                )
+
+            if tool_runtime is not None:
+                run = run_tool_loop(
+                    client=client,
+                    system_prompt=system_prompt,
+                    messages=[{"role": "user", "content": user_content}],
+                    tools=tool_runtime.tool_definitions,
+                    call_model_fn=routed_call,
+                    execute_tool_fn=tool_runtime.execute,
+                    truncate_result_fn=lambda value: value[:10_000],
+                    max_iterations=max_iterations,
+                )
+                raw_text = run["text"]
+                model_calls = run["model_calls"]
+                staged_actions = run["staged_actions"]
+                tool_events = run["tool_events"]
+            else:
+                response = routed_call(
+                    client, system_prompt,
+                    [{"role": "user", "content": user_content}], [],
+                )
+                raw_text = "\n".join(
+                    block.text for block in response.content
+                    if block.type == "text" and block.text
+                )
+                usage = getattr(response, "usage", None)
+                model_calls = [{
+                    "provider": getattr(response, "provider", None) or route.provider,
+                    "model": getattr(response, "model", None) or route.model_id,
+                    "input_tokens": getattr(
+                        usage, "prompt_tokens", getattr(usage, "input_tokens", 0)
+                    ) if usage is not None else 0,
+                    "output_tokens": getattr(
+                        usage, "completion_tokens", getattr(usage, "output_tokens", 0)
+                    ) if usage is not None else 0,
+                    "cost": getattr(usage, "cost", None) if usage is not None else None,
+                }]
+                staged_actions = []
+                tool_events = []
 
             # Try to parse as JSON if structured output was requested
             structured = None
@@ -210,17 +249,12 @@ def call_persona(
                         structured = json.loads(raw_text[start_idx:end_idx].strip())
 
             elapsed = round(time.time() - start, 2)
-            usage = getattr(response, "usage", None)
-            output_tokens = 0
-            input_tokens = 0
-            if usage is not None:
-                output_tokens = getattr(
-                    usage, "completion_tokens", getattr(usage, "output_tokens", 0)
-                ) or 0
-                input_tokens = getattr(
-                    usage, "prompt_tokens", getattr(usage, "input_tokens", 0)
-                ) or 0
-            cost = getattr(usage, "cost", None) if usage is not None else None
+            input_tokens = sum(call.get("input_tokens", 0) or 0 for call in model_calls)
+            output_tokens = sum(call.get("output_tokens", 0) or 0 for call in model_calls)
+            known_costs = [call.get("cost") for call in model_calls if call.get("cost") is not None]
+            cost = sum(known_costs) if known_costs else None
+            actual_provider = model_calls[-1].get("provider") or route.provider
+            actual_model = model_calls[-1].get("model") or route.model_id
             logger.info(
                 "Persona %s responded in %.1fs (%d output tokens)",
                 role, elapsed, output_tokens,
@@ -230,13 +264,16 @@ def call_persona(
                 "role": role,
                 "response": raw_text,
                 "structured": structured,
-                "provider": getattr(response, "provider", None) or route.provider,
-                "model": getattr(response, "model", None) or route.model_id,
+                "provider": actual_provider,
+                "model": actual_model,
                 "requested_provider": route.provider,
                 "requested_model": route.model_id,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cost": cost,
+                "model_calls": model_calls,
+                "tool_events": tool_events,
+                "staged_actions": staged_actions,
                 "elapsed_seconds": elapsed,
             }
 
@@ -258,6 +295,9 @@ def call_persona(
         "input_tokens": 0,
         "output_tokens": 0,
         "cost": None,
+        "model_calls": [],
+        "tool_events": [],
+        "staged_actions": [],
         "elapsed_seconds": round(time.time() - start, 2),
     }
 

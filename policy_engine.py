@@ -362,9 +362,12 @@ def check_tool_call(
     reason = "Permitted."
 
     # --- Path access checks ---
-    if tool_name in ("write_file", "edit_file", "read_file", "notebook_add", "notebook_delete"):
+    if tool_name in (
+        "write_file", "edit_file", "read_file", "list_files",
+        "notebook_add", "notebook_delete",
+    ):
         path = args.get("path", args.get("file_path", ""))
-        mode = "write" if tool_name not in ("read_file",) else "read"
+        mode = "read" if tool_name in ("read_file", "list_files") else "write"
         allowed, reason = can_access_path(path, mode, workspace, read_only_paths)
 
     # --- Content checks (write operations) ---
