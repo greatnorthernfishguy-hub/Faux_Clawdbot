@@ -13,11 +13,12 @@ import subprocess
 from specialist_tools import SpecialistToolRuntime, tool_definitions_for
 
 
-def runtime(tmp_path, role="forge", approved=False, validations=None):
+def runtime(tmp_path, role="forge", approved=False, validations=None, allow_writes=True):
     return SpecialistToolRuntime(
         role=role,
         workspace=tmp_path,
         worker_ng=None,
+        allow_write_tools=allow_writes,
         mutations_approved=approved,
         validation_commands=validations,
     )
@@ -29,6 +30,10 @@ def test_planning_and_review_roles_have_no_write_tools():
         assert "write_file" not in names
         assert "edit_file" not in names
         assert "git_diff" in names
+
+    assert "write_file" in {
+        tool["name"] for tool in tool_definitions_for("tracker", allow_write_tools=True)
+    }
 
 
 def test_unapproved_forge_write_is_staged(tmp_path):
@@ -60,6 +65,7 @@ def test_declared_external_root_is_read_only(tmp_path):
         workspace=workspace,
         worker_ng=None,
         read_only_paths=[reference],
+        allow_write_tools=True,
         mutations_approved=True,
     )
 

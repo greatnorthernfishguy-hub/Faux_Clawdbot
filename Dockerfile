@@ -95,6 +95,7 @@ COPY policy_engine.py .
 COPY model_client.py .
 COPY agent_runner.py .
 COPY specialist_tools.py .
+COPY mission_plan.py .
 COPY system_prompt.py .
 COPY tool_definitions.py .
 COPY worker_ng.py .

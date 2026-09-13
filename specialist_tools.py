@@ -32,14 +32,9 @@ READ_TOOLS = frozenset({
 })
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 
-ROLE_TOOLS = {
-    "strategist": READ_TOOLS,
-    "tracker": READ_TOOLS,
-    "wrench": READ_TOOLS,
-    "forge": READ_TOOLS | WRITE_TOOLS,
-    "razor": READ_TOOLS,
-    "reviewer": READ_TOOLS,
-}
+ROLE_TOOLS = {role: READ_TOOLS for role in (
+    "strategist", "tracker", "wrench", "forge", "razor", "reviewer",
+)}
 
 SPECIALIST_TOOL_DEFINITIONS = [
     {
@@ -145,10 +140,12 @@ SPECIALIST_TOOL_DEFINITIONS = [
 ]
 
 
-def tool_definitions_for(role: str) -> list[dict]:
+def tool_definitions_for(role: str, allow_write_tools: bool = False) -> list[dict]:
     allowed = ROLE_TOOLS.get(role.strip().lower())
     if allowed is None:
         raise ValueError(f"Unknown TQB role: {role}")
+    if allow_write_tools:
+        allowed = allowed | WRITE_TOOLS
     return [item for item in SPECIALIST_TOOL_DEFINITIONS if item["name"] in allowed]
 
 
@@ -171,6 +168,7 @@ class SpecialistToolRuntime:
         worker_ng,
         read_only_paths=None,
         validation_commands=None,
+        allow_write_tools: bool = False,
         mutations_approved: bool = False,
     ):
         self.role = role.strip().lower()
@@ -184,6 +182,7 @@ class SpecialistToolRuntime:
         self.validation_commands = {
             key: tuple(argv) for key, argv in (validation_commands or {}).items()
         }
+        self.allow_write_tools = allow_write_tools
         self.mutations_approved = mutations_approved
         self._recall_gate_cache = {}
         self._fs = FilesystemTool(
@@ -192,10 +191,16 @@ class SpecialistToolRuntime:
 
     @property
     def tool_definitions(self) -> list[dict]:
-        return tool_definitions_for(self.role)
+        definitions = tool_definitions_for(self.role, self.allow_write_tools)
+        if not self.validation_commands:
+            definitions = [item for item in definitions if item["name"] != "run_validation"]
+        return definitions
 
     def execute(self, tool_name: str, args: dict) -> dict:
-        if tool_name not in ROLE_TOOLS[self.role]:
+        allowed_tools = ROLE_TOOLS[self.role]
+        if self.allow_write_tools:
+            allowed_tools = allowed_tools | WRITE_TOOLS
+        if tool_name not in allowed_tools:
             return self._error(tool_name, f"Tool is unavailable to {self.role}")
 
         allowed, reason = check_tool_call(
