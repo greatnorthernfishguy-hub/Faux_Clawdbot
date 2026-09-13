@@ -1,6 +1,10 @@
 """Durable plan-then-execute service for Codemine Mission Control."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Make shared-Graph save failures block Mission Control.
+# What: Persist a loud blocked proposal or execution result when checkpoint save fails.
+# Why: A mission must not report success while its newest experience is only in memory.
+# How: Return a narrow save error from the wrapper and write it into the durable envelope.
 # [2026-09-12] Codex — Preserve raw Mission Control input in the substrate.
 # What: Deposit the exact intent and optional constraints before calling the
 #       planner or constructing a proposal envelope.
@@ -132,7 +136,11 @@ class MissionService:
         proposal_path = proposal_dir / f"{proposal_id}.json"
         envelope["proposal_path"] = str(proposal_path)
         self._atomic_json(proposal_path, envelope)
-        self._save_graph()
+        save_error = self._save_graph()
+        if save_error:
+            envelope["status"] = "blocked"
+            envelope["errors"] = [save_error]
+            self._atomic_json(proposal_path, envelope)
         return envelope
 
     def execute(self, proposal: dict, *, command_approved: bool = False) -> dict:
@@ -180,6 +188,13 @@ class MissionService:
                 "status": "failed",
                 "errors": [f"{type(exc).__name__}: {exc}"],
             }
+        save_error = self._save_graph()
+        if save_error:
+            result = {
+                **result,
+                "status": "blocked",
+                "substrate_save_error": save_error,
+            }
         durable["status"] = (
             "planned" if result.get("status") in {
                 "awaiting_mutation_approval", "awaiting_human_approval",
@@ -188,16 +203,16 @@ class MissionService:
         durable["execution_finished_at"] = time.time()
         durable["execution"] = result
         self._atomic_json(proposal_path, durable)
-        self._save_graph()
         return result
 
-    def _save_graph(self) -> None:
+    def _save_graph(self) -> Optional[str]:
         if self.ng is None:
-            return
+            return None
         try:
             self.ng.save()
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return f"Shared NeuroGraph save failed: {type(exc).__name__}: {exc}"
+        return None
 
     def _deposit_raw(self, text: str) -> None:
         if self.ng is None or not text:

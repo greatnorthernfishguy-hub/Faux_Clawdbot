@@ -1,6 +1,10 @@
 """Tests for the durable Mission Control service boundary."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Verify Graph save failures are durable blockers.
+# What: Cover planning and post-execution checkpoint failures.
+# Why: Mission Control must never hide loss of durable substrate continuity.
+# How: Use a graph whose on_message succeeds and whose save raises OSError.
 # [2026-09-12] Codex — Verify durable plan-then-execute coordination.
 # What: Cover environment configuration, raw deposits, workspace roots, and locks.
 # Why: One click must not bypass a concrete plan or execute a proposal twice.
@@ -8,6 +12,7 @@
 # -------------------
 
 import json
+from pathlib import Path
 
 from mission_service import MissionService, load_validation_catalog
 
@@ -111,6 +116,33 @@ def test_planning_stops_when_raw_intent_cannot_reach_graph(tmp_path):
         raise AssertionError("planning continued without raw substrate deposit")
 
 
+def test_plan_records_graph_save_failure_as_blocked(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    class UnsavableGraph:
+        def on_message(self, _text):
+            pass
+
+        def save(self):
+            raise OSError("disk unavailable")
+
+    service = MissionService(
+        worker_ng=UnsavableGraph(), validation_catalog_json=catalog_json(),
+        mission_root=tmp_path / "missions", worktree_root=tmp_path / "worktrees",
+        workspace_roots=[tmp_path],
+        generator_fn=lambda **_kwargs: {
+            "success": True, "plan": {"plan_version": "1.0.0"}, "attempts": [],
+        },
+    )
+
+    result = service.plan(intent="Preserve this", constraints=None, workspace=str(workspace))
+
+    assert result["status"] == "blocked"
+    assert "Shared NeuroGraph save failed" in result["errors"][0]
+    assert json.loads(Path(result["proposal_path"]).read_text())["status"] == "blocked"
+
+
 def test_workspace_outside_environment_roots_is_rejected(tmp_path):
     allowed = tmp_path / "allowed"
     outside = tmp_path / "outside"
@@ -204,3 +236,42 @@ def test_same_proposal_cannot_execute_twice(tmp_path):
     assert first["status"] == "ready_for_external_review"
     assert second["status"] == "rejected"
     assert calls == 1
+
+
+def test_execute_preserves_result_but_blocks_when_graph_save_fails(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    class UnsavableGraph:
+        def save(self):
+            raise OSError("disk unavailable")
+
+    class FakeDispatcher:
+        def __init__(self, **_kwargs):
+            pass
+
+        def dispatch(self, _plan, **_kwargs):
+            return {"status": "ready_for_external_review", "artifact": "kept"}
+
+    service = MissionService(
+        worker_ng=UnsavableGraph(), validation_catalog_json=catalog_json(),
+        mission_root=tmp_path / "missions", worktree_root=tmp_path / "worktrees",
+        workspace_roots=[tmp_path], dispatcher_cls=FakeDispatcher,
+    )
+    proposal_path = tmp_path / "missions" / "proposals" / "proposal.json"
+    proposal_path.parent.mkdir(parents=True)
+    proposal = {
+        "status": "planned", "workspace": str(workspace),
+        "generation": {"plan": {"plan_version": "1.0.0"}},
+        "proposal_path": str(proposal_path),
+    }
+    proposal_path.write_text(json.dumps(proposal))
+
+    result = service.execute(proposal)
+
+    assert result["status"] == "blocked"
+    assert result["artifact"] == "kept"
+    assert "Shared NeuroGraph save failed" in result["substrate_save_error"]
+    persisted = json.loads(proposal_path.read_text())
+    assert persisted["execution"]["status"] == "blocked"
+    assert persisted["execution"]["artifact"] == "kept"
