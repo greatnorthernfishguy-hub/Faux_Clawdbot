@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Fail closed at gates and when Reviewer is unavailable
+# What: Pending gates now escalate to their actual authority, and absent,
+#       malformed, or failed Reviewer output can no longer approve a build.
+# Why: The old default decision was DONE, including the exception path.
+# How: Gate reports short-circuit to QB/Josh; Reviewer decisions start invalid
+#      and require an explicit recognized marker before completion is possible.
 # [2026-04-22] Claude Code (Sonnet 4.6) — qb_checkpoint pending no longer blocks structural pass
 #   What: _structural_check() skips pending_qb_checkpoint when counting blocking pending gates.
 #   Why:  run_spec.py now calls evaluate_report() directly. pending_qb_checkpoint is the
@@ -45,6 +51,8 @@ def _structural_check(report: dict) -> dict:
     # Check 1: Block status
     if status == "aborted":
         reasons.append(f"Block aborted: {report.get('abort_reason', 'unknown')}")
+    elif status == "paused":
+        reasons.append(f"Block paused: {report.get('pause_reason', 'approval required')}")
     elif status == "partial_failure":
         failed_steps = [sid for sid, r in step_results.items() if r.get("status") == "fail"]
         reasons.append(f"Steps failed: {', '.join(failed_steps)}")
@@ -57,14 +65,12 @@ def _structural_check(report: dict) -> dict:
                 reason = r.get("reason", "unknown")
                 reasons.append(f"Step {sid} failed: {reason}")
 
-    # Check 3: Any pending gates?
-    # pending_qb_checkpoint is the designed terminal state when running via run_spec.py —
-    # QB resolves it via the Reviewer loop. Only human_review blocks structural pass.
+    # Check 3: Any pending gates? Every unresolved gate blocks completion.
     pending_count = summary.get("pending_review", 0)
     if pending_count > 0:
         for sid, r in step_results.items():
             status_val = r.get("status", "")
-            if "pending" in status_val and status_val != "pending_qb_checkpoint":
+            if "pending" in status_val:
                 reasons.append(f"Step {sid} pending: {r.get('description', r.get('gate_type', 'review'))}")
 
     # Check 4: Were acceptance criteria addressed?
@@ -161,6 +167,27 @@ def evaluate_report(
             escalate_reason: str | None,
         }
     """
+    # A gate is an authority boundary, not a failed implementation attempt.
+    # Stop here so a Reviewer response cannot accidentally complete work whose
+    # later steps were deliberately left unexecuted.
+    if report.get("status") == "paused":
+        pending = [
+            result for result in report.get("step_results", {}).values()
+            if "pending" in result.get("status", "")
+        ]
+        gate_type = pending[0].get("gate_type") if pending else "unknown"
+        target = "josh" if gate_type == "human_review" else "qb"
+        reason = report.get("pause_reason") or f"Pending {gate_type} gate"
+        structural = _structural_check(report)
+        return {
+            "decision": "escalate",
+            "structural": structural,
+            "qualitative": None,
+            "iteration_hints": [],
+            "escalate_to": target,
+            "escalate_reason": reason,
+        }
+
     # Layer 1: Structural check (no LLM)
     structural = _structural_check(report)
 
@@ -246,8 +273,9 @@ def evaluate_report(
 
         response_text = result.get("response", "")
 
-        # Parse the decision from the last line
-        decision = "done"
+        # Parse the decision from the last line. No recognized marker means
+        # no approval; completion always requires an explicit Reviewer verdict.
+        decision = None
         escalate_to = None
         escalate_reason = None
         iteration_hints = []
@@ -274,6 +302,11 @@ def evaluate_report(
                         escalate_reason = "Reviewer escalation"
                 break
 
+        if decision is None:
+            decision = "escalate"
+            escalate_to = "qb"
+            escalate_reason = "Reviewer returned no recognized decision marker"
+
         qualitative = {
             "response": response_text,
             "decision_raw": decision_text if 'decision_text' in dir() else "",
@@ -292,12 +325,12 @@ def evaluate_report(
 
     except Exception as e:
         logger.error("Reviewer persona evaluation failed: %s", e, exc_info=True)
-        # Fall back to structural-only decision
+        # Reviewer loss cannot silently become approval.
         return {
-            "decision": "done",  # Structural passed, persona unavailable — cautious pass
+            "decision": "escalate",
             "structural": structural,
             "qualitative": {"error": str(e)},
             "iteration_hints": [],
-            "escalate_to": None,
-            "escalate_reason": None,
+            "escalate_to": "qb",
+            "escalate_reason": f"Reviewer evaluation unavailable: {e}",
         }

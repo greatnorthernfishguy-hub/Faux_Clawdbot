@@ -1,4 +1,11 @@
 # ---- Changelog ----
+# [2026-09-12] Codex — Make human and QB gates stop execution
+# What: Added explicit paused execution state and propagated it through nested
+#       conditions, loops, groups, and execution reports.
+# Why: A pending gate previously recorded itself and then allowed every later
+#      action to run, so the gate protected nothing.
+# How: human_review/qb_checkpoint set ctx.paused; every step walker halts; the
+#      report returns status=paused with the exact gate reason.
 # [2026-04-12] Claude (Sonnet 4.6) — Fix shell_allowlist double-gate bug
 # What: spec shell_allowlist was bypassing executor-level policy check but not the
 #       ShellTool's own internal policy check — command was denied by the second gate.
@@ -51,6 +58,8 @@ class ExecutionContext:
     start_time: float = field(default_factory=time.time)
     aborted: bool = False
     abort_reason: str = ""
+    paused: bool = False
+    pause_reason: str = ""
 
 
 class SpecExecutor:
@@ -108,7 +117,7 @@ class SpecExecutor:
 
         # 2. Execute steps
         for step in spec["steps"]:
-            if ctx.aborted:
+            if ctx.aborted or ctx.paused:
                 break
             if ctx.tool_call_count >= constraints.get("max_iterations", 15):
                 ctx.aborted = True
@@ -298,9 +307,8 @@ class SpecExecutor:
             "staged_actions": step.get("staged_actions", []),
             "description": step["description"],
         }
-
-        # Gates don't abort — they pause. QB decides whether to continue.
-        # For now, we continue execution past gates (QB reviews the report after).
+        ctx.paused = True
+        ctx.pause_reason = f"{gate_type}: {step['description']}"
 
     # ------------------------------------------------------------------
     # Condition steps
@@ -319,7 +327,7 @@ class SpecExecutor:
         }
 
         for sub_step in branch:
-            if ctx.aborted:
+            if ctx.aborted or ctx.paused:
                 break
             self._execute_step(sub_step, ctx, constraints)
 
@@ -346,16 +354,21 @@ class SpecExecutor:
         items = items[:max_iter]
         logger.info("  [%s] Loop over %d items", step_id, len(items))
 
+        iterations_started = 0
         for item in items:
-            if ctx.aborted:
+            if ctx.aborted or ctx.paused:
                 break
+            iterations_started += 1
             ctx.bindings[bind_item] = item
             for sub_step in step["body"]:
-                if ctx.aborted:
+                if ctx.aborted or ctx.paused:
                     break
                 self._execute_step(sub_step, ctx, constraints)
 
-        ctx.step_results[step_id] = {"status": "completed", "iterations": len(items)}
+        ctx.step_results[step_id] = {
+            "status": "paused" if ctx.paused else "completed",
+            "iterations": iterations_started,
+        }
 
     # ------------------------------------------------------------------
     # Group steps
@@ -366,7 +379,7 @@ class SpecExecutor:
         logger.info("  [%s] Group: %s", step_id, step.get("description", ""))
 
         for sub_step in step["steps"]:
-            if ctx.aborted:
+            if ctx.aborted or ctx.paused:
                 break
             self._execute_step(sub_step, ctx, constraints)
 
@@ -375,7 +388,8 @@ class SpecExecutor:
             for s in step["steps"]
             if s["id"] in ctx.step_results
         )
-        ctx.step_results[step_id] = {"status": "pass" if group_ok else "fail"}
+        group_status = "paused" if ctx.paused else ("pass" if group_ok else "fail")
+        ctx.step_results[step_id] = {"status": group_status}
 
         if not group_ok and "on_failure" in step:
             self._handle_failure(step["on_failure"], step_id, ctx)
@@ -578,8 +592,14 @@ class SpecExecutor:
             "block_id": spec["block"]["id"],
             "block_name": spec["block"]["name"],
             "agent": spec["block"].get("agent", "unnamed"),
-            "status": "aborted" if ctx.aborted else ("complete" if failed == 0 else "partial_failure"),
+            "status": (
+                "aborted" if ctx.aborted
+                else "paused" if ctx.paused
+                else "complete" if failed == 0
+                else "partial_failure"
+            ),
             "abort_reason": ctx.abort_reason if ctx.aborted else None,
+            "pause_reason": ctx.pause_reason if ctx.paused else None,
             "summary": {
                 "total_steps": total,
                 "passed": passed,

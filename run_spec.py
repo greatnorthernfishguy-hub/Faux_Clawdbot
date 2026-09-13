@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # ---- Changelog ----
+# [2026-09-12] Codex — Enforce Reviewer verdict in CLI exit status
+# What: run_spec exits nonzero when Reviewer requests iteration/escalation or
+#       cannot return a valid verdict.
+# Why: The prior Reviewer result was advisory, so rejected work still exited 0.
+# How: A successful run now requires both structural completion and DONE.
 # [2026-04-22] Claude Code (Sonnet 4.6) — Wire QB Reviewer evaluation into run_spec
 #   What: After executor finishes, call evaluate_report() with use_persona=True so
 #         QB's Reviewer persona reads the report and gives a verbal checkpoint
@@ -239,9 +244,9 @@ def main() -> int:
     failed = summary.get("failed", 0)
 
     # QB Reviewer evaluation — runs when spec completed with all steps passing.
-    # evaluate_report() has its own exception fallback; it can never crash the run.
-    # Her decision is advisory — a passing spec stays passing regardless of decision.
+    # Both structural success and an explicit Reviewer DONE are required for exit 0.
     evaluation = None
+    review_passed = False
     if status in ("completed", "complete") and failed == 0:
         try:
             from report_evaluator import evaluate_report
@@ -253,12 +258,13 @@ def main() -> int:
             print(f"\n--- QB decision: {decision} ---", file=sys.stderr)
             if qb_response:
                 print(qb_response, file=sys.stderr)
+            review_passed = evaluation.get("decision") == "done"
         except Exception as exc:
             print(f"WARNING: QB Reviewer evaluation failed: {exc}", file=sys.stderr)
 
     _notify_discord(report, evaluation=evaluation)
 
-    if status in ("completed", "complete") and failed == 0:
+    if status in ("completed", "complete") and failed == 0 and review_passed:
         print(f"\n✓ {report.get('block_id')} — {status} ({summary.get('passed', 0)} passed, {summary.get('elapsed_seconds', 0):.1f}s)", file=sys.stderr)
         return 0
     else:
