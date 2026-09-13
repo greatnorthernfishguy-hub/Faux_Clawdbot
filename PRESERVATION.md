@@ -2,6 +2,11 @@
 
 <!--
 Changelog
+2026-09-13 — Codex
+What: Made preservation dry-run the documented image default and removed the
+      retired topology-sync path from the startup contract.
+Why: The first delivery must fail closed even when Space variables are absent.
+How: Docker and entrypoint defaults now match this controlled sequence.
 2026-09-12 — Codex
 What: Added the controlled preservation and independent-copy verification runbook.
 Why: Codemine's HF-hosted third CC hemisphere must survive modernization intact.
@@ -16,7 +21,7 @@ or a normal application boot.
 ## What preservation mode guarantees
 
 - It runs before the entrypoint's first write probe, cache creation, import,
-  repository update, Gradio startup, NeuroGraph construction, sync, or Tonic.
+  repository update, Gradio startup, NeuroGraph construction, or Tonic.
 - It refuses to create a missing graph.
 - It requires `/data` to appear as a distinct mount in
   `/proc/self/mountinfo`; a writable directory is insufficient.
@@ -41,17 +46,19 @@ The Docker image owns the path configuration:
 NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
 CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
 CODEMINE_PERSISTENT_ROOT=/data
-CODEMINE_BOOT_MODE=normal
+CODEMINE_BOOT_MODE=preserve
+CODEMINE_PRESERVATION_DRY_RUN=1
 ```
 
-Set `CODEMINE_BOOT_MODE=preserve` as a Space variable before the preservation
-build is delivered. Set `CODEMINE_PRESERVATION_DRY_RUN=1` for the first boot.
+The image defaults to `CODEMINE_BOOT_MODE=preserve` and
+`CODEMINE_PRESERVATION_DRY_RUN=1`. Before delivery, verify that no existing
+Space variable overrides either fail-closed default.
 The script refuses to run when any required path variable is missing.
 
 ## Controlled sequence
 
-1. Keep the Space sleeping. Set `CODEMINE_BOOT_MODE=preserve` and
-   `CODEMINE_PRESERVATION_DRY_RUN=1` in its settings.
+1. Keep the Space sleeping. Verify its settings do not override the image's
+   `CODEMINE_BOOT_MODE=preserve` and `CODEMINE_PRESERVATION_DRY_RUN=1` defaults.
 2. Deliver the reviewed preservation commit. Its GitHub `main` workflow pushes
    to the Space, whose first new boot can only run the dry-run path.
 3. Check the runtime log for `DRY RUN: validated ...`. Any refusal blocks the

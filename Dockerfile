@@ -1,5 +1,9 @@
 # Dockerfile for TQB Worker on HuggingFace Spaces
 #
+# CHANGELOG [2026-09-13 - Codex]
+# SAFETY: Default the image to preservation dry-run so deployment cannot wake an
+# unpreserved Codemine graph when Space variables are absent or stale.
+#
 # CHANGELOG [2026-09-12 - Codex]
 # SHIPPED: Complete six-person TQB personality set and unit disciplines.
 # ADDED: Fail-closed preservation-only boot script and environment-owned paths.
@@ -62,7 +66,8 @@ ENV NEUROGRAPH_WORKSPACE_DIR=/data/neurograph_worker
 ENV CODEMINE_TONIC_MODE=disabled
 ENV CODEMINE_PRESERVATION_DIR=/data/codemine-preservation
 ENV CODEMINE_PERSISTENT_ROOT=/data
-ENV CODEMINE_BOOT_MODE=normal
+ENV CODEMINE_BOOT_MODE=preserve
+ENV CODEMINE_PRESERVATION_DRY_RUN=1
 ENV CODEMINE_MISSION_ROOT=/data/codemine-missions
 ENV CODEMINE_WORKTREE_ROOT=/tmp/codemine-worktrees
 ENV CODEMINE_DEFAULT_WORKSPACE=/workspace/e-t-systems
@@ -118,7 +123,6 @@ COPY spec_executor.py .
 COPY persona_client.py .
 COPY report_evaluator.py .
 COPY risk_authority.py .
-COPY ng_topology_sync.py .
 COPY preserve_codemine.py .
 COPY tqb-personalities/ ./tqb-personalities/
 

@@ -1,6 +1,11 @@
 """Structural MissionPlan contract for Bethany's Lego decomposition."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Bound write scopes and protect vendored substrate files.
+# What: Reject repository-root writes and direct writes to the canonical vendored
+#       set, including the retired peer bridge.
+# Why: A broad model-authored scope could bypass Lego isolation and Law 2.
+# How: Validate every write target before any worktree is created.
 # [2026-09-12] Codex — Keep executable validations outside model-authored plans.
 # What: Mission blocks reference coordinator-owned validation IDs instead of
 #       embedding arbitrary argv selected by the planning model.
@@ -23,6 +28,19 @@ from pathlib import PurePosixPath
 from jsonschema import Draft202012Validator
 
 from persona_client import TQB_ROLES
+
+
+PROHIBITED_WRITE_BASENAMES = frozenset({
+    "ng_lite.py",
+    "ng_tract_bridge.py",
+    "ng_ecosystem.py",
+    "openclaw_adapter.py",
+    "ng_autonomic.py",
+    "ng_embed.py",
+    "ng_salience_gate.py",
+    "ng_updater.py",
+    "ng_peer_bridge.py",
+})
 
 
 MISSION_PLAN_SCHEMA = {
@@ -124,6 +142,12 @@ def validate_mission_plan(
             for path in block[field]:
                 if not _safe_relative_path(path):
                     errors.append(f"{block['id']}.{field}: unsafe relative path: {path}")
+                if field == "write_paths" and PurePosixPath(path) == PurePosixPath("."):
+                    errors.append(f"{block['id']}.write_paths: repository-root write scope is not bounded")
+                if field == "write_paths" and PurePosixPath(path).name in PROHIBITED_WRITE_BASENAMES:
+                    errors.append(
+                        f"{block['id']}.write_paths: vendored or retired file is prohibited: {path}"
+                    )
         if block["write_paths"] and not block["validations"]:
             errors.append(f"{block['id']}: writable block requires validation IDs")
         selected_validations = block["validations"]

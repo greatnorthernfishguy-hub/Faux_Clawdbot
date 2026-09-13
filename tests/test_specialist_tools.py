@@ -1,6 +1,10 @@
 """Tests for role and workspace boundaries on specialist tools."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Verify declared read-path enforcement.
+# What: Permit a declared file while refusing an undeclared file and broad list.
+# Why: MissionPlan read scopes must constrain actual specialist file tools.
+# How: Exercise the runtime directly in a disposable workspace.
 # [2026-09-12] Codex — Verify specialist tool and worktree isolation.
 # What: Cover read-only roles, approved Forge writes, path escape refusal, git
 #       evidence, exact named validations, and subprocess secret removal.
@@ -18,6 +22,7 @@ def runtime(tmp_path, role="forge", approved=False, validations=None, allow_writ
         role=role,
         workspace=tmp_path,
         worker_ng=None,
+        read_paths=["README.md", "src"],
         allow_write_tools=allow_writes,
         write_paths=["new.py", "src"],
         mutations_approved=approved,
@@ -89,6 +94,20 @@ def test_write_tools_cannot_escape_declared_block_scope(tmp_path):
     assert inside["status"] == "executed"
     assert outside["status"] == "error"
     assert not (tmp_path / "other.py").exists()
+
+
+def test_read_tools_cannot_escape_declared_block_scope(tmp_path):
+    (tmp_path / "README.md").write_text("allowed\n")
+    (tmp_path / "private.txt").write_text("not declared\n")
+    worker = runtime(tmp_path)
+
+    allowed = worker.execute("read_file", {"path": "README.md"})
+    denied = worker.execute("read_file", {"path": "private.txt"})
+    broad_list = worker.execute("list_files", {"path": "."})
+
+    assert allowed["status"] == "executed"
+    assert denied["status"] == "error"
+    assert broad_list["status"] == "error"
 
 
 def test_tool_execution_becomes_error_when_raw_deposit_fails(tmp_path):

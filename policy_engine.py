@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Enforce the vendored-file boundary at tool execution.
+# What: Deny writes to all current vendored substrate files and the retired peer bridge.
+# Why: Plan validation alone cannot be the final constitutional boundary.
+# How: Apply the immutable filename deny set in write-mode path authorization.
 # [2026-09-12] Codex — Make shell allowlisting structural
 # What: Parse commands with shlex, reject shell grammar, validate exact binaries,
 #       and expose the parsed argv/environment for shell=False execution.
@@ -100,6 +104,19 @@ _SENSITIVE_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"^credentials\..*", re.IGNORECASE),
 )
 
+_VENDORED_FILES = frozenset({
+    "ng_lite.py",
+    "ng_tract_bridge.py",
+    "ng_ecosystem.py",
+    "openclaw_adapter.py",
+    "ng_autonomic.py",
+    "ng_embed.py",
+    "ng_salience_gate.py",
+    "ng_updater.py",
+    # Retired and constitutionally prohibited from restoration.
+    "ng_peer_bridge.py",
+})
+
 # Shell command allowlist — only these prefixes are permitted
 _SHELL_ALLOWLIST: tuple[str, ...] = (
     "python",
@@ -187,6 +204,11 @@ def can_access_path(
     # Write-mode: block sensitive files
     if mode == "write":
         filename = resolved.name
+        if filename in _VENDORED_FILES:
+            return False, (
+                f"Write denied — '{filename}' is vendored or retired; repair the "
+                "canonical source through its required gates."
+            )
         for pat in _SENSITIVE_PATTERNS:
             if pat.search(filename):
                 return False, (

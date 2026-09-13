@@ -1,4 +1,10 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Retire the pre-callosum topology sync at startup.
+# What: Remove the Git/JSONL sync import and boot call; all TQB lenses continue
+#       through Codemine's one shared substrate instance.
+# Why: The old transport predates Corpus Callosum and must not mutate or export
+#      the sleeping third-hemisphere Graph during modernization.
+# How: Preserve its implementation under Defunct-Historical for provenance.
 # [2026-09-12] Codex — Replace one-click mission mutation with plan and execute gates.
 # What: Mission Control first persists Bethany's concrete MissionPlan, then an
 #       explicit second action dispatches it into isolated worktrees.
@@ -64,7 +70,6 @@ from agent_runner import run_tool_loop
 from system_prompt import build_system_prompt
 from tool_definitions import TOOL_DEFINITIONS
 from worker_ng import get_worker_ng, ingest_tool_result, recall_context, filter_recall_results, surfacing_context, gate_repeat_recall
-from ng_topology_sync import run_sync as _run_ng_topology_sync
 from spec_executor import SpecExecutor
 from mission_service import MissionService
 
@@ -107,8 +112,7 @@ _ECOSYSTEM_READ_PATHS: list[Path] = [
     Path("/home/josh/portal-v2"),
     Path("/home/josh/docs"),
 ]
-worker_ng = get_worker_ng()          # NG singleton created first — worker owns it
-_run_ng_topology_sync(worker_ng)
+worker_ng = get_worker_ng()          # one shared Codemine substrate for every lens
 _recall_gate_cache: dict = {}        # per-target TTL dedup for execute_tool()'s recall gate
 ctx = RecursiveContextManager(str(REPO_PATH), ng=worker_ng)  # facade shares the same instance
 client = get_client()

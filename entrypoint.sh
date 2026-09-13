@@ -18,6 +18,9 @@
 # CHANGELOG [2026-09-12 - Codex]
 # Added an explicit preservation-only boot before every write probe, import,
 # repository update, and NeuroGraph/Tonic startup operation.
+#
+# CHANGELOG [2026-09-13 - Codex]
+# Fail closed to preservation mode when CODEMINE_BOOT_MODE is absent.
 
 echo ""
 echo "===== Application Startup at $(date -u '+%Y-%m-%d %H:%M:%S') ====="
@@ -27,7 +30,7 @@ echo "🦞 Clawdbot Entrypoint Starting..."
 # Preservation mode must run before cache probes, mkdir, imports, repository
 # updates, or application startup. It inspects and copies the existing graph,
 # then exits without starting NeuroGraph or Tonic.
-if [ "${CODEMINE_BOOT_MODE:-normal}" = "preserve" ]; then
+if [ "${CODEMINE_BOOT_MODE:-preserve}" = "preserve" ]; then
     echo "🔒 Preservation-only boot: application and NeuroGraph will remain stopped"
     exec python3 /app/preserve_codemine.py "$@"
 fi

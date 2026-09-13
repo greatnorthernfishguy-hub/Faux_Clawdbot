@@ -2,6 +2,11 @@
 
 <!--
 Changelog
+2026-09-13 — Codex
+What: Made preservation dry-run the fail-closed image default and retired the
+      legacy topology-sync wording.
+Why: Missing Space overrides must not wake the unpreserved Codemine Graph.
+How: The delivery gates now match Docker and entrypoint behavior.
 2026-09-12 — Codex
 What: Replaced the obsolete generic Space quick-start with the actual gated
       delivery sequence for the existing Codemine instance.
@@ -48,7 +53,7 @@ CODEMINE_PRESERVATION_DRY_RUN=1
 ```
 
 The entrypoint checks this mode before cache probes, repository pulls, Python
-imports, NeuroGraph construction, topology sync, Tonic, or Gradio. A successful
+imports, NeuroGraph construction, Tonic, or Gradio. A successful
 dry run establishes paths and mount identity but does not create an archive.
 
 After reviewing that receipt, run preservation mode once with the dry-run flag
@@ -86,7 +91,9 @@ switch the restored Space to a heuristic path.
 
 ## Gate 5: normal-start readiness
 
-Before setting `CODEMINE_BOOT_MODE=normal`, verify the image owns these runtime
+The image already defaults to both values above. Verify that no existing Space
+variable overrides them before the first build. Before setting
+`CODEMINE_BOOT_MODE=normal`, verify the image owns these runtime
 paths and provider routes:
 
 ```text

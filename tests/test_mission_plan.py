@@ -1,6 +1,10 @@
 """Structural tests for Bethany's MissionPlan Lego decomposition."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Pin root-scope and vendored-write refusal.
+# What: Cover repository-wide write scopes and protected substrate basenames.
+# Why: Autonomous plans must fail before worktree creation when scope is unsafe.
+# How: Validate representative current, nested, and retired targets.
 # [2026-09-12] Codex — Verify safe block dependency and write-set scheduling.
 # What: Cover parallel levels, cycles, unknown dependencies, unsafe paths, and
 #       write overlap that lacks an explicit serial dependency.
@@ -101,6 +105,21 @@ def test_unsafe_paths_are_rejected():
     candidate = plan()
     candidate["blocks"][1]["write_paths"] = [".git/config"]
     assert validate_mission_plan(candidate)[0] is False
+
+    candidate = plan()
+    candidate["blocks"][1]["write_paths"] = ["."]
+    valid, errors = validate_mission_plan(candidate)
+    assert valid is False
+    assert "repository-root write scope is not bounded" in errors[0]
+
+
+def test_vendored_and_retired_files_are_rejected_as_write_targets():
+    for path in ("ng_lite.py", "module/ng_salience_gate.py", "ng_peer_bridge.py"):
+        candidate = plan()
+        candidate["blocks"][1]["write_paths"] = [path]
+        valid, errors = validate_mission_plan(candidate)
+        assert valid is False
+        assert "vendored or retired file is prohibited" in errors[0]
 
 
 def test_parallel_write_overlap_requires_dependency():

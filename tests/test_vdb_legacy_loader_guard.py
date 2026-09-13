@@ -10,10 +10,8 @@
 #       and .msgpack round-trips unchanged, no bak, no migration log;
 #       (3) corrupt PK-magic and non-PK garbage files raise with the
 #       original byte-identical and prior state untouched, plus loud-caller
-#       behavior at both swallow sites (ng_topology_sync._export returns 0
-#       with exactly one ERROR containing the path; NeuroGraphMemory boot
-#       proceeds fail-soft with an empty vdb and exactly one ERROR
-#       containing the path); (4) idempotency — post-migration save()
+#       behavior when NeuroGraphMemory boot proceeds fail-soft with an empty
+#       vdb and exactly one ERROR containing the path; (4) idempotency — post-migration save()
 #       writes current format that reloads via the normal branch with no
 #       re-migration, and the bak is never re-copied or overwritten even
 #       when a legacy-magic file reappears at the path. Plus metadata edge
@@ -25,10 +23,8 @@
 # How: Same fixture patterns as sibling tests: real SimpleVectorDB
 #      throughout; real NeuroGraphMemory against pytest's tmp_path with
 #      Tonic disabled (tests/test_gsg_stamping.py pattern) for the boot-side
-#      loud-caller case; ng_topology_sync._CLONE_DIR monkeypatched to a tmp
-#      dir (tests/test_ng_topology_sync_export.py pattern). Migration
-#      loudness observed via caplog on the "neurograph.vector_db",
-#      "ng_topology_sync", and "neurograph" loggers.
+#      loud-caller case. Migration loudness observed via caplog on the
+#      "neurograph.vector_db" and "neurograph" loggers.
 # -------------------
 
 import hashlib
@@ -40,7 +36,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import ng_topology_sync
 from openclaw_hook import NeuroGraphMemory
 from universal_ingestor import SimpleVectorDB
 
@@ -201,22 +196,6 @@ def test_non_pk_garbage_raises_state_and_file_untouched(tmp_path):
     assert _sha256(path) == original_hash
     # non-legacy path performs no backup
     assert not Path(str(path) + ".legacy-npz-bak").exists()
-
-
-def test_export_returns_zero_and_logs_error_with_path(tmp_path, monkeypatch, caplog):
-    caplog.set_level(logging.INFO)
-    monkeypatch.setattr(ng_topology_sync, "_CLONE_DIR", tmp_path / "clone")
-    workspace = tmp_path / "workspace"
-    (workspace / "checkpoints").mkdir(parents=True)
-    vdb_path = workspace / "checkpoints" / "vector_db.npz"
-    vdb_path.write_text("this is not json {{{")
-
-    assert ng_topology_sync._export(str(workspace)) == 0
-
-    errors = [r for r in caplog.records
-              if r.name == "ng_topology_sync" and r.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert str(vdb_path) in errors[0].getMessage()
 
 
 def test_boot_proceeds_empty_and_logs_error_with_path(tmp_path, caplog):

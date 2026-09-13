@@ -1,6 +1,11 @@
 """Workspace-bound tool surface for the six durable TQB specialists."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Enforce declared read scopes and pin review diffs.
+# What: Bound file reads to approved paths and allow integration reviewers to use
+#       a coordinator-owned baseline when invoking git_diff.
+# Why: MissionPlan read scopes and assembled-diff review must be mechanical.
+# How: Resolve read prefixes below the worktree and inject the trusted base SHA.
 # [2026-09-12] Codex — Enforce each block's declared write set.
 # What: Bind mutating tools to the exact relative path prefixes approved in the
 #       MissionPlan, in addition to the surrounding worktree boundary.
@@ -174,8 +179,10 @@ class SpecialistToolRuntime:
         workspace: Path,
         worker_ng,
         read_only_paths=None,
+        read_paths=None,
         write_paths=None,
         validation_commands=None,
+        git_diff_base: str = "",
         allow_write_tools: bool = False,
         mutations_approved: bool = False,
     ):
@@ -187,10 +194,12 @@ class SpecialistToolRuntime:
             raise ValueError(f"Workspace does not exist: {self.workspace}")
         self.ng = worker_ng
         self.read_only_paths = [Path(path).resolve() for path in (read_only_paths or [])]
+        self.read_paths = tuple(read_paths or ())
         self.write_paths = tuple(write_paths or ())
         self.validation_commands = {
             key: tuple(argv) for key, argv in (validation_commands or {}).items()
         }
+        self.git_diff_base = git_diff_base
         self.allow_write_tools = allow_write_tools
         self.mutations_approved = mutations_approved
         self.substrate_failure: str | None = None
@@ -212,6 +221,10 @@ class SpecialistToolRuntime:
             allowed_tools = allowed_tools | WRITE_TOOLS
         if tool_name not in allowed_tools:
             return self._error(tool_name, f"Tool is unavailable to {self.role}")
+        if tool_name in {"read_file", "list_files"} and not self._read_path_allowed(
+            args.get("path", ".")
+        ):
+            return self._error(tool_name, "Read is outside this block's declared read paths")
         if tool_name in WRITE_TOOLS and not self._write_path_allowed(args.get("path", "")):
             return self._error(tool_name, "Write is outside this block's declared write paths")
 
@@ -248,6 +261,22 @@ class SpecialistToolRuntime:
         if recall_text:
             result_text = f"[Substrate recall]\n{recall_text}\n\n[Result]\n{result_text}"
         return {"status": status, "tool": tool_name, "result": result_text}
+
+    def _read_path_allowed(self, requested: str) -> bool:
+        try:
+            target = (self.workspace / requested).resolve()
+            workspace = self.workspace.resolve()
+            if any(target == root or target.is_relative_to(root) for root in self.read_only_paths):
+                return True
+            target.relative_to(workspace)
+            for declared in (*self.read_paths, *self.write_paths):
+                allowed_root = (workspace / declared).resolve()
+                allowed_root.relative_to(workspace)
+                if target == allowed_root or target.is_relative_to(allowed_root):
+                    return True
+        except (OSError, ValueError):
+            return False
+        return False
 
     def _write_path_allowed(self, requested: str) -> bool:
         if not requested or not self.write_paths:
@@ -300,6 +329,7 @@ class SpecialistToolRuntime:
         return self._run_fixed(["git", "status", "--short", "--branch"])
 
     def _git_diff(self, base: str) -> str:
+        base = base or self.git_diff_base
         if base.startswith("-") or any(character.isspace() for character in base):
             raise ValueError("Invalid git base revision")
         argv = ["git", "diff", "--no-ext-diff", "--unified=80"]

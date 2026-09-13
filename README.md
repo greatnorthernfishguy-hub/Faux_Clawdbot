@@ -65,12 +65,15 @@ Mission execution applies these boundaries:
 2. Every block receives its own Git worktree and branch.
 3. Blocks in the same dependency level run concurrently only when the plan's
    write sets are mechanically disjoint.
-4. Model tools can write only beneath that block's declared relative paths.
+4. Model file tools can read or write only beneath that block's declared
+   relative paths; writable paths are also readable so edits can be verified.
 5. Models select validation IDs from the environment-owned validation catalog; they cannot
    invent executable commands.
-6. The coordinator reruns the selected validations itself.
-7. Reviewer reads the actual diff. Sensitive work also requires Razor; command
-   work requires the explicit human gate plus Strategist and Bethany review.
+6. The coordinator runs selected validations on each block and reruns their
+   union against the assembled integration worktree.
+7. Reviewer reads each block diff and the actual combined diff. Sensitive work
+   also requires Razor; command work requires the explicit human gate plus
+   Strategist and Bethany review.
 8. Approved block commits are cherry-picked into a separate integration
    worktree.
 9. The mission stops at `ready_for_external_review`. It does not merge the
@@ -107,7 +110,8 @@ requested and the provider/model actually used.
 
 | Variable | Purpose | Image default |
 |---|---|---|
-| `CODEMINE_BOOT_MODE` | `preserve` runs preservation only; `normal` permits application startup | `normal` |
+| `CODEMINE_BOOT_MODE` | `preserve` runs preservation only; `normal` permits application startup | `preserve` |
+| `CODEMINE_PRESERVATION_DRY_RUN` | Validate the live graph without creating an archive during preservation boot | `1` |
 | `NEUROGRAPH_WORKSPACE_DIR` | One shared Codemine Graph workspace | `/data/neurograph_worker` |
 | `CODEMINE_TONIC_MODE` | Tonic policy; currently only `disabled` is accepted | `disabled` |
 | `CODEMINE_PRESERVATION_DIR` | Same-volume preservation archives | `/data/codemine-preservation` |
@@ -137,6 +141,10 @@ sidecar must be preserved and inspected before normal startup. Compatibility of
 its Tonic and embedding path is a separate restore decision; do not substitute
 heuristic execution for embeddings.
 
+The image deliberately boots into a preservation dry-run. Normal startup
+requires explicit `CODEMINE_BOOT_MODE=normal`; leave that unset until the
+preservation and compatibility gates in `PRESERVATION.md` have passed.
+
 ## Development checks
 
 Run the local test suite without starting a model or NeuroGraph:
@@ -147,9 +155,9 @@ python3 -m py_compile mission_plan.py mission_generator.py mission_dispatcher.py
 ```
 
 The dispatcher tests use disposable Git repositories and fake model clients.
-They verify dirty-source preservation, scoped writes, command gating,
-validation, Reviewer iteration, isolated commits, integration, durable receipts,
-and duplicate-execution refusal.
+They verify dirty-source preservation, scoped reads and writes, command gating,
+block and combined validation, Reviewer iteration, isolated commits, integrated
+diff review, durable receipts, and duplicate-execution refusal.
 
 ## Known boundaries
 
@@ -159,6 +167,9 @@ and duplicate-execution refusal.
   for NeuroGraph ecosystem work, a Law Enforcer audit.
 - The superseded linear orchestrator and generator are retained only under
   `Defunct-Historical`; they are absent from the runtime image.
+- The retired Git/JSONL topology sync and its obsolete build spec/tests are
+  likewise preserved only under `Defunct-Historical`; normal boot performs no
+  export, import, or GitHub push for Graph state.
 - The initial validation catalog intentionally contains only named checks that
   the coordinator owns. Add project-specific checks deliberately rather than
   allowing a planning model to author commands.

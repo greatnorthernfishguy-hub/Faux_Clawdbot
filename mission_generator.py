@@ -1,6 +1,10 @@
 """Bethany's evidence-first MissionPlan generator."""
 
 # ---- Changelog ----
+# [2026-09-13] Codex — Declare Bethany's repository-wide planning read scope.
+# What: Give the read-only planner an explicit `.` scope.
+# Why: Specialist reads now enforce the paths declared by their MissionPlan.
+# How: The leader may inspect the repository but still receives no write tools.
 # [2026-09-12] Codex — Deposit Bethany's raw response before plan validation.
 # What: Send the untouched planning response to the shared substrate before
 #       parsing its JSON or applying the MissionPlan schema.
@@ -113,6 +117,7 @@ def generate_mission_plan(
         workspace=workspace,
         worker_ng=worker_ng,
         read_only_paths=read_only_paths,
+        read_paths=["."],
         allow_write_tools=False,
         validation_commands=None,
     )

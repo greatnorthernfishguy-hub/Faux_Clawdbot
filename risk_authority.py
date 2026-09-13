@@ -1,4 +1,8 @@
 # ---- Changelog ----
+# [2026-09-13] Codex — Include the salience gate in sensitive-path detection.
+# What: Add ng_salience_gate.py to the vendored substrate risk patterns.
+# Why: It belongs to the same protected canonical set as the other NG helpers.
+# How: Existing content-derived risk escalation now recognizes its basename.
 # [2026-04-07] Josh + Claude — Risk classification + authority map (Phase 4)
 # What: Content-derived risk levels, Strategist escalation-only override, authority chain
 # Why: No single bottleneck — routine work flows through Reviewer, security through Razor,
@@ -54,6 +58,7 @@ _SENSITIVE_PATTERNS = [
     r"ng_autonomic\.py",
     r"openclaw_adapter\.py",
     r"ng_embed\.py",
+    r"ng_salience_gate\.py",
     r"ng_updater\.py",
     # Auth/security files
     r"\.env",
