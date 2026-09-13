@@ -97,7 +97,7 @@ CODEMINE_MISSION_ROOT=/data/codemine-missions
 CODEMINE_WORKTREE_ROOT=/tmp/codemine-worktrees
 CODEMINE_DEFAULT_WORKSPACE=/workspace/e-t-systems
 CODEMINE_WORKSPACE_ROOTS=/workspace
-CODEMINE_VALIDATION_CATALOG_PATH=/app/validation_catalog.json
+CODEMINE_VALIDATIONS_JSON={...reviewed named validation commands...}
 ```
 
 Also verify `/data` is the attached persistent mount, the target Git repository

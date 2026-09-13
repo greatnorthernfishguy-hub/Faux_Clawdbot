@@ -25,10 +25,11 @@ from mission_dispatcher import MissionDispatcher
 from mission_generator import generate_mission_plan
 
 
-def load_validation_catalog(path: Optional[Path] = None) -> tuple[dict, dict]:
-    configured = os.getenv("CODEMINE_VALIDATION_CATALOG_PATH")
-    source = Path(path or configured or Path(__file__).with_name("validation_catalog.json"))
-    document = json.loads(source.read_text())
+def load_validation_catalog(raw_json: Optional[str] = None) -> tuple[dict, dict]:
+    raw = raw_json if raw_json is not None else os.getenv("CODEMINE_VALIDATIONS_JSON", "")
+    if not raw.strip():
+        raise ValueError("CODEMINE_VALIDATIONS_JSON is unset")
+    document = json.loads(raw)
     if document.get("catalog_version") != "1.0.0":
         raise ValueError("Unsupported validation catalog version")
     entries = document.get("validations")
@@ -58,7 +59,7 @@ class MissionService:
         self,
         *,
         worker_ng,
-        validation_catalog_path: Optional[Path] = None,
+        validation_catalog_json: Optional[str] = None,
         mission_root: Optional[Path] = None,
         worktree_root: Optional[Path] = None,
         workspace_roots: Optional[list[Path]] = None,
@@ -67,7 +68,7 @@ class MissionService:
     ):
         self.ng = worker_ng
         self.catalog_document, self.validation_commands = load_validation_catalog(
-            validation_catalog_path
+            validation_catalog_json
         )
         configured_mission_root = os.getenv(
             "CODEMINE_MISSION_ROOT", "/data/codemine-missions"

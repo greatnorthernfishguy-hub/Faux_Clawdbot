@@ -57,7 +57,7 @@ Mission execution applies these boundaries:
 3. Blocks in the same dependency level run concurrently only when the plan's
    write sets are mechanically disjoint.
 4. Model tools can write only beneath that block's declared relative paths.
-5. Models select validation IDs from `validation_catalog.json`; they cannot
+5. Models select validation IDs from the environment-owned validation catalog; they cannot
    invent executable commands.
 6. The coordinator reruns the selected validations itself.
 7. Reviewer reads the actual diff. Sensitive work also requires Razor; command
@@ -106,7 +106,7 @@ requested and the provider/model actually used.
 | `CODEMINE_WORKTREE_ROOT` | Scratch Git worktrees used during a live run | `/tmp/codemine-worktrees` |
 | `CODEMINE_DEFAULT_WORKSPACE` | Default mission target repository | `/workspace/e-t-systems` |
 | `CODEMINE_WORKSPACE_ROOTS` | Colon-separated roots that Mission Control may target | `/workspace` |
-| `CODEMINE_VALIDATION_CATALOG_PATH` | Coordinator-owned validation catalog | `/app/validation_catalog.json` |
+| `CODEMINE_VALIDATIONS_JSON` | Coordinator-owned named validation commands | packaged JSON value |
 | `CODEMINE_MAX_PARALLEL` | Maximum workers in one safe dependency level | `3` |
 | `CODEMINE_VALIDATION_TIMEOUT` | Seconds allowed for one named validation | `300` |
 | `TQB_PERSONALITY_DIR` | Packaged leader and specialist prompts | `/app/tqb-personalities` |
@@ -147,8 +147,8 @@ and duplicate-execution refusal.
   live Space.
 - Final integration requires an independent high-level/model-family review and,
   for NeuroGraph ecosystem work, a Law Enforcer audit.
-- The legacy `orchestrator.py` remains for history and compatibility; Mission
-  Control no longer calls it.
+- The superseded linear orchestrator and generator are retained only under
+  `Defunct-Historical`; they are absent from the runtime image.
 - The initial validation catalog intentionally contains only named checks that
   the coordinator owns. Add project-specific checks deliberately rather than
   allowing a planning model to author commands.

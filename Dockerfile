@@ -66,7 +66,7 @@ ENV CODEMINE_MISSION_ROOT=/data/codemine-missions
 ENV CODEMINE_WORKTREE_ROOT=/tmp/codemine-worktrees
 ENV CODEMINE_DEFAULT_WORKSPACE=/workspace/e-t-systems
 ENV CODEMINE_WORKSPACE_ROOTS=/workspace
-ENV CODEMINE_VALIDATION_CATALOG_PATH=/app/validation_catalog.json
+ENV CODEMINE_VALIDATIONS_JSON={"catalog_version":"1.0.0","validations":{"git-diff-check":{"description":"Reject_whitespace_errors_in_the_current_diff","argv":["git","diff","--check"]},"python-tests":{"description":"Run_the_Python_pytest_suite_quietly","argv":["python3","-m","pytest","-q"]}}}
 ENV CODEMINE_MAX_PARALLEL=3
 ENV CODEMINE_VALIDATION_TIMEOUT=300
 ENV CODEMINE_PROVIDER=openrouter
@@ -107,7 +107,6 @@ COPY mission_plan.py .
 COPY mission_generator.py .
 COPY mission_dispatcher.py .
 COPY mission_service.py .
-COPY validation_catalog.json .
 COPY system_prompt.py .
 COPY tool_definitions.py .
 COPY worker_ng.py .
@@ -118,8 +117,6 @@ COPY spec_executor.py .
 COPY persona_client.py .
 COPY report_evaluator.py .
 COPY risk_authority.py .
-COPY spec_generator.py .
-COPY orchestrator.py .
 COPY ng_topology_sync.py .
 COPY preserve_codemine.py .
 COPY tqb-personalities/ ./tqb-personalities/

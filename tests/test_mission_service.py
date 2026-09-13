@@ -5,19 +5,17 @@ import json
 from mission_service import MissionService, load_validation_catalog
 
 
-def write_catalog(tmp_path):
-    path = tmp_path / "catalog.json"
-    path.write_text(json.dumps({
+def catalog_json():
+    return json.dumps({
         "catalog_version": "1.0.0",
         "validations": {
             "check": {"description": "test", "argv": ["git", "diff", "--check"]},
         },
-    }))
-    return path
+    })
 
 
-def test_loads_only_structurally_valid_catalog(tmp_path):
-    document, commands = load_validation_catalog(write_catalog(tmp_path))
+def test_loads_only_structurally_valid_catalog():
+    document, commands = load_validation_catalog(catalog_json())
 
     assert document["catalog_version"] == "1.0.0"
     assert commands == {"check": ("git", "diff", "--check")}
@@ -34,7 +32,7 @@ def test_plan_is_persisted_before_execution(tmp_path):
 
     service = MissionService(
         worker_ng=None,
-        validation_catalog_path=write_catalog(tmp_path),
+        validation_catalog_json=catalog_json(),
         mission_root=tmp_path / "missions",
         worktree_root=tmp_path / "worktrees",
         workspace_roots=[tmp_path],
@@ -57,7 +55,7 @@ def test_workspace_outside_environment_roots_is_rejected(tmp_path):
     outside.mkdir()
     service = MissionService(
         worker_ng=None,
-        validation_catalog_path=write_catalog(tmp_path),
+        validation_catalog_json=catalog_json(),
         mission_root=tmp_path / "missions",
         worktree_root=tmp_path / "worktrees",
         workspace_roots=[allowed],
@@ -85,7 +83,7 @@ def test_execute_passes_only_reviewed_proposal_to_dispatcher(tmp_path):
 
     service = MissionService(
         worker_ng=None,
-        validation_catalog_path=write_catalog(tmp_path),
+        validation_catalog_json=catalog_json(),
         mission_root=tmp_path / "missions",
         worktree_root=tmp_path / "worktrees",
         workspace_roots=[tmp_path],
@@ -126,7 +124,7 @@ def test_same_proposal_cannot_execute_twice(tmp_path):
 
     service = MissionService(
         worker_ng=None,
-        validation_catalog_path=write_catalog(tmp_path),
+        validation_catalog_json=catalog_json(),
         mission_root=tmp_path / "missions",
         worktree_root=tmp_path / "worktrees",
         workspace_roots=[tmp_path],
