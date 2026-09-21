@@ -1,0 +1,126 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-EM-144",
+    "name": "ecosystem_monitor: remove dead ces_monitor endpoint + create systemd service file",
+    "agent": "codemine",
+    "scope": "local_vps",
+    "acceptance_criteria": [
+      "ces_monitor entry removed from SERVICES dict in /home/josh/ecosystem-monitor/monitor.py",
+      "Changelog entry added to monitor.py",
+      "ecosystem-monitor.service written to /home/josh/ecosystem-monitor/"
+    ],
+    "depends_on": []
+  },
+  "constraints": {
+    "never": [
+      "Do not edit any vendored file",
+      "Do not run sudo",
+      "Do not restart any running service"
+    ],
+    "anti_drift": [],
+    "tool_allowlist": [
+      "shell_execute",
+      "read_file"
+    ],
+    "shell_allowlist": [
+      "python3",
+      "grep",
+      "echo"
+    ],
+    "max_iterations": 20,
+    "timeout": 300
+  },
+  "steps": [
+    {
+      "id": "patch_monitor_py",
+      "type": "action",
+      "description": "Remove ces_monitor from SERVICES dict and add changelog entry to monitor.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 /home/josh/Faux_Clawdbot/specs/BLK-EM-144-patch.py"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "PATCHED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_ces_monitor_removed",
+      "type": "action",
+      "description": "Verify ces_monitor dict key is absent from monitor.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c '\"ces_monitor\":' /home/josh/ecosystem-monitor/monitor.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "0"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "write_service_file",
+      "type": "action",
+      "description": "Write systemd service unit file to /home/josh/ecosystem-monitor/",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 /home/josh/Faux_Clawdbot/specs/BLK-EM-144-service.py"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "SERVICE_FILE_WRITTEN"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_service_file",
+      "type": "action",
+      "description": "Verify service file written with ExecStart line",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'ExecStart=/usr/bin/python3' /home/josh/ecosystem-monitor/ecosystem-monitor.service"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "1"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "final_summary",
+      "type": "action",
+      "description": "Print completion summary with manual steps for Josh",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo 'BLK-EM-144 COMPLETE. monitor.py patched. Service file at /home/josh/ecosystem-monitor/ecosystem-monitor.service. Josh must run: sudo cp /home/josh/ecosystem-monitor/ecosystem-monitor.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now ecosystem-monitor'"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "BLK-EM-144 COMPLETE"
+          }
+        ]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}

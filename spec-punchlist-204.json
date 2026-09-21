@@ -1,0 +1,258 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-PUNCH-204",
+    "name": "Remove PipelineBridge — premature Morphogenesis coupling in live Praxis (#204)",
+    "agent": "codemine",
+    "scope": "core/pipeline_bridge.py (delete), tests/test_pipeline_bridge.py (delete), core/praxis_hook.py (3 excisions)",
+    "acceptance_criteria": [
+      "core/pipeline_bridge.py deleted from repo",
+      "tests/test_pipeline_bridge.py deleted from repo",
+      "grow_pipeline changelog entry (lines 25-31) removed from praxis_hook.py",
+      "PipelineBridge try/except import block removed from praxis_hook.py",
+      "grow_pipeline() method removed from praxis_hook.py",
+      "python3 -m py_compile core/praxis_hook.py passes",
+      "pytest tests/ -q passes — 26 pipeline tests disappear with their file, all remaining tests green"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "pipeline_bridge", "type": "file", "source_block": "none", "path": "core/pipeline_bridge.py"},
+      {"name": "test_pipeline_bridge", "type": "file", "source_block": "none", "path": "tests/test_pipeline_bridge.py"},
+      {"name": "praxis_hook", "type": "file", "source_block": "none", "path": "core/praxis_hook.py"}
+    ],
+    "outputs": [
+      {"name": "praxis_hook_updated", "type": "file", "path": "core/praxis_hook.py"}
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do NOT touch any file other than the three listed above",
+      "Do NOT modify the instance method grow() — only grow_pipeline() is removed",
+      "Do NOT modify any test file other than deleting test_pipeline_bridge.py",
+      "Do NOT import from /home/josh/Morphogenesis or any morphogenesis module"
+    ],
+    "anti_drift": [
+      "Pure deletion — no new code, no refactoring, no cleanup beyond the three specified targets"
+    ],
+    "tool_allowlist": ["read_file", "edit_file", "shell_execute"],
+    "max_iterations": 25
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "verify-files-exist",
+      "description": "Confirm all three target files exist before proceeding",
+      "tool": "shell_execute",
+      "params": {
+        "command": "test -f core/pipeline_bridge.py && test -f tests/test_pipeline_bridge.py && test -f core/praxis_hook.py && echo 'ALL PRESENT'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "ALL PRESENT"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "delete-pipeline-bridge",
+      "description": "Delete core/pipeline_bridge.py via git rm",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git rm core/pipeline_bridge.py && echo 'DELETED pipeline_bridge'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "DELETED pipeline_bridge"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "delete-test-pipeline-bridge",
+      "description": "Delete tests/test_pipeline_bridge.py via git rm",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git rm tests/test_pipeline_bridge.py && echo 'DELETED test_pipeline_bridge'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "DELETED test_pipeline_bridge"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "read-changelog-block",
+      "description": "Read the grow_pipeline changelog entry to confirm exact anchor before removing",
+      "tool": "shell_execute",
+      "params": {
+        "command": "sed -n '23,35p' core/praxis_hook.py"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "Add grow_pipeline()"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "remove-changelog-entry",
+      "description": "Remove the 7-line grow_pipeline changelog entry from praxis_hook.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "core/praxis_hook.py",
+        "old_text": "# [2026-04-20] Claude Code (Sonnet 4.6) — Add grow_pipeline() — composed pipeline integration\n#   What: grow_pipeline(descriptions, seeds, output_dir, normal_examples, anomaly_examples,\n#         class_examples, mode) delegates to PipelineBridge; records pipeline as artifact,\n#         logs outcome. Returns dict with status, pipeline_path, name, stage metadata.\n#   Why:  Expose multi-stage organism composition via the same hook API as grow().\n#   How:  PipelineBridge.grow_pipeline() for growth; record_artifact for .pipeline file;\n#         record_outcome for success/failure. Mirrors grow() sensor pattern exactly.\n",
+        "new_text": ""
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-changelog-removed",
+      "description": "Confirm grow_pipeline changelog entry is gone",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'Add grow_pipeline()' core/praxis_hook.py || true"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "not_contains", "value": "Add grow_pipeline()"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "remove-import-block",
+      "description": "Remove the PipelineBridge try/except import block from praxis_hook.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "core/praxis_hook.py",
+        "old_text": "try:\n    from core.pipeline_bridge import PipelineBridge\nexcept ImportError:\n    PipelineBridge = None  # type: ignore[assignment,misc]\n\nlogger = logging.getLogger(\"praxis\")",
+        "new_text": "logger = logging.getLogger(\"praxis\")"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-import-removed",
+      "description": "Confirm PipelineBridge import is gone",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -n 'PipelineBridge\\|pipeline_bridge' core/praxis_hook.py || echo 'CLEAN'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "CLEAN"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "remove-grow-pipeline-method",
+      "description": "Remove the entire grow_pipeline() method — from def grow_pipeline through its closing return dict, stopping just before def on_conversation_started",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"\nimport re\np = 'core/praxis_hook.py'\ns = open(p).read()\npattern = r'    def grow_pipeline\\(.*?(?=    def on_conversation_started)'\nmatch = re.search(pattern, s, re.DOTALL)\nif not match:\n    print('ERROR: grow_pipeline method not found')\n    exit(1)\nnew_s = s[:match.start()] + s[match.end():]\nassert 'def grow_pipeline' not in new_s, 'method still present'\nassert 'def on_conversation_started' in new_s, 'on_conversation_started missing'\nopen(p, 'w').write(new_s)\nprint('REMOVED')\n\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "REMOVED"},
+          {"operator": "not_contains", "value": "ERROR"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-method-removed",
+      "description": "Confirm grow_pipeline method and all PipelineBridge references are gone from praxis_hook.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -n 'grow_pipeline\\|PipelineBridge\\|pipeline_bridge' core/praxis_hook.py || echo 'ALL CLEAN'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "ALL CLEAN"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "syntax-check",
+      "description": "Verify praxis_hook.py compiles cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile core/praxis_hook.py && echo 'SYNTAX OK'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "SYNTAX OK"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-tests",
+      "description": "Run full Praxis test suite — pipeline tests disappear with their file, all remaining tests must pass",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m pytest tests/ -q 2>&1 | tail -15"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "not_contains", "value": "FAILED"},
+          {"operator": "not_contains", "value": "ERROR"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "commit",
+      "description": "Commit the removal",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git add core/praxis_hook.py && git commit -m 'chore(praxis): remove PipelineBridge — premature Morphogenesis coupling, rebuild in Morphogenesis once stable (#204)'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "204"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "Confirm: pipeline_bridge.py deleted, test_pipeline_bridge.py deleted, grow_pipeline changelog + import + method all removed from praxis_hook.py, py_compile passes, pytest passes with no FAILED/ERROR."
+    }
+  ]
+}

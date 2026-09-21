@@ -1,0 +1,287 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-TID-173",
+    "name": "TID cascade avoidance -- four compounding gaps (punchlist #173)",
+    "agent": "codemine",
+    "scope": "github_repo",
+    "acceptance_criteria": [
+      "router.py: _model_success_stats + _SUCCESS_WINDOW/FLOOR/MIN_SAMPLES in RoutingEngine.__init__",
+      "router.py: report_outcome records per-model success stats",
+      "router.py: _filter_candidates prunes models below 20pct rolling success (min 10 samples)",
+      "router.py: _score_cost accepts success_rate param, uses effective_cost = raw_cost/success_rate",
+      "router.py: _score_model passes _sr from _model_success_stats to _score_cost",
+      "model_client.py: _rate_limited + _rate_limit_hits dicts in __init__",
+      "model_client.py: is_rate_limited() and is_rate_limited_by_id() methods present",
+      "model_client.py: 429 handler populates _rate_limited with exponential backoff (60s base, 1800s cap)",
+      "app.py: _cascade_start_ms captured before fallback loop",
+      "app.py: rate-limited fallbacks skipped via is_rate_limited_by_id()",
+      "app.py: final report_outcome includes cascade_depth and cascade_total_ms in metadata",
+      "All three files have changelog entries for #173",
+      "python3 -m py_compile passes on all three files",
+      "137+ tests pass",
+      "Changes committed and pushed to greatnorthernfishguy-hub/The-Inference-Difference"
+    ],
+    "depends_on": []
+  },
+  "constraints": {
+    "never": [
+      "Do not restart inference-difference systemd service",
+      "Do not modify vendored files: ng_lite.py, ng_peer_bridge.py, ng_ecosystem.py, ng_bridge.py, ng_autonomic.py",
+      "Do not delete ng_lite_state.json",
+      "Do not change DEFAULT_SCORING_WEIGHTS values",
+      "Do not reorder proxy pipeline hooks in app.py"
+    ],
+    "anti_drift": [
+      "Patch scripts use string.replace() with exact anchors -- do not rewrite whole functions",
+      "If idempotency check finds change already applied, skip that step (skipped != failed)"
+    ],
+    "tool_allowlist": [
+      "shell_execute"
+    ],
+    "shell_allowlist": [
+      "git",
+      "grep",
+      "python3",
+      "echo",
+      "cat"
+    ],
+    "max_iterations": 25
+  },
+  "steps": [
+    {
+      "id": "verify_prereqs",
+      "type": "action",
+      "description": "Confirm patch scripts and target files exist",
+      "tool": "shell_execute",
+      "params": {
+        "command": "test -f /home/josh/The-Inference-Difference/scripts/patch_173_router.py && test -f /home/josh/The-Inference-Difference/scripts/patch_173_model_client.py && test -f /home/josh/The-Inference-Difference/scripts/patch_173_app.py && test -f /home/josh/The-Inference-Difference/inference_difference/router.py && echo READY"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "READY"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "idempotency_router",
+      "type": "action",
+      "description": "Skip router patch if already applied",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c _model_success_stats /home/josh/The-Inference-Difference/inference_difference/router.py 2>/dev/null || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "0"
+          }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "patch_router",
+      "type": "action",
+      "description": "Apply router.py patch (success stats, floor filter, expected true cost)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 /home/josh/The-Inference-Difference/scripts/patch_173_router.py"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "ROUTER_PATCHED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_router",
+      "type": "action",
+      "description": "Syntax-check router.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/The-Inference-Difference && venv/bin/python3 -m py_compile inference_difference/router.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "SYNTAX_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "idempotency_mclient",
+      "type": "action",
+      "description": "Skip model_client patch if already applied",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c is_rate_limited /home/josh/The-Inference-Difference/inference_difference/model_client.py 2>/dev/null || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "0"
+          }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "patch_model_client",
+      "type": "action",
+      "description": "Apply model_client.py patch (429 rate-limit caching)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 /home/josh/The-Inference-Difference/scripts/patch_173_model_client.py"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "MCLIENT_PATCHED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_mclient",
+      "type": "action",
+      "description": "Syntax-check model_client.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/The-Inference-Difference && venv/bin/python3 -m py_compile inference_difference/model_client.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "SYNTAX_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "idempotency_app",
+      "type": "action",
+      "description": "Skip app.py patch if already applied",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c _cascade_start_ms /home/josh/The-Inference-Difference/inference_difference/app.py 2>/dev/null || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "0"
+          }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "patch_app",
+      "type": "action",
+      "description": "Apply app.py patch (cascade tracking, rate-limit skip, cascade metadata)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 /home/josh/The-Inference-Difference/scripts/patch_173_app.py"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "APP_PATCHED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_app",
+      "type": "action",
+      "description": "Syntax-check app.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/The-Inference-Difference && venv/bin/python3 -m py_compile inference_difference/app.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "SYNTAX_OK"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "run_tests",
+      "type": "action",
+      "description": "Run TID test suite -- must pass 137+ tests",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/The-Inference-Difference && venv/bin/python3 -m pytest tests/test_inference_difference.py tests/test_catalog.py -x -q 2>&1 | tail -5"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "passed"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_all_symbols",
+      "type": "action",
+      "description": "Confirm all key symbols landed in each file",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -l _model_success_stats /home/josh/The-Inference-Difference/inference_difference/router.py && grep -l is_rate_limited_by_id /home/josh/The-Inference-Difference/inference_difference/model_client.py && grep -l _cascade_start_ms /home/josh/The-Inference-Difference/inference_difference/app.py && echo ALL_PRESENT"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "ALL_PRESENT"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit the three changed files and push",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd /home/josh/The-Inference-Difference && git add inference_difference/router.py inference_difference/model_client.py inference_difference/app.py scripts/patch_173_router.py scripts/patch_173_model_client.py scripts/patch_173_app.py && git commit -m \"Punchlist #173: cascade avoidance -- success floor, expected true cost, 429 backoff, cascade depth\" && git push && echo PUSHED"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "PUSHED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    }
+  ]
+}

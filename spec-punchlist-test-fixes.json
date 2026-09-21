@@ -1,0 +1,119 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-PUNCH-TESTFIXES",
+    "name": "Test suite fixes — #194 (Agent Zero asyncio) + #196 (QuantumGraph flaky tolerances)",
+    "agent": "codemine",
+    "scope": "agent-zero/requirements.txt + pytest.ini, QuantumGraph test_amplitude.py + test_collapse.py",
+    "acceptance_criteria": [
+      "#194: pytest-asyncio added to agent-zero requirements.txt",
+      "#194: agent-zero pytest.ini created with asyncio_mode = auto",
+      "#196: test_many_random_phases_average tolerance widened — test passes reliably",
+      "#196: test_complex_amplitudes_same_magnitude tolerance widened — test passes reliably",
+      "Both QuantumGraph flaky tests pass on 3 consecutive runs"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "az_requirements", "type": "file", "source_block": "none", "path": "/home/josh/agent-zero/requirements.txt"},
+      {"name": "qg_test_amplitude", "type": "file", "source_block": "none", "path": "/home/josh/QuantumGraph/quantumgraph/tests/test_amplitude.py"},
+      {"name": "qg_test_collapse", "type": "file", "source_block": "none", "path": "/home/josh/QuantumGraph/quantumgraph/tests/test_collapse.py"}
+    ],
+    "outputs": [
+      {"name": "az_requirements_updated", "type": "file", "path": "/home/josh/agent-zero/requirements.txt"},
+      {"name": "az_pytest_ini", "type": "file", "path": "/home/josh/agent-zero/pytest.ini"},
+      {"name": "qg_test_amplitude_updated", "type": "file", "path": "/home/josh/QuantumGraph/quantumgraph/tests/test_amplitude.py"},
+      {"name": "qg_test_collapse_updated", "type": "file", "path": "/home/josh/QuantumGraph/quantumgraph/tests/test_collapse.py"}
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do NOT change any test logic — only widen tolerances or increase trial counts",
+      "Do NOT touch Morphogenesis, Praxis, or NeuroGraph files"
+    ],
+    "anti_drift": ["Four targeted changes: two tolerance edits, one requirements line, one pytest.ini creation"],
+    "tool_allowlist": ["read_file", "edit_file", "shell_execute"],
+    "max_iterations": 25
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "check-az-requirements",
+      "description": "Confirm pytest-asyncio not already present",
+      "tool": "shell_execute",
+      "params": {"command": "grep 'pytest-asyncio' /home/josh/agent-zero/requirements.txt || echo 'NOT PRESENT'"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "NOT PRESENT"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "add-pytest-asyncio",
+      "description": "#194 — Append pytest-asyncio to agent-zero requirements.txt",
+      "tool": "shell_execute",
+      "params": {"command": "echo 'pytest-asyncio>=0.23' >> /home/josh/agent-zero/requirements.txt && grep 'pytest-asyncio' /home/josh/agent-zero/requirements.txt && echo 'ADDED'"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "ADDED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "create-pytest-ini",
+      "description": "#194 — Create agent-zero/pytest.ini with asyncio_mode = auto",
+      "tool": "shell_execute",
+      "params": {"command": "printf '[pytest]\\nasyncio_mode = auto\\n' > /home/josh/agent-zero/pytest.ini && cat /home/josh/agent-zero/pytest.ini && echo 'CREATED'"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "asyncio_mode = auto"}, {"operator": "contains", "value": "CREATED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-amplitude-anchor",
+      "description": "Confirm flaky tolerance expression exists before editing",
+      "tool": "shell_execute",
+      "params": {"command": "grep -n '0.5 \\* classical' /home/josh/QuantumGraph/quantumgraph/tests/test_amplitude.py"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "0.5 * classical"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "widen-amplitude-tolerance",
+      "description": "#196 — Widen test_many_random_phases_average from 0.5*classical to classical",
+      "tool": "shell_execute",
+      "params": {"command": "python3 -c \"p='/home/josh/QuantumGraph/quantumgraph/tests/test_amplitude.py'; s=open(p).read(); assert '< 0.5 * classical' in s; open(p,'w').write(s.replace('< 0.5 * classical','< classical',1)); print('UPDATED')\""},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "UPDATED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-collapse-anchor",
+      "description": "Confirm collapse tolerance anchor exists",
+      "tool": "shell_execute",
+      "params": {"command": "grep -n 'abs=0.03' /home/josh/QuantumGraph/quantumgraph/tests/test_collapse.py"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "abs=0.03"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "widen-collapse-tolerance",
+      "description": "#196 — Widen test_complex_amplitudes_same_magnitude abs tolerance from 0.03 to 0.05",
+      "tool": "shell_execute",
+      "params": {"command": "python3 -c \"p='/home/josh/QuantumGraph/quantumgraph/tests/test_collapse.py'; s=open(p).read(); assert 'abs=0.03' in s; open(p,'w').write(s.replace('pytest.approx(0.25, abs=0.03)','pytest.approx(0.25, abs=0.05)',1)); print('UPDATED')\""},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "UPDATED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-flaky-tests-x3",
+      "description": "Run the two previously-flaky tests three times to confirm stable",
+      "tool": "shell_execute",
+      "params": {"command": "cd /home/josh/QuantumGraph && python3 -m pytest quantumgraph/tests/test_amplitude.py::TestMixedInterference::test_many_random_phases_average quantumgraph/tests/test_collapse.py::TestCollapseEdgeCases::test_complex_amplitudes_same_magnitude -q 2>&1 | tail -3 && python3 -m pytest quantumgraph/tests/test_amplitude.py::TestMixedInterference::test_many_random_phases_average quantumgraph/tests/test_collapse.py::TestCollapseEdgeCases::test_complex_amplitudes_same_magnitude -q 2>&1 | tail -3 && python3 -m pytest quantumgraph/tests/test_amplitude.py::TestMixedInterference::test_many_random_phases_average quantumgraph/tests/test_collapse.py::TestCollapseEdgeCases::test_complex_amplitudes_same_magnitude -q 2>&1 | tail -3 && echo 'ALL 3 RUNS PASSED'"},
+      "validation": {"checks": [{"operator": "result_is_string"}, {"operator": "contains", "value": "ALL 3 RUNS PASSED"}, {"operator": "not_contains", "value": "FAILED"}]},
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "pytest-asyncio in agent-zero requirements.txt, pytest.ini with asyncio_mode=auto created, both QuantumGraph tolerance tests pass 3 consecutive runs."
+    }
+  ]
+}

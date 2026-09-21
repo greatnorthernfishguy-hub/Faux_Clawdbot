@@ -1,0 +1,397 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-142",
+    "name": "NeuroGraph: retire ng_experience_tract.py — migrate callers to ng_tract directly",
+    "agent": "codemine",
+    "scope": "github_repo",
+    "acceptance_criteria": [
+      "ng_experience_tract.py deleted from NeuroGraph repo",
+      "neurograph_rpc.py: no import of ExperienceTract; _drain_tract() uses inline atomic-rename + ng_tract.TractReader logic",
+      "neurograph_gui.py: no import of ExperienceTract; deposit calls use ng_tract.deposit_experience() directly",
+      "neurograph_mcp.py: no import of ExperienceTract; deposit call uses ng_tract.deposit_experience() directly",
+      "python3 -m py_compile passes for all three files",
+      "Changes committed and pushed to greatnorthernfishguy-hub/NeuroGraph"
+    ],
+    "depends_on": []
+  },
+  "constraints": {
+    "never": [
+      "Do not modify ng_tract (the Rust crate) or any vendored file",
+      "Do not modify ng_experience_tract.py — delete it",
+      "Do not change the drain protocol logic (atomic rename, TractReader loop, JSONL fallback)",
+      "Do not run sudo",
+      "Do not import new top-level dependencies"
+    ],
+    "anti_drift": [
+      "Three targeted changes per file: (1) remove ExperienceTract import/init, (2) replace deposit() calls with ng_tract.deposit_experience(), (3) inline drain logic in neurograph_rpc.py _drain_tract(). Nothing else."
+    ],
+    "tool_allowlist": [
+      "shell_execute",
+      "read_file",
+      "edit_file"
+    ],
+    "shell_allowlist": [
+      "git",
+      "grep",
+      "echo",
+      "cat",
+      "python3",
+      "rm"
+    ],
+    "max_iterations": 30
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is available",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "TOKEN_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone directories from any previous runs",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf ng_work && echo CLEANED"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLEANED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_ng",
+      "type": "action",
+      "description": "Clone NeuroGraph repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone --depth=1 https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/NeuroGraph.git ng_work && echo CLONED"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLONED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "idempotency_check",
+      "type": "action",
+      "description": "Verify ng_experience_tract.py still exists — abort if already deleted",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; print('EXISTS' if os.path.exists('ng_work/ng_experience_tract.py') else 'ALREADY_DONE')\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "EXISTS" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "rpc_remove_import",
+      "type": "action",
+      "description": "Remove ExperienceTract import from neurograph_rpc.py bootstrap function",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_rpc.py",
+        "old_text": "    from openclaw_hook import NeuroGraphMemory\n    from ng_experience_tract import ExperienceTract",
+        "new_text": "    from openclaw_hook import NeuroGraphMemory"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "rpc_remove_init",
+      "type": "action",
+      "description": "Remove _tract = ExperienceTract() instantiation from bootstrap function",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_rpc.py",
+        "old_text": "    _memory = NeuroGraphMemory.get_instance()\n    _tract = ExperienceTract()",
+        "new_text": "    _memory = NeuroGraphMemory.get_instance()"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "rpc_remove_stats",
+      "type": "action",
+      "description": "Remove tract_stats = _tract.stats() and update the bootstrap logger.info call",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_rpc.py",
+        "old_text": "    stats = _memory.stats()\n    tract_stats = _tract.stats()\n    logger.info(\n        \"Bootstrapped: %d nodes, %d synapses, %d hyperedges, timestep %d, \"\n        \"tract pending: %d, modules: %s\",\n        stats[\"nodes\"],\n        stats[\"synapses\"],\n        stats[\"hyperedges\"],\n        stats[\"timestep\"],\n        tract_stats[\"pending\"],\n        started_modules,\n    )",
+        "new_text": "    stats = _memory.stats()\n    logger.info(\n        \"Bootstrapped: %d nodes, %d synapses, %d hyperedges, timestep %d, \"\n        \"modules: %s\",\n        stats[\"nodes\"],\n        stats[\"synapses\"],\n        stats[\"hyperedges\"],\n        stats[\"timestep\"],\n        started_modules,\n    )"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "rpc_replace_drain",
+      "type": "action",
+      "description": "Replace _drain_tract() body: remove _tract.drain() call, inline atomic-rename + ng_tract.TractReader drain logic",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_rpc.py",
+        "old_text": "    entries = _tract.drain()\n    for entry in entries:\n        if isinstance(entry, dict):\n            _drain_experience_entry(\n                content=entry.get(\"content\", \"\"),\n                content_type=entry.get(\"content_type\", \"text\"),\n                source=entry.get(\"source\", \"unknown\"),\n            )\n        else:\n            _drain_experience_entry(\n                content=entry.content or \"\",\n                content_type=entry.content_type,\n                source=entry.source or \"unknown\",\n            )",
+        "new_text": "    import ng_tract as _ng_tract\n    _legacy_path = os.path.expanduser(\"~/NeuroGraph/data/tract/experience.tract\")\n    _drain_path = f\"{_legacy_path}.draining.{os.getpid()}\"\n    entries: list = []\n    try:\n        os.rename(_legacy_path, _drain_path)\n    except FileNotFoundError:\n        return\n    except OSError as exc:\n        logger.warning(\"Tract drain rename failed: %s\", exc)\n        return\n    try:\n        with open(_drain_path, \"rb\") as _f:\n            _raw = _f.read()\n        if _raw:\n            for _e in _ng_tract.TractReader(_raw):\n                if isinstance(_e, bytes):\n                    try:\n                        entries.append(json.loads(_e))\n                    except (json.JSONDecodeError, UnicodeDecodeError):\n                        pass\n                elif getattr(_e, \"entry_type\", None) == _ng_tract.ENTRY_EXPERIENCE:\n                    entries.append(_e)\n    except OSError as exc:\n        logger.warning(\"Tract drain read failed: %s\", exc)\n    finally:\n        try:\n            os.unlink(_drain_path)\n        except OSError:\n            pass\n    for entry in entries:\n        if isinstance(entry, dict):\n            _drain_experience_entry(\n                content=entry.get(\"content\", \"\"),\n                content_type=entry.get(\"content_type\", \"text\"),\n                source=entry.get(\"source\", \"unknown\"),\n            )\n        else:\n            _drain_experience_entry(\n                content=entry.content or \"\",\n                content_type=entry.content_type,\n                source=entry.source or \"unknown\",\n            )"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "rpc_changelog",
+      "type": "action",
+      "description": "Add changelog entry to neurograph_rpc.py header (BLK-NG-142)",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_rpc.py",
+        "old_text": "# ---- Changelog ----\n# [2026-04-22] Claude Code (Sonnet 4.6) — Full status restoration",
+        "new_text": "# ---- Changelog ----\n# [2026-04-24] Codemine (BLK-NG-142) — Retire ng_experience_tract.py wrapper\n#   What: Removed ExperienceTract import/init from bootstrap; removed tract_stats log\n#         arg; inlined atomic-rename + ng_tract.TractReader drain loop in _drain_tract().\n#         neurograph_gui.py and neurograph_mcp.py deposit calls migrated to direct\n#         ng_tract.deposit_experience(). ng_experience_tract.py deleted.\n#   Why:  ExperienceTract was a Python wrapper around ng_tract that no longer added value\n#         after the BTF deposit path (ng_tract.deposit_experience) was added in #119.\n#         Law 3 — restore, do not maintain shrapnel.\n#   How:  Inline drain from ExperienceTract.drain(); direct deposit_experience() calls.\n# [2026-04-22] Claude Code (Sonnet 4.6) — Full status restoration"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "gui_init",
+      "type": "action",
+      "description": "Replace ExperienceTract import+init in IngestionManager.get_memory() with direct tract path string",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_gui.py",
+        "old_text": "                    self._topology_owned = True\n                    from ng_experience_tract import ExperienceTract\n                    self._tract = ExperienceTract()\n                    logger.info(",
+        "new_text": "                    self._topology_owned = True\n                    self._tract = os.path.expanduser(\n                        \"~/NeuroGraph/data/tract/experience.tract\"\n                    )\n                    logger.info("
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "gui_stats",
+      "type": "action",
+      "description": "Replace self._tract.stats() in IngestionManager.get_stats() with inline dict",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_gui.py",
+        "old_text": "            tract_stats = self._tract.stats() if self._tract else {}",
+        "new_text": "            tract_stats = {\"tract_file\": self._tract, \"pending\": 0} if self._tract else {}"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "gui_deposit_file",
+      "type": "action",
+      "description": "Replace self._tract.deposit() with ng_tract.deposit_experience() in _ingest_file_worker",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_gui.py",
+        "old_text": "            if self._topology_owned and self._tract is not None:\n                self._tract.deposit(\n                    content=str(Path(path).resolve()),\n                    source=\"gui\",\n                    content_type=\"file\",\n                    metadata={\"original_path\": path},\n                )\n                dest = self._move_to_ingested(path)",
+        "new_text": "            if self._topology_owned and self._tract is not None:\n                import ng_tract as _ng_tract\n                _ng_tract.deposit_experience(\n                    content=str(Path(path).resolve()),\n                    source=\"gui\",\n                    tract_path=self._tract,\n                    content_type=\"file\",\n                )\n                dest = self._move_to_ingested(path)"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "gui_deposit_url",
+      "type": "action",
+      "description": "Replace self._tract.deposit() with ng_tract.deposit_experience() in _ingest_url_worker",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_gui.py",
+        "old_text": "            if self._topology_owned and self._tract is not None:\n                self._tract.deposit(\n                    content=url,\n                    source=\"gui\",\n                    content_type=\"url\",\n                )\n                self._on_result({",
+        "new_text": "            if self._topology_owned and self._tract is not None:\n                import ng_tract as _ng_tract\n                _ng_tract.deposit_experience(\n                    content=url,\n                    source=\"gui\",\n                    tract_path=self._tract,\n                    content_type=\"url\",\n                )\n                self._on_result({"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "mcp_get_tract",
+      "type": "action",
+      "description": "Replace _tract singleton + _get_tract() in neurograph_mcp.py with module-level path constant",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_mcp.py",
+        "old_text": "# Experience tract for deposits\n_tract = None\n\n\ndef _get_tract():\n    global _tract\n    if _tract is None:\n        from ng_experience_tract import ExperienceTract\n        _tract = ExperienceTract()\n    return _tract",
+        "new_text": "# Legacy feeder tract path — used by deposit_experience() and substrate_status()\n_LEGACY_TRACT_PATH = os.path.expanduser(\"~/NeuroGraph/data/tract/experience.tract\")"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "mcp_status_remove_tract",
+      "type": "action",
+      "description": "Remove tract = _get_tract() and tract_stats = tract.stats() from substrate_status tool",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_mcp.py",
+        "old_text": "        tract = _get_tract()\n        tract_stats = tract.stats()\n\n        lines = [",
+        "new_text": "        lines = ["
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "mcp_status_pending_line",
+      "type": "action",
+      "description": "Replace tract_stats['pending'] reference in substrate_status lines list",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_mcp.py",
+        "old_text": "            f\"- Experience tract pending: {tract_stats['pending']}\",",
+        "new_text": "            f\"- Experience tract pending: (ContextEngine /stats for live count)\","
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "mcp_deposit",
+      "type": "action",
+      "description": "Replace deposit_experience tool body: remove _get_tract() call, use ng_tract.deposit_experience() directly",
+      "tool": "edit_file",
+      "params": {
+        "path": "ng_work/neurograph_mcp.py",
+        "old_text": "    try:\n        tract = _get_tract()\n        tract.deposit(\n            content=content,\n            source=source,\n            content_type=content_type,\n            metadata={\"via\": \"mcp\", \"timestamp\": time.time()},\n        )\n        pending = tract.pending_count()\n        return f\"Deposited. Tract has {pending} pending entries awaiting drain.\"",
+        "new_text": "    try:\n        import ng_tract\n        ng_tract.deposit_experience(\n            content=content,\n            source=source,\n            tract_path=_LEGACY_TRACT_PATH,\n            content_type=content_type,\n        )\n        return \"Deposited. Entry queued for drain on next afterTurn.\""
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "delete_wrapper",
+      "type": "action",
+      "description": "Delete ng_experience_tract.py — the retired Python wrapper",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm ng_work/ng_experience_tract.py && echo DELETED"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "DELETED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_deleted",
+      "type": "action",
+      "description": "Confirm ng_experience_tract.py is gone",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; print(0 if not os.path.exists('ng_work/ng_experience_tract.py') else 1)\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_no_import",
+      "type": "action",
+      "description": "Verify no remaining imports of ng_experience_tract in the three edited files",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"files=['ng_work/neurograph_rpc.py','ng_work/neurograph_gui.py','ng_work/neurograph_mcp.py']; total=sum(1 for f in files for line in open(f) if not line.lstrip().startswith('#') and 'ng_experience_tract' in line); print(total)\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "pycompile_rpc",
+      "type": "action",
+      "description": "Verify neurograph_rpc.py compiles cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile ng_work/neurograph_rpc.py && echo SYNTAX_OK_RPC"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK_RPC" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "pycompile_gui",
+      "type": "action",
+      "description": "Verify neurograph_gui.py compiles cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile ng_work/neurograph_gui.py && echo SYNTAX_OK_GUI"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK_GUI" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "pycompile_mcp",
+      "type": "action",
+      "description": "Verify neurograph_mcp.py compiles cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile ng_work/neurograph_mcp.py && echo SYNTAX_OK_MCP"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK_MCP" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit and push NeuroGraph changes — handles nothing-to-commit cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C ng_work config user.email \"codemine@et-systems.ai\" && git -C ng_work config user.name \"Codemine\" && git -C ng_work add neurograph_rpc.py neurograph_gui.py neurograph_mcp.py && git -C ng_work rm ng_experience_tract.py && git -C ng_work diff --cached --quiet && echo ALREADY_COMMITTED || (git -C ng_work commit -m 'refactor(tract): retire ng_experience_tract.py wrapper (#142)' && git -C ng_work push && echo COMMITTED)"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "COMMIT" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "final_summary",
+      "type": "action",
+      "description": "Print completion confirmation",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo 'BLK-NG-142 COMPLETE. ng_experience_tract.py retired. All callers use ng_tract directly.'"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "BLK-NG-142 COMPLETE" }]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}

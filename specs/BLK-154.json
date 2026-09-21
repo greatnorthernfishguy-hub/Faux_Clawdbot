@@ -1,0 +1,374 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-154",
+    "name": "Praxis + Elmer: fix Law 7 violations in pulse loops",
+    "agent": "codemine",
+    "scope": "cross_repo",
+    "acceptance_criteria": [
+      "Praxis _pulse_cycle wires _route_pulse_event for each new event after sync_state",
+      "Elmer _pulse_cycle deposits raw embeddings instead of extracting text",
+      "_extract_pulse_text staticmethod removed from Elmer/elmer_hook.py",
+      "_extract_text_from_delta dead function removed from Elmer/elmer_service.py",
+      "Elmer _drain_loop stale docstring corrected",
+      "Changelog entries added to all three changed files",
+      "Both repos committed and pushed to GitHub main"
+    ],
+    "depends_on": []
+  },
+  "constraints": {
+    "never": [
+      "Do not modify any vendored file (ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, ng_autonomic.py, openclaw_adapter.py, ng_embed.py)",
+      "Do not restart any running service",
+      "Do not modify files outside the Praxis/ and Elmer/ clone directories"
+    ],
+    "anti_drift": [],
+    "tool_allowlist": [
+      "shell_execute",
+      "read_file",
+      "edit_file"
+    ],
+    "shell_allowlist": [
+      "rm",
+      "git",
+      "echo",
+      "grep"
+    ],
+    "max_iterations": 35,
+    "timeout": 600
+  },
+  "steps": [
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone directories from previous runs",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf Praxis Elmer && echo \"CLEANED\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "CLEANED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_praxis",
+      "type": "action",
+      "description": "Clone Praxis repository",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/Praxis.git Praxis && echo \"PRAXIS_CLONED\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "PRAXIS_CLONED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_elmer",
+      "type": "action",
+      "description": "Clone Elmer repository",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/Elmer.git Elmer && echo \"ELMER_CLONED\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "ELMER_CLONED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_praxis_pulse_cycle",
+      "type": "action",
+      "description": "Wire _route_pulse_event into _pulse_cycle — replace sync-only body with event routing loop",
+      "tool": "edit_file",
+      "params": {
+        "path": "Praxis/core/praxis_hook.py",
+        "old_text": "    def _pulse_cycle(self):\n        \"\"\"One pulse cycle — drain River tracts, feed to sensors.\"\"\"\n        # 1. Drain tracts from peer bridge\n        try:\n            bridge = getattr(self._eco, '_peer_bridge', None)\n            if bridge and hasattr(bridge, 'sync_state'):\n                bridge.sync_state(local_state={}, module_id=self.MODULE_ID)\n        except Exception as exc:\n            logger.debug(\"Pulse drain error: %s\", exc)\n\n        # 2. Read autonomic state\n        self._read_autonomic()",
+        "new_text": "    def _pulse_cycle(self):\n        \"\"\"One pulse cycle — drain River tracts, route to sensors (raw embeddings, Law 7).\"\"\"\n        # 1. Drain tracts from peer bridge\n        try:\n            bridge = getattr(self._eco, '_peer_bridge', None)\n            if bridge and hasattr(bridge, 'sync_state'):\n                before = len(getattr(bridge, '_peer_events', []))\n                bridge.sync_state(local_state={}, module_id=self.MODULE_ID)\n                peer_events = getattr(bridge, '_peer_events', [])\n                for event in peer_events[before:]:\n                    try:\n                        self._route_pulse_event(event)\n                    except Exception as exc:\n                        logger.debug(\"Pulse route error: %s\", exc)\n        except Exception as exc:\n            logger.debug(\"Pulse drain error: %s\", exc)\n\n        # 2. Read autonomic state\n        self._read_autonomic()"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_praxis_changelog",
+      "type": "action",
+      "description": "Add BLK-154 changelog entry to praxis_hook.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "Praxis/core/praxis_hook.py",
+        "old_text": "#         Event routing removed — Law 7 violation deferred to punchlist #154.\n# -------------------\n\"\"\"",
+        "new_text": "#         Event routing removed — Law 7 violation deferred to punchlist #154.\n# [2026-04-18] Claude Code (Sonnet 4.6) — Punchlist #154: Wire _route_pulse_event into _pulse_cycle\n#   What: _pulse_cycle now routes each new River event through _route_pulse_event after sync_state.\n#   Why:  #137 fixed the drain no-op but deferred event routing. _route_pulse_event was correctly\n#         written (raw embeddings, pheromone routing, Law 7 compliant) but never called from the\n#         pulse loop. Events were drained but silently discarded.\n#   How:  Snapshot len(bridge._peer_events) before sync_state, iterate peer_events[before:]\n#         and call _route_pulse_event(event) for each new event. Error-isolated per event.\n# -------------------\n\"\"\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_praxis_old_docstring_absent",
+      "type": "action",
+      "description": "Verify old _pulse_cycle docstring (feed to sensors) is gone",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'feed to sensors' Praxis/core/praxis_hook.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "0"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_push_praxis",
+      "type": "action",
+      "description": "Commit and push Praxis BLK-154 changes",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd Praxis && git config user.email 'codemine@et-systems.local' && git config user.name 'Codemine' && git add core/praxis_hook.py && git commit -m 'Punchlist #154: Wire _route_pulse_event into _pulse_cycle (Law 7)' && git push && echo \"PRAXIS_PUSHED\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "PRAXIS_PUSHED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_elmer_hook_pulse_cycle",
+      "type": "action",
+      "description": "Replace text-extraction violation in Elmer _pulse_cycle with raw embedding deposit",
+      "tool": "edit_file",
+      "params": {
+        "path": "Elmer/elmer_hook.py",
+        "old_text": "        drained = 0\n        try:\n            bridge = getattr(self._eco, '_peer_bridge', None) if hasattr(self, '_eco') else None\n            if bridge and hasattr(bridge, '_drain_all'):\n                bridge._drain_all()\n                # Process newly drained events through the engine\n                peer_events = getattr(bridge, '_peer_events', [])\n                if peer_events:\n                    drained = len(peer_events)\n                    for event in peer_events:\n                        text = self._extract_pulse_text(event)\n                        if text and self._started:\n                            try:\n                                self._engine.process_text(text)\n                            except Exception as exc:\n                                logger.debug(\"Pulse drain process error: %s\", exc)\n        except Exception as exc:\n            logger.debug(\"Pulse drain error: %s\", exc)",
+        "new_text": "        drained = 0\n        try:\n            bridge = getattr(self._eco, '_peer_bridge', None) if hasattr(self, '_eco') else None\n            if bridge and hasattr(bridge, '_drain_all'):\n                before = len(getattr(bridge, '_peer_events', []))\n                bridge._drain_all()\n                peer_events = getattr(bridge, '_peer_events', [])\n                new_events = peer_events[before:]\n                drained = len(new_events)\n                for event in new_events:\n                    if not isinstance(event, dict):\n                        continue\n                    raw_emb = event.get('embedding')\n                    if raw_emb is None:\n                        continue\n                    try:\n                        emb = np.asarray(raw_emb, dtype=np.float32)\n                        if self._eco:\n                            self._eco.record_outcome(\n                                emb,\n                                target_id=\"elmer:river_event\",\n                                success=True,\n                                metadata={'source': 'river_pulse'},\n                            )\n                    except Exception as exc:\n                        logger.debug(\"Pulse deposit error: %s\", exc)\n        except Exception as exc:\n            logger.debug(\"Pulse drain error: %s\", exc)"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_elmer_hook_remove_extract_method",
+      "type": "action",
+      "description": "Remove _extract_pulse_text staticmethod — dead after pulse cycle patch",
+      "tool": "edit_file",
+      "params": {
+        "path": "Elmer/elmer_hook.py",
+        "old_text": "    @staticmethod\n    def _extract_pulse_text(event):\n        \"\"\"Extract processable text from a topology delta event.\n\n        Mirrors elmer_service.py _extract_text_from_delta — raw experience\n        from the River converted to text for the sensory pipeline (Law 7).\n        \"\"\"\n        if not isinstance(event, dict):\n            return None\n        parts = []\n        fired = event.get('fired_node_ids', [])\n        if fired:\n            parts.append(f\"fired:{len(fired)} nodes\")\n        fired_he = event.get('fired_hyperedge_ids', [])\n        if fired_he:\n            parts.append(f\"hyperedges:{len(fired_he)} active\")\n        pruned = event.get('synapses_pruned', 0)\n        sprouted = event.get('synapses_sprouted', 0)\n        if pruned or sprouted:\n            parts.append(f\"structural:+{sprouted}/-{pruned}\")\n        confirmed = event.get('predictions_confirmed', 0)\n        surprised = event.get('predictions_surprised', 0)\n        if confirmed or surprised:\n            parts.append(f\"predictions:confirmed={confirmed},surprised={surprised}\")\n        return \" \".join(parts) if parts else None\n\n    def on_conversation_started(self):",
+        "new_text": "    def on_conversation_started(self):"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_elmer_hook_changelog",
+      "type": "action",
+      "description": "Add BLK-154 changelog entry to elmer_hook.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "Elmer/elmer_hook.py",
+        "old_text": "#         Text extraction loop removed — Law 7 violation deferred to punchlist #154.\n# -------------------\n\"\"\"",
+        "new_text": "#         Text extraction loop removed — Law 7 violation deferred to punchlist #154.\n# [2026-04-18] Claude Code (Sonnet 4.6) — Punchlist #154: Fix Law 7 violation in pulse loop\n#   What: Replace text-extraction loop with raw embedding deposit to substrate.\n#         Remove _extract_pulse_text staticmethod (dead after this change).\n#   Why:  _pulse_cycle was calling process_text() with text extracted from topology\n#         deltas — classifying River events before substrate deposit, violating Law 7.\n#         The substrate must receive raw experience (embeddings), not extracted labels.\n#   How:  Snapshot _peer_events before drain, iterate new events, skip events without\n#         embeddings, deposit raw np.float32 embedding via record_outcome(). Quiescent\n#         events (no embedding field) are silently skipped — nothing to deposit.\n# -------------------\n\"\"\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_elmer_hook_violation_absent",
+      "type": "action",
+      "description": "Verify text-extraction violation is gone from elmer_hook.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c '_extract_pulse_text' Elmer/elmer_hook.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "0"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_elmer_service_docstring",
+      "type": "action",
+      "description": "Fix stale _drain_loop docstring in elmer_service.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "Elmer/elmer_service.py",
+        "old_text": "def _drain_loop():\n    \"\"\"Background loop that drains Elmer's tract and feeds the engine.\n\n    Reads topology deltas deposited by NeuroGraph via the River.\n    Each delta becomes a process_text() call — lightweight sockets\n    process synchronously, brain sockets via the async buffer.\n    \"\"\"",
+        "new_text": "def _drain_loop():\n    \"\"\"Background loop that drains Elmer's tract via sync_state.\n\n    Calls bridge.sync_state() which runs _drain_all() internally,\n    clearing incoming tracts and updating bridge state. No text\n    extraction — raw experience flows via the pulse loop (Law 7).\n    \"\"\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_elmer_service_remove_dead_func",
+      "type": "action",
+      "description": "Remove dead _extract_text_from_delta function from elmer_service.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "Elmer/elmer_service.py",
+        "old_text": "def _extract_text_from_delta(event: Dict[str, Any]) -> Optional[str]:\n    \"\"\"Extract processable text from a topology delta event.\n\n    Topology deltas from NeuroGraph contain fired nodes, synapse changes,\n    prediction results, etc. Convert to a text representation that the\n    sensory pipeline can process. The substrate receives this as raw\n    experience (Law 7).\n    \"\"\"\n    parts = []\n\n    fired = event.get('fired_node_ids', [])\n    if fired:\n        parts.append(f\"fired:{len(fired)} nodes\")\n\n    fired_he = event.get('fired_hyperedge_ids', [])\n    if fired_he:\n        parts.append(f\"hyperedges:{len(fired_he)} active\")\n\n    pruned = event.get('synapses_pruned', 0)\n    sprouted = event.get('synapses_sprouted', 0)\n    if pruned or sprouted:\n        parts.append(f\"structural:+{sprouted}/-{pruned}\")\n\n    confirmed = event.get('predictions_confirmed', 0)\n    surprised = event.get('predictions_surprised', 0)\n    if confirmed or surprised:\n        parts.append(f\"predictions:confirmed={confirmed},surprised={surprised}\")\n\n    if not parts:\n        return None\n\n    return f\"[topology_delta] {' | '.join(parts)}\"\n\n\ndef _get_peer_ids(bridge) -> list:",
+        "new_text": "def _get_peer_ids(bridge) -> list:"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_elmer_service_changelog",
+      "type": "action",
+      "description": "Add BLK-154 changelog entry to elmer_service.py",
+      "tool": "edit_file",
+      "params": {
+        "path": "Elmer/elmer_service.py",
+        "old_text": "#         Text extraction loop removed — Law 7 violation deferred to punchlist #154.\n# -------------------\n\"\"\"",
+        "new_text": "#         Text extraction loop removed — Law 7 violation deferred to punchlist #154.\n# [2026-04-18] Claude Code (Sonnet 4.6) — Punchlist #154: Remove dead _extract_text_from_delta\n#   What: Remove _extract_text_from_delta() — dead code since #137 fixed the drain loop\n#         to use sync_state() which never called this function.\n#         Fix stale _drain_loop docstring that still claimed text extraction.\n#   Why:  Dead code creates confusion about the module's architecture and makes it\n#         look like text extraction is still happening (violating Law 7 optics).\n#   How:  Delete function body + fix docstring. No callers — verified by grep.\n# -------------------\n\"\"\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_string"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_elmer_service_dead_func_absent",
+      "type": "action",
+      "description": "Verify dead _extract_text_from_delta is gone from elmer_service.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c '_extract_text_from_delta' Elmer/elmer_service.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "0"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_push_elmer",
+      "type": "action",
+      "description": "Commit and push all Elmer BLK-154 changes (hook + service)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd Elmer && git config user.email 'codemine@et-systems.local' && git config user.name 'Codemine' && git add elmer_hook.py elmer_service.py && git commit -m 'Punchlist #154: Fix Law 7 violations in pulse loops' && git push && echo \"ELMER_PUSHED\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "ELMER_PUSHED"
+          }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace_end",
+      "type": "action",
+      "description": "Remove clone directories",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf Praxis Elmer && echo \"WORKSPACE_CLEAN\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "WORKSPACE_CLEAN"
+          }
+        ]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "final_summary",
+      "type": "action",
+      "description": "Print summary of completed work",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo \"BLK-154 COMPLETE. Praxis: _route_pulse_event wired into _pulse_cycle. Elmer hook: raw embedding deposit replaces text extraction, _extract_pulse_text removed. Elmer service: dead _extract_text_from_delta removed, stale docstring fixed. Both repos pushed to GitHub.\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "BLK-154 COMPLETE"
+          }
+        ]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}

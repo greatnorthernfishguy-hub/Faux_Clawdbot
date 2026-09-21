@@ -1,0 +1,142 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-PUNCH-195",
+    "name": "Rewrite 4 stale ElmerHook tests against current API (#195)",
+    "agent": "codemine",
+    "scope": "tests/test_hook.py",
+    "acceptance_criteria": [
+      "test_on_message passes — uses module_results['elmer'], tier >= 0, no coherence fields",
+      "test_get_context deleted — method no longer exists on ElmerHook",
+      "test_get_context_empty deleted — method no longer exists on ElmerHook",
+      "test_stats passes — no adapter_version assertion, tier checked under ecosystem key",
+      "All remaining tests in test_hook.py still pass",
+      "python3 -m pytest tests/test_hook.py -q shows 0 failures"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "test_hook", "type": "file", "source_block": "none", "path": "tests/test_hook.py"}
+    ],
+    "outputs": [
+      {"name": "test_hook_updated", "type": "file", "path": "tests/test_hook.py"}
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do NOT touch any file other than tests/test_hook.py",
+      "Do NOT modify any test other than the 4 listed",
+      "Do NOT change any ElmerHook source files",
+      "Do NOT add new test logic — only update assertions to match current API"
+    ],
+    "anti_drift": [
+      "Four targeted changes only — no cleanup, no refactoring of passing tests"
+    ],
+    "tool_allowlist": ["read_file", "edit_file", "shell_execute"],
+    "max_iterations": 20
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "read-stale-tests",
+      "description": "Read the four stale tests to confirm exact text before editing",
+      "tool": "shell_execute",
+      "params": {
+        "command": "sed -n '26,65p' tests/test_hook.py"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "test_on_message"},
+          {"operator": "contains", "value": "adapter_version"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "fix-test-on-message",
+      "description": "Rewrite test_on_message: tier >= 0, module_results['elmer'] nesting, drop coherence fields",
+      "tool": "edit_file",
+      "params": {
+        "path": "tests/test_hook.py",
+        "old_text": "    def test_on_message(self):\n        hook = ElmerHook()\n        result = hook.on_message(\"Hello, Elmer!\")\n        assert result[\"status\"] == \"ingested\"\n        assert result[\"tier\"] >= 1\n        assert \"elmer\" in result\n        assert result[\"elmer\"][\"pipelines_active\"] is True\n        assert \"autonomic_state\" in result[\"elmer\"]\n        assert \"coherence_score\" in result[\"elmer\"]\n        assert \"coherence_status\" in result[\"elmer\"]",
+        "new_text": "    def test_on_message(self):\n        hook = ElmerHook()\n        result = hook.on_message(\"Hello, Elmer!\")\n        assert result[\"status\"] == \"ingested\"\n        assert result[\"tier\"] >= 0\n        assert \"module_results\" in result\n        assert result[\"module_results\"][\"elmer\"][\"pipelines_active\"] is True\n        assert \"autonomic_state\" in result[\"module_results\"][\"elmer\"]"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "remove-get-context-tests",
+      "description": "Delete test_get_context and test_get_context_empty — get_context() no longer exists on ElmerHook",
+      "tool": "edit_file",
+      "params": {
+        "path": "tests/test_hook.py",
+        "old_text": "    def test_get_context(self):\n        hook = ElmerHook()\n        context = hook.get_context(\"What do you know?\")\n        assert \"tier\" in context\n        assert \"recommendations\" in context\n        assert \"novelty\" in context\n        assert \"memory\" in context\n        assert \"identity\" in context\n        assert \"autonomic_state\" in context\n\n    def test_get_context_empty(self):\n        hook = ElmerHook()\n        context = hook.get_context(\"\")\n        assert context[\"tier\"] >= 1\n\n    def test_stats(",
+        "new_text": "    def test_stats("
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "fix-test-stats",
+      "description": "Fix test_stats: remove adapter_version assertion, fix tier check to ecosystem sub-key",
+      "tool": "edit_file",
+      "params": {
+        "path": "tests/test_hook.py",
+        "old_text": "        assert stats[\"module_id\"] == \"elmer\"\n        assert \"adapter_version\" in stats\n        assert \"tier\" in stats",
+        "new_text": "        assert stats[\"module_id\"] == \"elmer\"\n        assert \"tier\" in stats[\"ecosystem\"]"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-tests",
+      "description": "Run full test_hook.py — all tests must pass",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m pytest tests/test_hook.py -v 2>&1 | tail -20"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "not_contains", "value": "FAILED"},
+          {"operator": "not_contains", "value": "ERROR"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "commit",
+      "description": "Commit the test rewrites",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git add tests/test_hook.py && git commit -m 'test(elmer): rewrite 4 stale test_hook.py tests against current OpenClawAdapter API (#195)'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "195"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "Confirm: test_on_message passes with module_results nesting, test_get_context and test_get_context_empty deleted, test_stats passes without adapter_version. All remaining tests green."
+    }
+  ]
+}
