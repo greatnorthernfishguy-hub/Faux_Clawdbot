@@ -1872,13 +1872,7 @@ class EmbeddingEngine:
 
         if uncached:
             texts = [c.text for _, c in uncached]
-            try:
-                vectors = self._encode_batch(texts)
-            except Exception as exc:
-                self._logger.warning(
-                    "Batch embed failed (%s), falling back to per-chunk hash", exc,
-                )
-                vectors = [self._hash_embed(t) for t in texts]
+            vectors = self._encode_batch(texts)
             for (idx, chunk), vec in zip(uncached, vectors):
                 # Normalize
                 norm = np.linalg.norm(vec)
@@ -1910,37 +1904,10 @@ class EmbeddingEngine:
         return vec
 
     def _encode_batch(self, texts: List[str]) -> List[np.ndarray]:
-        """Encode a batch of texts into vectors.
-
-        If the model is loaded but encoding fails at runtime (e.g. CUDA
-        out-of-memory, driver error), falls back to hash embeddings for this
-        batch rather than crashing the entire pipeline.
-        """
         if self._model_available and self._ng_embed is not None:
-            try:
-                return self._ng_embed.embed_batch(texts)
-            except Exception as exc:
-                self._logger.warning(
-                    "ng_embed encode failed (%s). Falling back to hash embeddings "
-                    "for this batch of %d texts.",
-                    exc, len(texts),
-                )
-        return [self._hash_embed(t) for t in texts]
-
-    def _hash_embed(self, text: str) -> np.ndarray:
-        """Deterministic hash-based embedding fallback.
-
-        Produces consistent vectors from text content using SHA-256 seeding.
-        Useful for testing without model dependencies.
-        """
-        h = hashlib.sha256(text.encode("utf-8")).digest()
-        seed = int.from_bytes(h[:4], "big")
-        rng = np.random.RandomState(seed)
-        vec = rng.randn(self.dimension).astype(np.float32)
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-        return vec
+            return self._ng_embed.embed_batch(texts)
+        from ng_embed import EmbeddingUnavailableError
+        raise EmbeddingUnavailableError("No embedding backend available")
 
     def _cache_key(self, text: str) -> str:
         """Create cache key from text content."""
