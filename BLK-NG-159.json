@@ -1,0 +1,530 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-NG-159",
+    "name": "Multi-tonic BrainSwitcher + cross-process body lock",
+    "agent": "qwen3-coder",
+    "scope": "Elmer, NeuroGraph, Faux_Clawdbot",
+    "acceptance_criteria": [
+      "BrainSwitcher has _tonic_engines list, register_tonic_engine(), _offer_body_to_single()",
+      "BrainSwitcher writes ~/.et_modules/elmer/proto_body_status.json on ProtoUniBrain load/shed",
+      "TonicEngine has set_lock_file(), _body_lock_context() composing threading+flock locks",
+      "neurograph_rpc.py registers CC's Tonic with BrainSwitcher after cc_ng_host.init_cc_host()",
+      "Faux_Clawdbot/tonic_engine.py re-vendored from NeuroGraph",
+      "All files pass python3 -m py_compile",
+      "Elmer, NeuroGraph, and Faux_Clawdbot all committed and pushed to GitHub"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [],
+    "outputs": []
+  },
+  "constraints": {
+    "never": [
+      "Modify any vendored file (ng_lite.py, ng_tract_bridge.py, ng_peer_bridge.py, ng_ecosystem.py, ng_autonomic.py, ng_embed.py, openclaw_adapter.py)",
+      "Modify neuro_foundation.py, openclaw_hook.py, stream_parser.py, or activation_persistence.py",
+      "Add direct calls between modules (Law 1)",
+      "Change the embedding model or dimension",
+      "Write to Syl's checkpoints (data/checkpoints/)"
+    ],
+    "anti_drift": [
+      "Do not refactor beyond the targeted BrainSwitcher multi-engine and TonicEngine lock changes",
+      "Do not add any new module imports beyond os, json, fcntl (inline), contextlib",
+      "The flock is LOCK_SH (shared read) — do not use LOCK_EX",
+      "set_tonic_engine() must remain as a backward-compat shim, not be removed"
+    ],
+    "tool_allowlist": ["shell_execute", "edit_file", "read_file"],
+    "shell_allowlist": ["rm", "echo", "curl", "cp", "touch", "python3", "git"],
+    "max_iterations": 50,
+    "timeout_seconds": 900
+  },
+  "steps": [
+    {
+      "id": "check_gh_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set",
+      "tool": "shell_execute",
+      "params": { "command": "echo \"GITHUB_TOKEN length: ${#GITHUB_TOKEN}\"" },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "GITHUB_TOKEN length: " },
+          { "operator": "not_contains", "value": "length: 0" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone directories from any previous runs",
+      "tool": "shell_execute",
+      "params": { "command": "rm -rf elmer neurograph && echo \"CLEANED\"" },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLEANED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "repo_discovery",
+      "type": "action",
+      "description": "Verify Elmer and NeuroGraph repos exist on GitHub",
+      "tool": "shell_execute",
+      "params": {
+        "command": "curl -s -o /dev/null -w \"%{http_code}\" -H \"Authorization: token ${GITHUB_TOKEN}\" https://api.github.com/repos/greatnorthernfishguy-hub/Elmer && echo \" elmer_check\" && curl -s -o /dev/null -w \"%{http_code}\" -H \"Authorization: token ${GITHUB_TOKEN}\" https://api.github.com/repos/greatnorthernfishguy-hub/NeuroGraph && echo \" neurograph_check\""
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "200 elmer_check" },
+          { "operator": "contains", "value": "200 neurograph_check" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_elmer",
+      "type": "action",
+      "description": "Clone Elmer repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/Elmer.git elmer"
+      },
+      "validation": {
+        "checks": [{ "operator": "file_exists", "value": "elmer/core/brain_switcher.py" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_neurograph",
+      "type": "action",
+      "description": "Clone NeuroGraph repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/NeuroGraph.git neurograph"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "file_exists", "value": "neurograph/tonic_engine.py" },
+          { "operator": "file_exists", "value": "neurograph/neurograph_rpc.py" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_brain_switcher_already_patched",
+      "type": "condition",
+      "description": "Skip BrainSwitcher patch if already applied",
+      "check": {
+        "operator": "file_contains",
+        "value": "elmer/core/brain_switcher.py::register_tonic_engine"
+      },
+      "if_true": [
+        {
+          "id": "brain_switcher_skip",
+          "type": "action",
+          "description": "BrainSwitcher already patched — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo \"BrainSwitcher already patched, skipping\"" },
+          "validation": { "checks": [{ "operator": "contains", "value": "skipping" }] },
+          "on_failure": "continue"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "patch_brain_switcher_changelog",
+          "type": "action",
+          "description": "Add changelog entry to brain_switcher.py",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/core/brain_switcher.py",
+            "old_text": "# ---- Changelog ----\n# [2026-03-25] Claude Code (Opus 4.6) — Initial implementation",
+            "new_text": "# ---- Changelog ----\n# [2026-04-16] Claude (Sonnet 4.6) — #159: Multi-tonic BrainSwitcher\n#   What: _tonic_engine (single) -> _tonic_engines (list). register_tonic_engine(),\n#          _offer_body_to_single(), _write_proto_body_status(), _get_lock_file_path().\n#          set_tonic_engine() kept as backward-compat shim.\n#          Writes ~/.et_modules/elmer/proto_body_status.json on ProtoUniBrain load/shed.\n#   Why:  CC's Tonic (in-process via cc_ng_host.py) can share ProtoUniBrain's\n#         transformer body. Both Tonics use the same threading._body_lock.\n#         fcntl.LOCK_SH file lock enforces read-only invariant cross-process:\n#         any future writer must hold LOCK_EX, blocking all inference.\n#         One CC, one time — architecture is the guardrail, not documentation.\n#   How:  register_tonic_engine() appends to list, offers body immediately if\n#         proto already loaded. _body_lock_context() in TonicEngine composes\n#         threading.Lock + fcntl.flock. neurograph_rpc.py registers CC's Tonic\n#         after cc_ng_host.init_cc_host().\n# [2026-03-25] Claude Code (Opus 4.6) — Initial implementation"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_brain_switcher_field",
+          "type": "action",
+          "description": "Change _tonic_engine single field to _tonic_engines list",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/core/brain_switcher.py",
+            "old_text": "        self._tonic_engine = None  # set via set_tonic_engine()",
+            "new_text": "        self._tonic_engines = []  # list of registered Tonic engines — see register_tonic_engine()"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_brain_switcher_methods",
+          "type": "action",
+          "description": "Replace single-engine Tonic methods with multi-engine versions",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/core/brain_switcher.py",
+            "old_text": "    def set_tonic_engine(self, engine):\n        \"\"\"Give BrainSwitcher a reference to the TonicEngine.\n\n        When ProtoUniBrain loads/unloads, the switcher offers/revokes\n        the shared transformer body. The Tonic hot-swaps without stopping.\n        \"\"\"\n        self._tonic_engine = engine\n        # If proto is already loaded, offer immediately\n        if self._active_brain in (\"both\", \"proto_unibrain\"):\n            self._offer_body_to_tonic()\n\n    def _offer_body_to_tonic(self):\n        \"\"\"Offer ProtoUniBrain's body to the Tonic engine.\"\"\"\n        if self._tonic_engine is None:\n            return\n        try:\n            proto = self._socket_manager.get_socket(\"elmer:proto_unibrain\")\n            if proto and getattr(proto, '_loaded', False) and getattr(proto, '_brain', None):\n                body = getattr(proto._brain, 'transformer_body', None)\n                if body is not None:\n                    self._tonic_engine.offer_shared_body(body)\n                    self._tonic_engine.set_body_lock(self._body_lock)\n        except Exception as exc:\n            logger.debug(\"Failed to offer body to Tonic: %s\", exc)\n\n    def _revoke_body_from_tonic(self):\n        \"\"\"Tell Tonic to reload its own body — ProtoUniBrain being shed.\"\"\"\n        if self._tonic_engine is None:\n            return\n        try:\n            self._tonic_engine.revoke_shared_body()\n        except Exception as exc:\n            logger.debug(\"Failed to revoke body from Tonic: %s\", exc)",
+            "new_text": "    def set_tonic_engine(self, engine) -> None:\n        \"\"\"Backward-compatible shim — calls register_tonic_engine().\"\"\"\n        self.register_tonic_engine(engine)\n\n    def register_tonic_engine(self, engine) -> None:\n        \"\"\"Register a TonicEngine to share ProtoUniBrain's transformer body.\n\n        All registered engines receive the body when ProtoUniBrain loads\n        and are revoked when it sheds. The same _body_lock (threading.Lock)\n        is passed to all engines for in-process serialization; the cross-\n        process flock lock file path is also passed via set_lock_file().\n\n        Idempotent — re-registering the same engine is a no-op.\n        \"\"\"\n        if engine in self._tonic_engines:\n            return\n        self._tonic_engines.append(engine)\n        # If proto is already loaded, offer immediately to the new engine\n        if self._active_brain in (\"both\", \"proto_unibrain\", \"proto_only\"):\n            self._offer_body_to_single(engine)\n\n    def _offer_body_to_single(self, engine) -> None:\n        \"\"\"Offer ProtoUniBrain body to one specific engine (late registration).\"\"\"\n        try:\n            proto = self._socket_manager.get_socket(\"elmer:proto_unibrain\")\n            if proto and getattr(proto, '_loaded', False) and getattr(proto, '_brain', None):\n                body = getattr(proto._brain, 'transformer_body', None)\n                if body is not None:\n                    engine.offer_shared_body(body)\n                    engine.set_body_lock(self._body_lock)\n                    lock_path = self._get_lock_file_path()\n                    if lock_path:\n                        engine.set_lock_file(lock_path)\n        except Exception as exc:\n            logger.debug(\"Failed to offer body to single engine: %s\", exc)\n\n    def _offer_body_to_tonic(self) -> None:\n        \"\"\"Offer ProtoUniBrain's body to all registered Tonic engines.\"\"\"\n        if not self._tonic_engines:\n            return\n        try:\n            proto = self._socket_manager.get_socket(\"elmer:proto_unibrain\")\n            if proto and getattr(proto, '_loaded', False) and getattr(proto, '_brain', None):\n                body = getattr(proto._brain, 'transformer_body', None)\n                if body is not None:\n                    lock_path = self._get_lock_file_path()\n                    for engine in self._tonic_engines:\n                        try:\n                            engine.offer_shared_body(body)\n                            engine.set_body_lock(self._body_lock)\n                            if lock_path:\n                                engine.set_lock_file(lock_path)\n                        except Exception as exc:\n                            logger.debug(\"Failed to offer body to engine: %s\", exc)\n        except Exception as exc:\n            logger.debug(\"Failed to offer body to Tonic engines: %s\", exc)\n\n    def _revoke_body_from_tonic(self) -> None:\n        \"\"\"Tell all Tonic engines to reload their own body — ProtoUniBrain shedding.\"\"\"\n        for engine in self._tonic_engines:\n            try:\n                engine.revoke_shared_body()\n                engine.set_lock_file(None)\n            except Exception as exc:\n                logger.debug(\"Failed to revoke body from engine: %s\", exc)\n\n    def _get_lock_file_path(self) -> str:\n        \"\"\"Return the path to the cross-process body access lock file.\"\"\"\n        return os.path.expanduser(\"~/.et_modules/elmer/proto_body.lock\")\n\n    def _write_proto_body_status(self, available: bool) -> None:\n        \"\"\"Write or remove the proto body coordination file.\n\n        Writes ~/.et_modules/elmer/proto_body_status.json when ProtoUniBrain\n        is loaded so in-process and future cross-process Tonic consumers can\n        discover the body and lock file path. Removes the file when shed.\n        \"\"\"\n        status_path = os.path.expanduser(\"~/.et_modules/elmer/proto_body_status.json\")\n        lock_path = self._get_lock_file_path()\n        try:\n            if available:\n                import json as _json\n                os.makedirs(os.path.dirname(status_path), exist_ok=True)\n                # Ensure lock file exists — flock works on any file\n                open(lock_path, 'a').close()\n                with open(status_path, 'w') as _f:\n                    _json.dump({\n                        \"available\": True,\n                        \"lock\": lock_path,\n                        \"loaded_at\": time.time(),\n                    }, _f)\n            else:\n                if os.path.exists(status_path):\n                    os.remove(status_path)\n        except Exception as exc:\n            logger.debug(\"Failed to update proto body status: %s\", exc)"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_brain_switcher_activate_status",
+          "type": "action",
+          "description": "Write coordination file after ProtoUniBrain activates in _activate_both",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/core/brain_switcher.py",
+            "old_text": "            else:\n                self._active_brain = \"none\"\n                logger.error(\"No brain sockets loaded\")\n\n            self._last_switch_time = time.time()",
+            "new_text": "            else:\n                self._active_brain = \"none\"\n                logger.error(\"No brain sockets loaded\")\n\n            # Write coordination file when proto is part of active configuration\n            if self._active_brain in (\"both\", \"proto_unibrain\", \"proto_only\"):\n                self._write_proto_body_status(True)\n\n            self._last_switch_time = time.time()"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_brain_switcher_shed_status",
+          "type": "action",
+          "description": "Remove coordination file when ProtoUniBrain is shed",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/core/brain_switcher.py",
+            "old_text": "        with self._lock:\n            self._revoke_body_from_tonic()\n            try:\n                self._socket_manager.unregister(\"elmer:proto_unibrain\")",
+            "new_text": "        with self._lock:\n            self._revoke_body_from_tonic()\n            self._write_proto_body_status(False)\n            try:\n                self._socket_manager.unregister(\"elmer:proto_unibrain\")"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_brain_switcher_restore_status",
+          "type": "action",
+          "description": "Write coordination file when ProtoUniBrain is restored in _add_proto_unibrain",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/core/brain_switcher.py",
+            "old_text": "                    logger.info(\"ProtoUniBrain restored — both brains active\")\n                    self._offer_body_to_tonic()\n                else:\n                    self._socket_manager.unregister(proto_socket.socket_id)\n                    logger.warning(\"ProtoUniBrain restore failed\")",
+            "new_text": "                    logger.info(\"ProtoUniBrain restored — both brains active\")\n                    self._offer_body_to_tonic()\n                    self._write_proto_body_status(True)\n                else:\n                    self._socket_manager.unregister(proto_socket.socket_id)\n                    logger.warning(\"ProtoUniBrain restore failed\")"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        }
+      ]
+    },
+    {
+      "id": "verify_brain_switcher",
+      "type": "action",
+      "description": "Verify brain_switcher.py has register_tonic_engine and no _tonic_engine singular field",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"register_tonic_engine\" elmer/core/brain_switcher.py"
+      },
+      "validation": {
+        "checks": [{ "operator": "not_contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_brain_switcher_old_field_gone",
+      "type": "action",
+      "description": "Verify _tonic_engine singular assignment is gone from __init__",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"self._tonic_engine = None\" elmer/core/brain_switcher.py"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_brain_switcher",
+      "type": "action",
+      "description": "Syntax check brain_switcher.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile elmer/core/brain_switcher.py && echo \"SYNTAX_OK\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_tonic_engine_already_patched",
+      "type": "condition",
+      "description": "Skip TonicEngine patch if already applied",
+      "check": {
+        "operator": "file_contains",
+        "value": "neurograph/tonic_engine.py::set_lock_file"
+      },
+      "if_true": [
+        {
+          "id": "tonic_engine_skip",
+          "type": "action",
+          "description": "TonicEngine already patched — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo \"TonicEngine already patched, skipping\"" },
+          "validation": { "checks": [{ "operator": "contains", "value": "skipping" }] },
+          "on_failure": "continue"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "patch_tonic_engine_changelog",
+          "type": "action",
+          "description": "Add changelog entry to tonic_engine.py",
+          "tool": "edit_file",
+          "params": {
+            "path": "neurograph/tonic_engine.py",
+            "old_text": "# ---- Changelog ----\n# [2026-03-24] Claude Code (Opus 4.6) — Initial implementation",
+            "new_text": "# ---- Changelog ----\n# [2026-04-16] Claude (Sonnet 4.6) — #159: Cross-process body lock + set_lock_file\n# What: Added set_lock_file(path), _body_lock_context() composite lock,\n#       _lock_file_path field. contextlib added to module imports.\n# Why:  BrainSwitcher now supports multiple registered Tonic engines.\n#       Both in-process (threading.Lock) and cross-process (fcntl.LOCK_SH)\n#       locks must be held before each forward pass. If any consumer ever\n#       attempts a write (LOCK_EX), all inference blocks — architectural\n#       enforcement, not just documentation.\n# How:  _body_lock_context() uses contextlib.ExitStack to compose both\n#       locks. set_lock_file() receives the path from BrainSwitcher.\n#       _model_inference replaces inline _lock_ctx with _body_lock_context().\n# [2026-03-24] Claude Code (Opus 4.6) — Initial implementation"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_tonic_engine_contextlib_import",
+          "type": "action",
+          "description": "Add contextlib to module-level imports in tonic_engine.py",
+          "tool": "edit_file",
+          "params": {
+            "path": "neurograph/tonic_engine.py",
+            "old_text": "from __future__ import annotations\n\nimport logging\nimport math\nimport threading\nimport time",
+            "new_text": "from __future__ import annotations\n\nimport contextlib\nimport logging\nimport math\nimport threading\nimport time"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_tonic_engine_lock_file_field",
+          "type": "action",
+          "description": "Add _lock_file_path field to TonicEngine.__init__",
+          "tool": "edit_file",
+          "params": {
+            "path": "neurograph/tonic_engine.py",
+            "old_text": "        self._body_lock = None  # shared with ProtoUniBrain — set via set_body_lock()\n\n        self._running = False",
+            "new_text": "        self._body_lock = None  # shared with ProtoUniBrain — set via set_body_lock()\n        self._lock_file_path = None  # cross-process flock path — set via set_lock_file()\n\n        self._running = False"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_tonic_engine_set_lock_file",
+          "type": "action",
+          "description": "Add set_lock_file() method and _body_lock_context() after set_body_lock()",
+          "tool": "edit_file",
+          "params": {
+            "path": "neurograph/tonic_engine.py",
+            "old_text": "    def set_body_lock(self, lock) -> None:\n        \"\"\"Accept the shared body access lock from BrainSwitcher.\"\"\"\n        self._body_lock = lock\n\n    # -----------------------------------------------------------------\n    # Latent Token Generation\n    # -----------------------------------------------------------------",
+            "new_text": "    def set_body_lock(self, lock) -> None:\n        \"\"\"Accept the shared body access lock from BrainSwitcher.\"\"\"\n        self._body_lock = lock\n\n    def set_lock_file(self, path) -> None:\n        \"\"\"Accept the cross-process flock path from BrainSwitcher.\n\n        When set, _body_lock_context() acquires fcntl.LOCK_SH on this\n        file before each forward pass — a shared read lock. Any cross-\n        process writer must acquire LOCK_EX, blocking all inference.\n        This enforces the read-only invariant for all body consumers\n        regardless of process boundary. Set to None after body revoke.\n        \"\"\"\n        self._lock_file_path = path\n\n    @contextlib.contextmanager\n    def _body_lock_context(self):\n        \"\"\"Composite body access lock: threading lock + fcntl shared read lock.\n\n        Acquires in order:\n        1. _body_lock (threading.Lock) — in-process thread serialization\n        2. fcntl.LOCK_SH on _lock_file_path — cross-process read lock\n\n        Any code modifying body weights must hold LOCK_EX on the same file,\n        which blocks here until all readers release. Architecture-enforced,\n        not documentation-enforced. ExitStack guarantees cleanup (LIFO).\n        \"\"\"\n        stack = contextlib.ExitStack()\n        with stack:\n            if self._body_lock is not None:\n                stack.enter_context(self._body_lock)\n            if self._lock_file_path is not None:\n                try:\n                    import fcntl as _fcntl\n                    _lf = stack.enter_context(open(self._lock_file_path, 'r'))\n                    _fcntl.flock(_lf.fileno(), _fcntl.LOCK_SH)\n                    stack.callback(_fcntl.flock, _lf.fileno(), _fcntl.LOCK_UN)\n                except Exception as _exc:\n                    logger.debug(\"flock unavailable — cross-process lock skipped: %s\", _exc)\n            yield\n\n    # -----------------------------------------------------------------\n    # Latent Token Generation\n    # -----------------------------------------------------------------"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_tonic_engine_model_inference_lock",
+          "type": "action",
+          "description": "Replace inline _lock_ctx in _model_inference with _body_lock_context()",
+          "tool": "edit_file",
+          "params": {
+            "path": "neurograph/tonic_engine.py",
+            "old_text": "        import contextlib\n        _lock_ctx = self._body_lock if self._body_lock is not None else contextlib.nullcontext()\n        with _lock_ctx:\n            with torch.no_grad():\n                output = self._model(graph_features)",
+            "new_text": "        with self._body_lock_context():\n            with torch.no_grad():\n                output = self._model(graph_features)"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        }
+      ]
+    },
+    {
+      "id": "verify_tonic_engine_set_lock_file",
+      "type": "action",
+      "description": "Verify set_lock_file and _body_lock_context are present",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"set_lock_file\" neurograph/tonic_engine.py"
+      },
+      "validation": {
+        "checks": [{ "operator": "not_contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_tonic_engine_inline_lock_gone",
+      "type": "action",
+      "description": "Verify inline _lock_ctx assignment is gone from _model_inference",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"_lock_ctx = self._body_lock\" neurograph/tonic_engine.py"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_tonic_engine",
+      "type": "action",
+      "description": "Syntax check tonic_engine.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile neurograph/tonic_engine.py && echo \"SYNTAX_OK\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_neurograph_rpc_already_patched",
+      "type": "condition",
+      "description": "Skip neurograph_rpc.py patch if already applied",
+      "check": {
+        "operator": "file_contains",
+        "value": "neurograph/neurograph_rpc.py::register_tonic_engine"
+      },
+      "if_true": [
+        {
+          "id": "neurograph_rpc_skip",
+          "type": "action",
+          "description": "neurograph_rpc.py already patched — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo \"neurograph_rpc already patched, skipping\"" },
+          "validation": { "checks": [{ "operator": "contains", "value": "skipping" }] },
+          "on_failure": "continue"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "patch_neurograph_rpc",
+          "type": "action",
+          "description": "Register CC's Tonic with BrainSwitcher after cc_ng_host.init_cc_host()",
+          "tool": "edit_file",
+          "params": {
+            "path": "neurograph/neurograph_rpc.py",
+            "old_text": "        cc_ng_host.init_cc_host()\n    except Exception as exc:\n        logger.warning(\"CC NG host init failed (Syl unaffected): %s\", exc)",
+            "new_text": "        cc_ng_host.init_cc_host()\n        # Register CC's Tonic with BrainSwitcher for ProtoUniBrain body sharing (#159).\n        # cc_ng_host is in-process — no IPC needed. BrainSwitcher passes _body_lock\n        # (threading) + flock file path to CC's TonicEngine via register_tonic_engine().\n        try:\n            _cc_state = getattr(cc_ng_host, '_STATE', None)\n            _cc_ng = getattr(_cc_state, 'cc_ng', None) if _cc_state else None\n            _cc_tt = getattr(_cc_ng, '_tonic_thread', None) if _cc_ng else None\n            _cc_engine = getattr(_cc_tt, '_latent_engine', None) if _cc_tt else None\n            if _cc_engine is not None:\n                for _mod in (getattr(_memory, '_modules', {}) or {}).values():\n                    _switcher = getattr(_mod, '_brain_switcher', None)\n                    if _switcher is not None:\n                        _switcher.register_tonic_engine(_cc_engine)\n                        logger.info(\"CC Tonic registered with BrainSwitcher for body sharing\")\n                        break\n        except Exception as _bse:\n            logger.debug(\"CC Tonic BrainSwitcher registration failed (non-fatal): %s\", _bse)\n    except Exception as exc:\n        logger.warning(\"CC NG host init failed (Syl unaffected): %s\", exc)"
+          },
+          "validation": { "checks": [{ "operator": "result_is_not_error" }] },
+          "on_failure": "abort"
+        }
+      ]
+    },
+    {
+      "id": "verify_neurograph_rpc",
+      "type": "action",
+      "description": "Verify register_tonic_engine call is present in neurograph_rpc.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"register_tonic_engine\" neurograph/neurograph_rpc.py"
+      },
+      "validation": {
+        "checks": [{ "operator": "not_contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_neurograph_rpc",
+      "type": "action",
+      "description": "Syntax check neurograph_rpc.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile neurograph/neurograph_rpc.py && echo \"SYNTAX_OK\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_elmer",
+      "type": "action",
+      "description": "Commit and push Elmer changes",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C elmer add core/brain_switcher.py && git -C elmer -c user.email=\"codemine@et-systems.ai\" -c user.name=\"Codemine\" commit -m \"#159: multi-tonic BrainSwitcher + cross-process body lock\" && git -C elmer push && echo \"ELMER_PUSHED\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "ELMER_PUSHED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_neurograph",
+      "type": "action",
+      "description": "Commit and push NeuroGraph changes",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C neurograph add tonic_engine.py neurograph_rpc.py && git -C neurograph -c user.email=\"codemine@et-systems.ai\" -c user.name=\"Codemine\" commit -m \"#159: set_lock_file + _body_lock_context in TonicEngine; CC Tonic registered with BrainSwitcher\" && git -C neurograph push && echo \"NEUROGRAPH_PUSHED\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "NEUROGRAPH_PUSHED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_faux_clawdbot_already_vendored",
+      "type": "condition",
+      "description": "Skip Faux_Clawdbot vendor if tonic_engine.py already has set_lock_file",
+      "check": {
+        "operator": "file_contains",
+        "value": "tonic_engine.py::set_lock_file"
+      },
+      "if_true": [
+        {
+          "id": "vendor_skip",
+          "type": "action",
+          "description": "Faux_Clawdbot tonic_engine.py already up to date — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo \"tonic_engine.py already vendored, skipping\"" },
+          "validation": { "checks": [{ "operator": "contains", "value": "skipping" }] },
+          "on_failure": "continue"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "vendor_tonic_engine",
+          "type": "action",
+          "description": "Re-vendor tonic_engine.py from NeuroGraph clone to Faux_Clawdbot workspace",
+          "tool": "shell_execute",
+          "params": {
+            "command": "cp neurograph/tonic_engine.py tonic_engine.py && echo \"VENDORED\""
+          },
+          "validation": {
+            "checks": [
+              { "operator": "contains", "value": "VENDORED" },
+              { "operator": "file_contains", "value": "tonic_engine.py::set_lock_file" }
+            ]
+          },
+          "on_failure": "abort"
+        },
+        {
+          "id": "syntax_vendored_tonic_engine",
+          "type": "action",
+          "description": "Syntax check vendored tonic_engine.py",
+          "tool": "shell_execute",
+          "params": {
+            "command": "python3 -m py_compile tonic_engine.py && echo \"SYNTAX_OK\""
+          },
+          "validation": {
+            "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+          },
+          "on_failure": "abort"
+        },
+        {
+          "id": "commit_faux_clawdbot",
+          "type": "action",
+          "description": "Commit and push Faux_Clawdbot vendored tonic_engine.py",
+          "tool": "shell_execute",
+          "params": {
+            "command": "git add tonic_engine.py && git -c user.email=\"codemine@et-systems.ai\" -c user.name=\"Codemine\" commit -m \"#159: re-vendor tonic_engine.py from NeuroGraph (set_lock_file + _body_lock_context)\" && git push && echo \"FAUX_PUSHED\""
+          },
+          "validation": {
+            "checks": [{ "operator": "contains", "value": "FAUX_PUSHED" }]
+          },
+          "on_failure": "abort"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,2749 @@
+"""
+NeuroGraph Foundation — Phase 4: Universal Ingestor System
+
+Five-stage pipeline for consuming arbitrary data sources and transforming them
+into fully integrated knowledge within the NeuroGraph Foundation.
+
+Pipeline stages (PRD Addendum §2):
+    1. Extract  — Convert raw input to structured text
+    2. Chunk    — Segment into semantically meaningful units
+    3. Embed    — Vector representations via ng_embed (ONNX Runtime,
+                  Snowflake/snowflake-arctic-embed-m-v1.5, 768-dim)
+    4. Register — Insert into Vector DB, create SNN nodes with novelty dampening
+    5. Associate — Create synapses/hyperedges via similarity and structure
+
+Reference: NeuroGraph Foundation PRD Addendum v1.1-1.2 (Universal Ingestor).
+
+Grok Review Changelog (v0.7.1):
+    Accepted: Added outer try/except in embed() as defense-in-depth around
+        _encode_batch() — if something unexpected bypasses the inner catch,
+        the batch falls back to per-chunk hash embeddings rather than
+        propagating up to the caller.
+    Rejected: 'PDF extraction loses images/tables' — PyPDF2 is a text
+        extraction library by design. Image/table extraction would require
+        pdfplumber or similar, which is a feature request (not a bug).
+        Will consider for a future phase if demand warrants.
+    Rejected: 'No graceful degrade if model load fails' — _try_load_model()
+        already catches ImportError AND broad Exception, sets _model_available
+        = False, and falls back to hash. _encode_batch() additionally wraps
+        runtime model errors. Both paths were implemented since Phase 4.
+    Rejected: 'Cache uses SHA256 on vectors — why?' — Cache key is SHA256 of
+        the TEXT, not the vector (_cache_key hashes text.encode("utf-8")).
+        Text is the correct key: same text always maps to the same embedding
+        within a model session. Using text directly as key would consume more
+        memory for large chunks.
+    Rejected: 'Chunker OOM for >10k tokens' — Semantic chunker already splits
+        oversized paragraphs by sentence boundaries (lines 619-634).
+        Hierarchical chunker calls _split_large_section() for oversized
+        headings. Fixed-size chunker uses a sliding window. All paths are
+        bounded by max_chunk_tokens.
+
+# ---- Changelog ----
+# [2026-09-03] DudeMan CC (Fable 5.1) — Correct stale embedder references (docs only)
+#   What: Comment/docstring-only corrections. No behavior change, no logic touched.
+#         (a) Module docstring stage 3 said "via sentence-transformers" — that backend
+#             was removed 2026-03-19; now names ng_embed / arctic-embed-m-v1.5 / 768-dim.
+#         (b) Two comments called BAAI/bge-base-en-v1.5 "384-dim". It is 768-dim; the
+#             384-dim model was all-MiniLM-L6-v2. Corrected both, and attributed the
+#             384-dim deposit incident to MiniLM where it belongs.
+#         (c) EmbeddingEngine class docstring still described sentence-transformers and
+#             documented `device` as live device control. ng_embed is CPU/ONNX and
+#             ignores it; marked vestigial and explained why _resolve_device() remains.
+#         (d) Trailing note claimed "fastembed (ONNX Runtime) is now the sole embedding
+#             backend" three lines after stating fastembed was removed. Now names ng_embed.
+#         (e) Documented that `model_name` is a reporting label, not a model selector.
+#   Why:  Found while sizing punchlist #82 (multimodal perceptual embedding), which needs
+#         the substrate's true node width. The comments disagreed with each other and with
+#         the code, so the 768-dim contract could not be trusted from reading this file —
+#         it had to be cross-checked against ng_embed.py. ng_lite.py:105-108 records a real
+#         past incident from exactly this confusion (a 384-dim default depositing
+#         wrong-dimension vectors), which is why the wrong dimension in a comment matters.
+#   How:  Text edits only. NOT changed: the live `model_name` default at EmbeddingEngine
+#         .__init__ and the three ingest-profile configs still read "BAAI/bge-base-en-v1.5".
+#         Those are live values, not comments — changing them is a separate decision and is
+#         tracked as punchlist #405. `_try_load_ng_embed()` overwrites model_name on
+#         success, so the stale default surfaces only on the hash-fallback path.
+# [2026-06-05] CC (Opus 4.8 subagent) — #295: index_in_recall gate on NodeRegistrar.register
+#   What: Added index_in_recall: bool = True parameter to NodeRegistrar.register(). When False,
+#         the substrate node (graph.create_node) is still created but self.vector_db.insert() is
+#         skipped. Callers that deposit machine telemetry to the substrate can pass
+#         index_in_recall=False to keep the Hebbian topology signal without polluting Syl's
+#         recall store (vectors.msgpack).
+#   Why:  PRD #295 Decision 1 — telemetry/peer-tract signals must not enter the recall store
+#         that Syl searches for episodic memory. Substrate-as-protocol means the graph node
+#         stays; only the vector-DB insertion is gated.
+#   How:  Minimal one-parameter addition + `if index_in_recall:` guard around the existing
+#         self.vector_db.insert(...) block. No other logic touched.
+# [2026-04-13] Claude (Sonnet 4.6) — Migrate embedding backend from fastembed to ng_embed
+#   What: Replaced _try_load_fastembed() with _try_load_ng_embed(). EmbeddingEngine
+#         now uses ng_embed.NGEmbed singleton (ONNX Runtime, Snowflake arctic-embed-m-v1.5,
+#         768-dim) instead of fastembed (BAAI/bge-base-en-v1.5, 768-dim, not installed).
+#   Why:  fastembed is not installed on the laptop CC instance; ng_embed.py is the
+#         ecosystem-wide ONNX embedding engine built specifically so no external
+#         embedding service (Ollama, HF Inference) is needed. Also unifies the
+#         embedding system — one ONNX backend, one model, everywhere. fastembed was
+#         always an intermediate solution after sentence-transformers was removed.
+#   How:  _try_load_fastembed() → _try_load_ng_embed() using NGEmbed.get_instance().
+#         Model lazy-loads on first embed() call (singleton, thread-safe).
+#         _encode_batch() updated to call self._ng_embed.embed_batch(texts).
+#         self.dimension set to 768 explicitly (ng_embed always produces 768-dim).
+# [2026-03-25] Claude Code (Opus 4.6) — Code def weight from config (SVG Phase 3)
+#   What: Hardcoded 0.4 dampening multiplier for code def→usage synapses now
+#         reads from config as code_def_weight (default 0.4).
+#   Why:  Static Value Graduation — the substrate's concern, not a developer's guess.
+#   How:  AssociationEngine.__init__ reads from self.config.get("code_def_weight", 0.4).
+# [2026-03-19] Claude Code (Opus 4.6) — Remove sentence-transformers from embedding pipeline
+# What: Removed _try_load_sentence_transformers() fallback and runtime torch
+#   encode fallback. Embedding pipeline is now fastembed → hash only.
+# Why: sentence-transformers broke (2026-03-16), degrading all modules to hash
+#   fallbacks. When it was partially restored with all-MiniLM-L6-v2, it deposited
+#   384-dim vectors into the 768-dim substrate. Removing the torch fallback
+#   eliminates the risk of dimension mismatches from a broken library loading
+#   a wrong model. Also removed stale all-MiniLM-L6-v2 entry from fe_model_map.
+#   Punchlist #45.
+# How: Load chain: fastembed → log warning + hash fallback. Runtime encode:
+#   fastembed → hash fallback. No torch path remains.
+# -------------------
+# [2026-03-10] Claude (Opus) — Harden _resolve_device() for "auto" mode
+# What: _resolve_device() now explicitly checks torch.cuda.is_available()
+#        for "auto" device instead of returning None for ST auto-detect.
+# Why: CUDA-built torch (e.g. 2.10.0+cu128) on systems without a GPU
+#       causes sentence-transformers auto-detect to hit meta-tensor errors
+#       ("Cannot copy out of meta tensor; no data!"), silently falling back
+#       to hash-based embeddings and degrading Syl's semantic quality.
+# How: Moved the torch.cuda.is_available() check above both "auto" and
+#       "cuda" branches. "auto" now resolves to "cuda" or "cpu" explicitly.
+#       Return type is always a concrete device string, never None.
+# -------------------
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import logging
+import math
+import os
+import re
+import tempfile
+import textwrap
+import uuid
+import zipfile
+from pathlib import Path
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+import numpy as np
+
+from neuro_foundation import (
+    ActivationMode,
+    Graph,
+    Node,
+    Synapse,
+    SynapseType,
+)
+
+
+# ---------------------------------------------------------------------------
+# Enumerations
+# ---------------------------------------------------------------------------
+
+class SourceType(Enum):
+    """Supported input source types."""
+    URL = auto()
+    PDF = auto()
+    CODE = auto()
+    MARKDOWN = auto()
+    TEXT = auto()
+    ZIP = auto()
+    JSON = auto()
+    CSV = auto()
+    HTML = auto()
+    MEDIA = auto()
+
+
+class ChunkStrategy(Enum):
+    """Chunking strategies (PRD Addendum §2, Stage 2)."""
+    SEMANTIC = auto()
+    CODE_AWARE = auto()
+    HIERARCHICAL = auto()
+    FIXED_SIZE = auto()
+
+
+class DampeningCurve(Enum):
+    """Novelty dampening fade curves (PRD Addendum §4.3)."""
+    LINEAR = auto()
+    EXPONENTIAL = auto()
+    LOGARITHMIC = auto()
+
+
+# ---------------------------------------------------------------------------
+# Data Structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExtractedContent:
+    """Output of Stage 1: Extract (PRD Addendum §2).
+
+    Attributes:
+        raw_text: Full extracted text.
+        metadata: Source metadata (filename, url, language, etc.).
+        structure: Structural hints (headings, functions, sections).
+        source_type: Detected or specified source type.
+    """
+    raw_text: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    structure: List[Dict[str, Any]] = field(default_factory=list)
+    source_type: SourceType = SourceType.TEXT
+
+
+@dataclass
+class Chunk:
+    """A semantically meaningful segment of content (PRD Addendum §2, Stage 2).
+
+    Attributes:
+        chunk_id: Unique identifier.
+        text: The chunk text content.
+        metadata: Chunk metadata (position, type, parent, language, etc.).
+        parent_chunk_id: ID of parent chunk for hierarchical relationships.
+        position: Ordinal position in the original document.
+        token_count: Approximate token count.
+    """
+    chunk_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    text: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    parent_chunk_id: Optional[str] = None
+    position: int = 0
+    token_count: int = 0
+
+
+@dataclass
+class EmbeddedChunk:
+    """A chunk with its vector representation (PRD Addendum §2, Stage 3).
+
+    Attributes:
+        chunk: The original Chunk.
+        vector: Normalized embedding vector.
+        model_name: Name of the embedding model used.
+    """
+    chunk: Chunk = field(default_factory=Chunk)
+    vector: np.ndarray = field(default_factory=lambda: np.array([]))
+    model_name: str = ""
+
+
+@dataclass
+class IngestionResult:
+    """Result of a full ingestion pipeline run (PRD Addendum §4.1).
+
+    Attributes:
+        source: Original source identifier.
+        source_type: Detected source type.
+        chunks_created: Number of chunks produced.
+        nodes_created: List of created node IDs.
+        synapses_created: List of created synapse IDs.
+        hyperedges_created: List of created hyperedge IDs.
+        embeddings_cached: Number of embeddings served from cache.
+        metadata: Additional result metadata.
+    """
+    source: str = ""
+    source_type: SourceType = SourceType.TEXT
+    chunks_created: int = 0
+    nodes_created: List[str] = field(default_factory=list)
+    synapses_created: List[str] = field(default_factory=list)
+    hyperedges_created: List[str] = field(default_factory=list)
+    embeddings_cached: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Simple Vector DB (PRD §7)
+# ---------------------------------------------------------------------------
+
+class SimpleVectorDB:
+    """In-memory vector database using numpy (PRD §7).
+
+    Provides cosine-similarity search over normalized vectors with
+    content and metadata storage.
+
+    Example::
+
+        db = SimpleVectorDB()
+        db.insert("doc1", np.array([0.1, 0.9, 0.2]), "hello world", {"source": "test"})
+        results = db.search(np.array([0.1, 0.9, 0.2]), k=5, threshold=0.5)
+    """
+
+    def __init__(self) -> None:
+        self.embeddings: Dict[str, np.ndarray] = {}
+        self.metadata: Dict[str, Dict[str, Any]] = {}
+        self.content: Dict[str, str] = {}
+
+    def insert(
+        self,
+        id: str,
+        embedding: np.ndarray,
+        content: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Store embedding with content and metadata.
+
+        The embedding is L2-normalized before storage for fast cosine
+        similarity via dot product.
+        """
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+        self.embeddings[id] = embedding
+        self.content[id] = content
+        self.metadata[id] = metadata or {}
+
+    def search(
+        self,
+        query_vector: np.ndarray,
+        k: int = 5,
+        threshold: float = 0.7,
+    ) -> List[Tuple[str, float]]:
+        """Cosine similarity search, return top-k above threshold.
+
+        Returns:
+            List of (id, similarity) tuples sorted by descending similarity.
+        """
+        if not self.embeddings:
+            return []
+
+        norm = np.linalg.norm(query_vector)
+        if norm > 0:
+            query_vector = query_vector / norm
+
+        results: List[Tuple[str, float]] = []
+        for id, emb in self.embeddings.items():
+            sim = float(np.dot(query_vector, emb))
+            if sim >= threshold:
+                results.append((id, sim))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:k]
+
+    def get(self, id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve embedding, content, and metadata by ID."""
+        if id not in self.embeddings:
+            return None
+        return {
+            "id": id,
+            "embedding": self.embeddings[id],
+            "content": self.content[id],
+            "metadata": self.metadata[id],
+        }
+
+    def delete(self, id: str) -> bool:
+        """Remove an entry by ID. Returns True if found and deleted."""
+        if id not in self.embeddings:
+            return False
+        del self.embeddings[id]
+        del self.content[id]
+        del self.metadata[id]
+        return True
+
+    def count(self) -> int:
+        """Return number of stored entries."""
+        return len(self.embeddings)
+
+    def all_ids(self) -> List[str]:
+        """Return all stored IDs."""
+        return list(self.embeddings.keys())
+
+    # ---- Changelog ----
+    # [2026-09-11] Claude (Sonnet 5) — #423: capture/write split
+    # What: save() factored into capture_state([detach]) -> dict and
+    #       write_state(path, captured) -> int. save() delegates; bytes unchanged.
+    # Why:  Coherent multi-component checkpoints need the in-RAM capture of graph,
+    #       vectors and activations to finish at one coordination boundary, with disk
+    #       I/O after live mutation resumes. Fused save() made that inexpressible.
+    # How:  Entry construction moved into capture_state (iterating a list() snapshot of
+    #       the id set so a concurrent add/delete cannot mutate it mid-traversal);
+    #       format dispatch + file write moved into write_state.
+    # -------------------
+    def capture_state(self, detach: bool = True) -> Dict[str, Any]:
+        """Capture vector DB state in RAM — performs NO disk I/O.
+
+        Embeddings are copied out as float32 ``bytes`` (already detached from the live
+        arrays). ``content`` values are immutable strings. ``metadata`` dicts are the
+        LIVE objects unless ``detach=True``.
+
+        Args:
+            detach: When True, deep-copy each entry's metadata so no live mutable dict
+                remains aliased into the capture. Cheap relative to the embeddings, but
+                enabled by default; callers can explicitly request the legacy aliased form.
+
+        Returns:
+            Mapping suitable for :meth:`write_state`.
+        """
+        import numpy as np
+
+        entries: Dict[str, Any] = {}
+        # list() the ids first: a concurrent add/delete during the traversal would
+        # otherwise raise "dictionary changed size during iteration" mid-capture.
+        for id in list(self.embeddings.keys()):
+            # Disappearing entries indicate an uncoordinated mutation. Refuse
+            # the capture rather than silently publishing a smaller vector set.
+            emb = self.embeddings[id]
+            meta = self.metadata.get(id, {})
+            entries[id] = {
+                "embedding": emb.astype(np.float32).tobytes(),
+                "content": self.content.get(id, ""),
+                "metadata": copy.deepcopy(meta) if detach else meta,
+            }
+        # Key order matches the pre-split save() exactly, so the packed bytes are
+        # byte-identical for an unchanged DB.
+        return {
+            "version": "1.0.0",
+            "count": len(entries),
+            "entries": entries,
+        }
+
+    def write_state(self, path: str, captured: Dict[str, Any]) -> int:
+        """Write a previously captured vector DB mapping to disk.
+
+        Pure I/O: reads no live state, so it may run after mutation resumes.
+
+        Args:
+            path: File path. Extension determines format (.msgpack or .json).
+            captured: Mapping returned by :meth:`capture_state`.
+
+        Returns:
+            Number of entries written.
+        """
+        if path.endswith(".msgpack"):
+            try:
+                import msgpack
+            except ImportError:
+                raise ImportError("msgpack required for .msgpack serialization")
+            with open(path, "wb") as f:
+                msgpack.pack(captured, f, use_bin_type=True)
+        else:
+            import json
+            import base64
+            # JSON fallback: base64-encode the binary embeddings
+            json_data = {
+                "version": captured["version"],
+                "count": captured["count"],
+                "entries": {},
+            }
+            for id, entry in captured["entries"].items():
+                json_data["entries"][id] = {
+                    "embedding_b64": base64.b64encode(entry["embedding"]).decode("ascii"),
+                    "content": entry["content"],
+                    "metadata": entry["metadata"],
+                }
+            with open(path, "w") as f:
+                json.dump(json_data, f, indent=2, default=str)
+
+        return int(captured["count"])
+
+    def save(self, path: str) -> int:
+        """Persist vector DB state to disk (msgpack or JSON).
+
+        Capture-then-write, fused: equivalent to
+        ``write_state(path, capture_state())``. Use the two primitives directly when
+        the capture must complete at a coordination boundary and the write must happen
+        after live mutation resumes (#423).
+
+        Stores embeddings as raw bytes (float32), plus content and metadata
+        dicts. Format mirrors Graph checkpoint conventions.
+
+        Args:
+            path: File path. Extension determines format (.msgpack or .json).
+
+        Returns:
+            Number of entries saved.
+        """
+        return self.write_state(path, self.capture_state())
+
+    def load(self, path: str) -> int:
+        """Restore vector DB state from disk.
+
+        Clears existing state before loading. Embeddings are restored
+        as L2-normalized float32 numpy arrays.
+
+        Args:
+            path: File path to load from (.msgpack or .json).
+
+        Returns:
+            Number of entries loaded.
+        """
+        import numpy as np
+
+        if path.endswith(".msgpack"):
+            try:
+                import msgpack
+            except ImportError:
+                raise ImportError("msgpack required for .msgpack deserialization")
+            with open(path, "rb") as f:
+                data = msgpack.unpack(f, raw=False)
+        else:
+            import json
+            import base64
+            with open(path, "r") as f:
+                json_data = json.load(f)
+            # Convert base64 back to bytes
+            data = {
+                "version": json_data.get("version", "1.0.0"),
+                "count": json_data.get("count", 0),
+                "entries": {},
+            }
+            for id, entry in json_data.get("entries", {}).items():
+                data["entries"][id] = {
+                    "embedding": base64.b64decode(entry["embedding_b64"]),
+                    "content": entry.get("content", ""),
+                    "metadata": entry.get("metadata", {}),
+                }
+
+        # Clear existing state
+        self.embeddings.clear()
+        self.content.clear()
+        self.metadata.clear()
+
+        # Restore entries
+        for id, entry in data.get("entries", {}).items():
+            embedding_bytes = entry["embedding"]
+            vec = np.frombuffer(embedding_bytes, dtype=np.float32).copy()
+            # Vectors should already be normalized from when they were saved,
+            # but re-normalize to be safe
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            self.embeddings[id] = vec
+            self.content[id] = entry.get("content", "")
+            self.metadata[id] = entry.get("metadata", {})
+
+        return len(self.embeddings)
+
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: Extractors (PRD Addendum §2, Stage 1)
+# ---------------------------------------------------------------------------
+
+class BaseExtractor:
+    """Base class for content extractors."""
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        raise NotImplementedError
+
+
+class TextExtractor(BaseExtractor):
+    """Plain text fallback extractor."""
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        # source is the raw text itself
+        return ExtractedContent(
+            raw_text=source,
+            metadata={"source_type": "text", "length": len(source)},
+            structure=[],
+            source_type=SourceType.TEXT,
+        )
+
+
+class MarkdownExtractor(BaseExtractor):
+    """Markdown extractor preserving heading hierarchy."""
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        structure = []
+        current_section = None
+        lines = source.split("\n")
+
+        for i, line in enumerate(lines):
+            heading_match = re.match(r'^(#{1,6})\s+(.+)$', line)
+            if heading_match:
+                level = len(heading_match.group(1))
+                title = heading_match.group(2).strip()
+                current_section = {
+                    "type": "heading",
+                    "level": level,
+                    "title": title,
+                    "line": i,
+                }
+                structure.append(current_section)
+
+        return ExtractedContent(
+            raw_text=source,
+            metadata={
+                "source_type": "markdown",
+                "heading_count": len(structure),
+                "length": len(source),
+            },
+            structure=structure,
+            source_type=SourceType.MARKDOWN,
+        )
+
+
+class CodeExtractor(BaseExtractor):
+    """Language-aware code extractor using regex-based parsing.
+
+    Extracts function/class definitions for Python, JavaScript, and
+    generic code files. Uses AST-like structural detection without
+    requiring language-specific parsers.
+    """
+
+    # Patterns for common languages
+    _PYTHON_PATTERNS = [
+        (r'^(class\s+\w+[^:]*:)', "class"),
+        (r'^(def\s+\w+\s*\([^)]*\)[^:]*:)', "function"),
+        (r'^(async\s+def\s+\w+\s*\([^)]*\)[^:]*:)', "async_function"),
+    ]
+    _JS_PATTERNS = [
+        (r'^(class\s+\w+)', "class"),
+        (r'^((?:export\s+)?(?:async\s+)?function\s+\w+)', "function"),
+        (r'^(const\s+\w+\s*=\s*(?:async\s+)?\([^)]*\)\s*=>)', "arrow_function"),
+    ]
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        language = kwargs.get("language", "python")
+        structure = self._parse_structure(source, language)
+
+        return ExtractedContent(
+            raw_text=source,
+            metadata={
+                "source_type": "code",
+                "language": language,
+                "length": len(source),
+                "definitions": len(structure),
+            },
+            structure=structure,
+            source_type=SourceType.CODE,
+        )
+
+    def _parse_structure(
+        self, source: str, language: str
+    ) -> List[Dict[str, Any]]:
+        patterns = self._PYTHON_PATTERNS
+        if language in ("javascript", "js", "typescript", "ts"):
+            patterns = self._JS_PATTERNS
+
+        structure = []
+        lines = source.split("\n")
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            for pattern, def_type in patterns:
+                if re.match(pattern, stripped):
+                    # Extract name
+                    name_match = re.search(
+                        r'(?:class|def|function|const|async\s+def)\s+(\w+)',
+                        stripped,
+                    )
+                    name = name_match.group(1) if name_match else "unknown"
+                    indent = len(line) - len(line.lstrip())
+                    structure.append({
+                        "type": def_type,
+                        "name": name,
+                        "line": i,
+                        "indent": indent,
+                    })
+                    break
+
+        return structure
+
+
+class URLExtractor(BaseExtractor):
+    """URL/web content extractor.
+
+    Uses beautifulsoup4 for HTML parsing when available,
+    falls back to regex-based tag stripping.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        # Try to fetch URL content
+        try:
+            import urllib.request
+            with urllib.request.urlopen(source, timeout=10) as resp:
+                html = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            # If fetching fails, treat source as HTML content
+            html = source
+
+        text = self._html_to_text(html)
+        title = self._extract_title(html)
+
+        return ExtractedContent(
+            raw_text=text,
+            metadata={
+                "source_type": "url",
+                "url": source,
+                "title": title,
+                "length": len(text),
+            },
+            structure=[],
+            source_type=SourceType.URL,
+        )
+
+    def _html_to_text(self, html: str) -> str:
+        """Convert HTML to plain text."""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+            return soup.get_text(separator="\n", strip=True)
+        except ImportError:
+            # Fallback: regex-based tag stripping
+            text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+            text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+
+    def _extract_title(self, html: str) -> str:
+        """Extract page title from HTML."""
+        match = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+
+class PDFExtractor(BaseExtractor):
+    """PDF text extractor with layout awareness.
+
+    Uses PyPDF2 when available, returns informative error otherwise.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        text, page_structure = self._extract_pdf(source)
+
+        return ExtractedContent(
+            raw_text=text,
+            metadata={
+                "source_type": "pdf",
+                "path": source,
+                "pages": len(page_structure),
+                "length": len(text),
+            },
+            structure=page_structure,
+            source_type=SourceType.PDF,
+        )
+
+    def _extract_pdf(self, path: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """Extract text from PDF file."""
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(path)
+            pages = []
+            all_text = []
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                all_text.append(page_text)
+                pages.append({
+                    "type": "page",
+                    "page_number": i + 1,
+                    "length": len(page_text),
+                })
+            return "\n\n".join(all_text), pages
+        except ImportError:
+            raise ImportError(
+                "PyPDF2 is required for PDF extraction. "
+                "Install with: pip install PyPDF2>=3.0.0"
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to extract PDF '{path}': {e}")
+
+
+class ZipExtractor(BaseExtractor):
+    """ZIP archive extractor that recursively processes contained files.
+
+    Extracts a ZIP archive to a temporary directory, then routes each
+    supported file inside through the appropriate extractor.  Unsupported
+    files (binaries, images, etc.) are silently skipped.
+
+    The combined output is a single ``ExtractedContent`` whose ``raw_text``
+    is the concatenation of all extracted file texts, separated by markers.
+    ``structure`` entries record each file's path, type, and offset within
+    the combined text.
+
+    Uses only stdlib ``zipfile`` — no extra dependencies.
+    """
+
+    # Extensions we know how to handle (mirrors SUPPORTED_EXTENSIONS + code types)
+    _SUPPORTED_EXTS = {
+        ".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".rb", ".php",
+        ".md", ".markdown", ".txt", ".html", ".htm", ".pdf",
+        ".json", ".csv", ".docx",
+        # Images — extract EXIF/metadata
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+        ".heic", ".heif",
+    }
+    _IMAGE_EXTS = {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif",
+        ".heic", ".heif",
+    }
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        """Extract contents of a ZIP file.
+
+        Args:
+            source: Path to a ``.zip`` file on disk.
+
+        Returns:
+            ExtractedContent with combined text from all supported files.
+        """
+        if not zipfile.is_zipfile(source):
+            raise ValueError(f"Not a valid ZIP archive: {source}")
+
+        combined_texts: List[str] = []
+        structure: List[Dict[str, Any]] = []
+        file_count = 0
+        skipped_count = 0
+
+        with tempfile.TemporaryDirectory(prefix="neurograph_zip_") as tmp_dir:
+            with zipfile.ZipFile(source, "r") as zf:
+                # Security: skip entries with absolute paths or parent traversal
+                safe_members = [
+                    m for m in zf.namelist()
+                    if not os.path.isabs(m) and ".." not in m.split("/")
+                ]
+                zf.extractall(tmp_dir, members=safe_members)
+
+            # Walk the extracted tree and process each supported file
+            for root, _dirs, files in os.walk(tmp_dir):
+                for fname in sorted(files):
+                    fpath = os.path.join(root, fname)
+                    ext = os.path.splitext(fname)[1].lower()
+                    rel_path = os.path.relpath(fpath, tmp_dir)
+
+                    if ext not in self._SUPPORTED_EXTS:
+                        skipped_count += 1
+                        continue
+
+                    try:
+                        file_text = self._extract_single(fpath, ext)
+                    except Exception:
+                        skipped_count += 1
+                        continue
+
+                    if not file_text.strip():
+                        continue
+
+                    marker = f"--- {rel_path} ---"
+                    structure.append({
+                        "type": "zip_member",
+                        "path": rel_path,
+                        "extension": ext,
+                        "offset": sum(len(t) for t in combined_texts),
+                        "length": len(file_text),
+                    })
+                    combined_texts.append(f"{marker}\n{file_text}")
+                    file_count += 1
+
+        raw_text = "\n\n".join(combined_texts)
+
+        return ExtractedContent(
+            raw_text=raw_text,
+            metadata={
+                "source_type": "zip",
+                "path": source,
+                "files_extracted": file_count,
+                "files_skipped": skipped_count,
+                "length": len(raw_text),
+            },
+            structure=structure,
+            source_type=SourceType.ZIP,
+        )
+
+    def _extract_single(self, fpath: str, ext: str) -> str:
+        """Extract text from a single file within the archive."""
+        if ext == ".pdf":
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(fpath)
+                return "\n\n".join(
+                    page.extract_text() or "" for page in reader.pages
+                )
+            except Exception:
+                return ""
+        if ext in self._IMAGE_EXTS:
+            return self._extract_image_metadata(fpath)
+        # All other supported types: read as text
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+
+    @staticmethod
+    def _extract_image_metadata(fpath: str) -> str:
+        """Extract EXIF and basic metadata from an image file."""
+        parts: List[str] = []
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS, GPSTAGS
+            img = Image.open(fpath)
+            parts.append(f"Image: {os.path.basename(fpath)}")
+            parts.append(f"Format: {img.format}, Size: {img.size[0]}x{img.size[1]}, Mode: {img.mode}")
+            exif_data = img.getexif()
+            if exif_data:
+                for tag_id, value in exif_data.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    # Skip binary/bytes fields
+                    if isinstance(value, bytes):
+                        continue
+                    parts.append(f"{tag}: {value}")
+            img.close()
+        except Exception:
+            parts.append(f"Image: {os.path.basename(fpath)} (metadata extraction failed)")
+        return "\n".join(parts)
+class JSONExtractor(BaseExtractor):
+    """JSON file extractor that preserves structure as navigation hints.
+
+    Extracts all text content from JSON data (string values, keys) and
+    reports the top-level structure (keys, nesting depth) so that the
+    chunker can produce meaningful segments.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        try:
+            data = json.loads(source)
+        except (json.JSONDecodeError, ValueError):
+            # Not valid JSON — fall back to plain text
+            return TextExtractor().extract(source, **kwargs)
+
+        text_parts: List[str] = []
+        structure: List[Dict[str, Any]] = []
+        self._walk(data, text_parts, structure, depth=0, path="$")
+
+        raw_text = "\n".join(text_parts) if text_parts else source
+
+        return ExtractedContent(
+            raw_text=raw_text,
+            metadata={
+                "source_type": "json",
+                "length": len(source),
+                "top_level_type": type(data).__name__,
+                "top_level_keys": (
+                    list(data.keys())[:50] if isinstance(data, dict) else None
+                ),
+                "structure_entries": len(structure),
+            },
+            structure=structure,
+            source_type=SourceType.JSON,
+        )
+
+    def _walk(
+        self,
+        obj: Any,
+        text_parts: List[str],
+        structure: List[Dict[str, Any]],
+        depth: int,
+        path: str,
+    ) -> None:
+        if isinstance(obj, dict):
+            structure.append({
+                "type": "object",
+                "path": path,
+                "depth": depth,
+                "keys": list(obj.keys())[:50],
+            })
+            for key, value in obj.items():
+                text_parts.append(f"{key}: {self._value_repr(value)}")
+                if isinstance(value, (dict, list)):
+                    self._walk(value, text_parts, structure, depth + 1, f"{path}.{key}")
+        elif isinstance(obj, list):
+            structure.append({
+                "type": "array",
+                "path": path,
+                "depth": depth,
+                "length": len(obj),
+            })
+            for i, item in enumerate(obj[:200]):  # cap iteration
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, (dict, list)):
+                    self._walk(item, text_parts, structure, depth + 1, f"{path}[{i}]")
+                else:
+                    text_parts.append(str(item))
+        elif isinstance(obj, str):
+            text_parts.append(obj)
+        else:
+            text_parts.append(str(obj))
+
+    @staticmethod
+    def _value_repr(value: Any) -> str:
+        if isinstance(value, str):
+            return value[:500] if len(value) > 500 else value
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, list):
+            return f"[...{len(value)} items]"
+        if isinstance(value, dict):
+            return f"{{...{len(value)} keys}}"
+        if value is None:
+            return "null"
+        return str(value)[:200]
+
+
+class CSVExtractor(BaseExtractor):
+    """CSV file extractor that preserves column structure.
+
+    Reads the CSV using the ``csv`` stdlib module and produces text
+    that represents each row as key-value pairs (using header column
+    names when available).  Structure entries record column names and
+    row count.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        import csv
+        import io
+
+        reader = csv.reader(io.StringIO(source))
+        rows = list(reader)
+
+        if not rows:
+            return ExtractedContent(
+                raw_text=source,
+                metadata={"source_type": "csv", "length": len(source), "rows": 0},
+                structure=[],
+                source_type=SourceType.CSV,
+            )
+
+        # Heuristic: first row is a header if it doesn't look numeric
+        header = rows[0]
+        has_header = not all(self._looks_numeric(cell) for cell in header if cell.strip())
+
+        if has_header:
+            data_rows = rows[1:]
+            columns = header
+        else:
+            data_rows = rows
+            columns = [f"col_{i}" for i in range(len(header))]
+
+        text_parts: List[str] = []
+        # Emit column names as a header line
+        text_parts.append("Columns: " + ", ".join(columns))
+
+        for row_idx, row in enumerate(data_rows[:5000]):  # cap to prevent OOM
+            pairs = []
+            for col_idx, cell in enumerate(row):
+                col_name = columns[col_idx] if col_idx < len(columns) else f"col_{col_idx}"
+                if cell.strip():
+                    pairs.append(f"{col_name}={cell.strip()}")
+            if pairs:
+                text_parts.append(f"Row {row_idx + 1}: " + "; ".join(pairs))
+
+        structure = [{
+            "type": "table",
+            "columns": columns,
+            "row_count": len(data_rows),
+            "has_header": has_header,
+        }]
+
+        return ExtractedContent(
+            raw_text="\n".join(text_parts),
+            metadata={
+                "source_type": "csv",
+                "length": len(source),
+                "columns": columns,
+                "rows": len(data_rows),
+                "has_header": has_header,
+            },
+            structure=structure,
+            source_type=SourceType.CSV,
+        )
+
+    @staticmethod
+    def _looks_numeric(value: str) -> bool:
+        try:
+            float(value.strip())
+            return True
+        except (ValueError, AttributeError):
+            return False
+
+
+class HTMLExtractor(BaseExtractor):
+    """Local HTML file extractor.
+
+    Unlike ``URLExtractor`` which fetches from a URL first, this extractor
+    operates directly on HTML content (typically read from a local file).
+    Uses BeautifulSoup when available, falls back to regex tag stripping.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        text = self._html_to_text(source)
+        title = self._extract_title(source)
+        headings = self._extract_headings(source)
+
+        return ExtractedContent(
+            raw_text=text,
+            metadata={
+                "source_type": "html",
+                "title": title,
+                "length": len(text),
+                "heading_count": len(headings),
+            },
+            structure=headings,
+            source_type=SourceType.HTML,
+        )
+
+    def _html_to_text(self, html: str) -> str:
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            for tag in soup(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            return soup.get_text(separator="\n", strip=True)
+        except ImportError:
+            text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+            text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+
+    def _extract_title(self, html: str) -> str:
+        match = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+    def _extract_headings(self, html: str) -> List[Dict[str, Any]]:
+        headings: List[Dict[str, Any]] = []
+        for match in re.finditer(r'<(h[1-6])[^>]*>(.*?)</\1>', html, re.DOTALL | re.IGNORECASE):
+            level = int(match.group(1)[1])
+            title = re.sub(r'<[^>]+>', '', match.group(2)).strip()
+            if title:
+                headings.append({
+                    "type": "heading",
+                    "level": level,
+                    "title": title,
+                })
+        return headings
+
+
+# Media format registry
+MEDIA_EXTENSIONS: Dict[str, str] = {
+    # Video
+    ".mp4": "video", ".avi": "video", ".mkv": "video", ".mov": "video",
+    ".webm": "video", ".wmv": "video", ".flv": "video", ".m4v": "video",
+    ".mpg": "video", ".mpeg": "video", ".3gp": "video", ".ogv": "video",
+    # Audio
+    ".mp3": "audio", ".wav": "audio", ".flac": "audio", ".ogg": "audio",
+    ".m4a": "audio", ".aac": "audio", ".wma": "audio", ".opus": "audio",
+    ".aiff": "audio", ".alac": "audio",
+}
+
+
+class MediaReferenceExtractor(BaseExtractor):
+    """Creates reference nodes for audio/video media files.
+
+    Does NOT transcode or transcribe content.  Instead, creates a
+    metadata-rich reference node that can be linked to other knowledge
+    in the graph through synaptic associations.
+
+    Supports both local file paths and URLs.
+    """
+
+    def extract(self, source: str, **kwargs: Any) -> ExtractedContent:
+        is_url = bool(re.match(r'^https?://', source, re.IGNORECASE))
+        is_file = os.path.isfile(source)
+
+        if is_file:
+            return self._extract_file(source)
+        elif is_url:
+            return self._extract_url(source)
+        else:
+            # Treat as a path reference even if file doesn't exist yet
+            return self._extract_reference(source)
+
+    def _extract_file(self, path: str) -> ExtractedContent:
+        p = Path(path)
+        ext = p.suffix.lower()
+        media_type = MEDIA_EXTENSIONS.get(ext, "unknown")
+
+        try:
+            stat = p.stat()
+            size_bytes = stat.st_size
+            size_human = self._human_size(size_bytes)
+        except OSError:
+            size_bytes = 0
+            size_human = "unknown"
+
+        # Build a textual description for the node
+        description = (
+            f"[Media Reference: {p.name}]\n"
+            f"Type: {media_type}/{ext.lstrip('.')}\n"
+            f"Filename: {p.name}\n"
+            f"Size: {size_human}\n"
+            f"Path: {path}\n"
+        )
+
+        return ExtractedContent(
+            raw_text=description,
+            metadata={
+                "source_type": "media",
+                "media_type": media_type,
+                "format": ext.lstrip("."),
+                "filename": p.name,
+                "file_path": str(p.resolve()),
+                "size_bytes": size_bytes,
+                "size_human": size_human,
+                "length": len(description),
+                "is_reference": True,
+            },
+            structure=[{
+                "type": "media_reference",
+                "media_type": media_type,
+                "format": ext.lstrip("."),
+                "filename": p.name,
+            }],
+            source_type=SourceType.MEDIA,
+        )
+
+    def _extract_url(self, url: str) -> ExtractedContent:
+        # Parse the URL to extract filename and extension
+        from urllib.parse import urlparse, unquote
+        parsed = urlparse(url)
+        path_part = unquote(parsed.path)
+        filename = Path(path_part).name if path_part else url
+        ext = Path(path_part).suffix.lower() if path_part else ""
+        media_type = MEDIA_EXTENSIONS.get(ext, "media")
+
+        description = (
+            f"[Media Reference: {filename}]\n"
+            f"Type: {media_type}/{ext.lstrip('.') if ext else 'unknown'}\n"
+            f"Filename: {filename}\n"
+            f"URL: {url}\n"
+        )
+
+        return ExtractedContent(
+            raw_text=description,
+            metadata={
+                "source_type": "media",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+                "filename": filename,
+                "url": url,
+                "length": len(description),
+                "is_reference": True,
+            },
+            structure=[{
+                "type": "media_reference",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+                "url": url,
+            }],
+            source_type=SourceType.MEDIA,
+        )
+
+    def _extract_reference(self, source: str) -> ExtractedContent:
+        """Handle a path that doesn't exist on disk (future/external reference)."""
+        p = Path(source)
+        ext = p.suffix.lower()
+        media_type = MEDIA_EXTENSIONS.get(ext, "unknown")
+
+        description = (
+            f"[Media Reference: {p.name}]\n"
+            f"Type: {media_type}/{ext.lstrip('.') if ext else 'unknown'}\n"
+            f"Filename: {p.name}\n"
+            f"Reference: {source}\n"
+        )
+
+        return ExtractedContent(
+            raw_text=description,
+            metadata={
+                "source_type": "media",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+                "filename": p.name,
+                "reference": source,
+                "length": len(description),
+                "is_reference": True,
+            },
+            structure=[{
+                "type": "media_reference",
+                "media_type": media_type,
+                "format": ext.lstrip(".") if ext else "unknown",
+            }],
+            source_type=SourceType.MEDIA,
+        )
+
+    @staticmethod
+    def _human_size(size_bytes: int) -> str:
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if abs(size_bytes) < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0  # type: ignore[assignment]
+        return f"{size_bytes:.1f} PB"
+
+
+class ExtractorRouter:
+    """Routes source input to the appropriate extractor (PRD Addendum §2).
+
+    Auto-detects source type based on content analysis or uses explicit
+    source_type parameter.
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+        self.config = config or {}
+        self._extractors: Dict[SourceType, BaseExtractor] = {
+            SourceType.TEXT: TextExtractor(),
+            SourceType.MARKDOWN: MarkdownExtractor(),
+            SourceType.CODE: CodeExtractor(),
+            SourceType.URL: URLExtractor(),
+            SourceType.PDF: PDFExtractor(),
+            SourceType.ZIP: ZipExtractor(),
+            SourceType.JSON: JSONExtractor(),
+            SourceType.CSV: CSVExtractor(),
+            SourceType.HTML: HTMLExtractor(),
+            SourceType.MEDIA: MediaReferenceExtractor(),
+        }
+
+    def detect_source_type(self, source: str) -> SourceType:
+        """Auto-detect source type from content analysis."""
+        # URL detection — check for media URLs first
+        if re.match(r'^https?://', source, re.IGNORECASE):
+            from urllib.parse import urlparse, unquote
+            parsed = urlparse(source)
+            url_ext = Path(unquote(parsed.path)).suffix.lower()
+            if url_ext in MEDIA_EXTENSIONS:
+                return SourceType.MEDIA
+            return SourceType.URL
+
+        # File path detection
+        if os.path.isfile(source):
+            ext = os.path.splitext(source)[1].lower()
+            if ext == ".zip":
+                return SourceType.ZIP
+            if ext == ".pdf":
+                return SourceType.PDF
+            if ext in (".py", ".js", ".ts", ".java", ".go", ".rs", ".c",
+                        ".cpp", ".rb", ".php"):
+                return SourceType.CODE
+            if ext in (".md", ".markdown"):
+                return SourceType.MARKDOWN
+            if ext == ".json":
+                return SourceType.JSON
+            if ext == ".csv":
+                return SourceType.CSV
+            if ext in (".html", ".htm"):
+                return SourceType.HTML
+            if ext in MEDIA_EXTENSIONS:
+                return SourceType.MEDIA
+
+        # Content-based detection
+        if source.strip().startswith(("# ", "## ", "### ")):
+            return SourceType.MARKDOWN
+        if re.search(r'^(def |class |import |from |function )', source, re.MULTILINE):
+            return SourceType.CODE
+        if source.strip().startswith(("<html", "<!DOCTYPE", "<head")):
+            return SourceType.HTML
+        # JSON detection: starts with { or [
+        stripped = source.strip()
+        if stripped and stripped[0] in ('{', '['):
+            try:
+                json.loads(stripped[:1000] if len(stripped) > 1000 else stripped)
+                return SourceType.JSON
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return SourceType.TEXT
+
+    def extract(
+        self,
+        source: str,
+        source_type: Optional[SourceType] = None,
+        **kwargs: Any,
+    ) -> ExtractedContent:
+        """Extract content from source using appropriate extractor."""
+        if source_type is None:
+            source_type = self.detect_source_type(source)
+
+        extractor = self._extractors.get(source_type, self._extractors[SourceType.TEXT])
+
+        # For file paths, read the file first.
+        # Exceptions: PDF (handles its own reading), URL (fetches from network),
+        # ZIP (handles its own archive reading), MEDIA (handles its own file/URL detection).
+        if (os.path.isfile(source)
+                and source_type not in (SourceType.PDF, SourceType.URL, SourceType.ZIP, SourceType.MEDIA)):
+            with open(source, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            result = extractor.extract(content, **kwargs)
+            result.metadata["file_path"] = source
+        else:
+            result = extractor.extract(source, **kwargs)
+
+        result.source_type = source_type
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: Adaptive Chunker (PRD Addendum §2, Stage 2)
+# ---------------------------------------------------------------------------
+
+class AdaptiveChunker:
+    """Segments content into semantically meaningful chunks.
+
+    Supports four strategies:
+        - SEMANTIC: Respects paragraph/sentence boundaries (200-500 tokens)
+        - CODE_AWARE: Chunks by function/class/module boundaries
+        - HIERARCHICAL: Follows document heading hierarchy
+        - FIXED_SIZE: Fixed-size with overlap (fallback)
+
+    Token estimation uses word count / 0.75 as a heuristic.
+
+    Args:
+        config: Chunking configuration with keys:
+            - strategy: ChunkStrategy (default SEMANTIC)
+            - min_chunk_tokens: Minimum chunk size (default 200)
+            - max_chunk_tokens: Maximum chunk size (default 500)
+            - overlap_tokens: Overlap between fixed-size chunks (default 64)
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+        self.config = config or {}
+        self.strategy = self.config.get("strategy", ChunkStrategy.SEMANTIC)
+        self.min_tokens = self.config.get("min_chunk_tokens", 200)
+        self.max_tokens = self.config.get("max_chunk_tokens", 500)
+        self.overlap_tokens = self.config.get("overlap_tokens", 64)
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """Estimate token count from text (words / 0.75 heuristic)."""
+        words = len(text.split())
+        return max(1, int(words / 0.75))
+
+    def chunk(
+        self,
+        content: ExtractedContent,
+        strategy: Optional[ChunkStrategy] = None,
+    ) -> List[Chunk]:
+        """Chunk extracted content using the specified or configured strategy."""
+        strat = strategy or self.strategy
+        if strat == ChunkStrategy.CODE_AWARE:
+            return self._chunk_code(content)
+        elif strat == ChunkStrategy.HIERARCHICAL:
+            return self._chunk_hierarchical(content)
+        elif strat == ChunkStrategy.FIXED_SIZE:
+            return self._chunk_fixed(content)
+        else:
+            return self._chunk_semantic(content)
+
+    def _chunk_semantic(self, content: ExtractedContent) -> List[Chunk]:
+        """Semantic chunking: respect paragraph and sentence boundaries."""
+        text = content.raw_text.strip()
+        if not text:
+            return []
+
+        # Split by double newlines (paragraphs)
+        paragraphs = re.split(r'\n\s*\n', text)
+        chunks: List[Chunk] = []
+        current_text = ""
+        position = 0
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+
+            candidate = (current_text + "\n\n" + para).strip() if current_text else para
+            tokens = self.estimate_tokens(candidate)
+
+            if tokens > self.max_tokens and current_text:
+                # Flush current buffer
+                chunks.append(self._make_chunk(
+                    current_text, position, {"strategy": "semantic"}
+                ))
+                position += 1
+                current_text = para
+            elif tokens > self.max_tokens:
+                # Single paragraph too large — split by sentences
+                sentences = re.split(r'(?<=[.!?])\s+', para)
+                for sent in sentences:
+                    sent = sent.strip()
+                    if not sent:
+                        continue
+                    cand2 = (current_text + " " + sent).strip() if current_text else sent
+                    if self.estimate_tokens(cand2) > self.max_tokens and current_text:
+                        chunks.append(self._make_chunk(
+                            current_text, position, {"strategy": "semantic"}
+                        ))
+                        position += 1
+                        current_text = sent
+                    else:
+                        current_text = cand2
+            else:
+                current_text = candidate
+
+        if current_text.strip():
+            chunks.append(self._make_chunk(
+                current_text, position, {"strategy": "semantic"}
+            ))
+
+        return chunks
+
+    def _chunk_code(self, content: ExtractedContent) -> List[Chunk]:
+        """Code-aware chunking: split by function/class definitions."""
+        text = content.raw_text
+        structure = content.structure
+        if not structure or "line" not in structure[0]:
+            # Fallback to semantic if no structure or no line numbers
+            return self._chunk_semantic(content)
+
+        lines = text.split("\n")
+        chunks: List[Chunk] = []
+        position = 0
+
+        # Build ranges from structure entries
+        ranges: List[Tuple[int, int, Dict[str, Any]]] = []
+        for i, entry in enumerate(structure):
+            start = entry["line"]
+            end = structure[i + 1]["line"] if i + 1 < len(structure) else len(lines)
+            ranges.append((start, end, entry))
+
+        # Add preamble (before first definition)
+        if ranges and ranges[0][0] > 0:
+            preamble = "\n".join(lines[:ranges[0][0]]).strip()
+            if preamble:
+                chunks.append(self._make_chunk(
+                    preamble, position,
+                    {"strategy": "code_aware", "type": "preamble"},
+                ))
+                position += 1
+
+        for start, end, entry in ranges:
+            chunk_text = "\n".join(lines[start:end]).rstrip()
+            if chunk_text.strip():
+                meta = {
+                    "strategy": "code_aware",
+                    "type": entry.get("type", "unknown"),
+                    "name": entry.get("name", "unknown"),
+                    "language": content.metadata.get("language", "unknown"),
+                }
+                chunks.append(self._make_chunk(chunk_text, position, meta))
+                position += 1
+
+        if not chunks:
+            return self._chunk_semantic(content)
+
+        return chunks
+
+    def _chunk_hierarchical(self, content: ExtractedContent) -> List[Chunk]:
+        """Hierarchical chunking: follow heading structure."""
+        text = content.raw_text
+        structure = content.structure
+        if not structure or "line" not in structure[0]:
+            return self._chunk_semantic(content)
+
+        lines = text.split("\n")
+        chunks: List[Chunk] = []
+        position = 0
+
+        # Build section ranges from headings
+        heading_lines = [s["line"] for s in structure]
+        parent_ids: Dict[int, str] = {}  # heading level → most recent chunk_id
+
+        # Add preamble before first heading
+        if heading_lines and heading_lines[0] > 0:
+            preamble = "\n".join(lines[:heading_lines[0]]).strip()
+            if preamble:
+                c = self._make_chunk(
+                    preamble, position,
+                    {"strategy": "hierarchical", "type": "preamble"},
+                )
+                chunks.append(c)
+                position += 1
+
+        for i, entry in enumerate(structure):
+            start = entry["line"]
+            end = structure[i + 1]["line"] if i + 1 < len(structure) else len(lines)
+            section_text = "\n".join(lines[start:end]).strip()
+
+            if not section_text:
+                continue
+
+            level = entry.get("level", 1)
+            parent_id = None
+            # Find parent: nearest heading with lower level
+            for lv in range(level - 1, 0, -1):
+                if lv in parent_ids:
+                    parent_id = parent_ids[lv]
+                    break
+
+            meta = {
+                "strategy": "hierarchical",
+                "type": "section",
+                "heading": entry.get("title", ""),
+                "level": level,
+            }
+
+            # If section is too large, sub-chunk it
+            if self.estimate_tokens(section_text) > self.max_tokens:
+                sub_chunks = self._split_large_section(
+                    section_text, position, meta, parent_id
+                )
+                for sc in sub_chunks:
+                    chunks.append(sc)
+                    position += 1
+                if sub_chunks:
+                    parent_ids[level] = sub_chunks[0].chunk_id
+            else:
+                c = self._make_chunk(section_text, position, meta)
+                c.parent_chunk_id = parent_id
+                chunks.append(c)
+                parent_ids[level] = c.chunk_id
+                position += 1
+
+        if not chunks:
+            return self._chunk_semantic(content)
+
+        return chunks
+
+    def _chunk_fixed(self, content: ExtractedContent) -> List[Chunk]:
+        """Fixed-size chunking with overlap (512 tokens, 64 overlap)."""
+        text = content.raw_text.strip()
+        if not text:
+            return []
+
+        words = text.split()
+        # Convert token counts to word counts (approximate)
+        chunk_words = int(self.max_tokens * 0.75)
+        overlap_words = int(self.overlap_tokens * 0.75)
+
+        chunks: List[Chunk] = []
+        position = 0
+        start = 0
+
+        while start < len(words):
+            end = min(start + chunk_words, len(words))
+            chunk_text = " ".join(words[start:end])
+            chunks.append(self._make_chunk(
+                chunk_text, position, {"strategy": "fixed_size"}
+            ))
+            position += 1
+            start += chunk_words - overlap_words
+            if start >= len(words):
+                break
+
+        return chunks
+
+    def _split_large_section(
+        self,
+        text: str,
+        start_position: int,
+        base_meta: Dict[str, Any],
+        parent_id: Optional[str],
+    ) -> List[Chunk]:
+        """Split an oversized section into sub-chunks by paragraphs."""
+        paragraphs = re.split(r'\n\s*\n', text)
+        chunks: List[Chunk] = []
+        current = ""
+        pos = start_position
+        first_id: Optional[str] = None
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            candidate = (current + "\n\n" + para).strip() if current else para
+            if self.estimate_tokens(candidate) > self.max_tokens and current:
+                c = self._make_chunk(current, pos, {**base_meta, "sub_chunk": True})
+                c.parent_chunk_id = parent_id
+                chunks.append(c)
+                if first_id is None:
+                    first_id = c.chunk_id
+                pos += 1
+                current = para
+            else:
+                current = candidate
+
+        if current.strip():
+            c = self._make_chunk(current, pos, {**base_meta, "sub_chunk": True})
+            c.parent_chunk_id = parent_id
+            chunks.append(c)
+
+        return chunks
+
+    def _make_chunk(
+        self,
+        text: str,
+        position: int,
+        metadata: Dict[str, Any],
+    ) -> Chunk:
+        """Create a Chunk with estimated token count."""
+        return Chunk(
+            text=text,
+            position=position,
+            token_count=self.estimate_tokens(text),
+            metadata=metadata,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: Embedding Engine (PRD Addendum §2, Stage 3)
+# ---------------------------------------------------------------------------
+
+class EmbeddingEngine:
+    """Converts chunks into vector representations.
+
+    Uses ng_embed (NGEmbed ONNX singleton — Snowflake/snowflake-arctic-embed-m-v1.5,
+    768-dim) when available. Falls back to a deterministic hash-based embedding
+    for environments without ng_embed (testing, lightweight deployments). The
+    hash fallback is also 768-dim, so the substrate never receives a
+    wrong-dimension vector from either path.
+
+    The ``device`` config key is VESTIGIAL. It dates from the
+    sentence-transformers backend (removed 2026-03-19); ng_embed runs ONNX
+    Runtime on CPU and ignores it. ``_resolve_device()`` is retained only
+    because other call sites still read ``_active_device``, which
+    ``_try_load_ng_embed()`` sets to "cpu/onnx".
+
+    Caching avoids recomputation of identical text.
+
+    Args:
+        config: Embedding configuration with keys:
+            - model_name: Reporting label only, NOT a model selector (default
+              "BAAI/bge-base-en-v1.5"). Nothing loads by this value —
+              ``_try_load_ng_embed()`` overwrites it with the real model id on
+              success, so the default is visible only when ng_embed failed and
+              the engine is actually running the hash fallback. Stale default
+              tracked as punchlist #405.
+            - dimension: Embedding dimension (default 768; forced to 768 on load)
+            - cache_size: Max cache entries (default 10000)
+            - use_model: Force model loading (default True, falls back if unavailable)
+            - device: Vestigial, ignored by the ng_embed backend (default "auto")
+    """
+
+    _logger = logging.getLogger("neurograph.embedding")
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+        self.config = config or {}
+        self.model_name = self.config.get("model_name", "BAAI/bge-base-en-v1.5")
+        self.dimension = self.config.get("dimension", 768)
+        self.cache_size = self.config.get("cache_size", 10000)
+        self.use_model = self.config.get("use_model", True)
+        self.device = self.config.get("device", "auto")
+        self._model = None
+        self._ng_embed = None  # NGEmbed singleton instance
+        self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._model_available = False
+        self._active_device: Optional[str] = None  # actual device after resolution
+        self._fallback_reason: Optional[str] = None
+
+        if self.use_model:
+            self._try_load_model()
+
+    def _resolve_device(self) -> str:
+        """Resolve the requested device to an actual device string.
+
+        Handles graceful degradation: if 'cuda' is requested but unavailable,
+        falls back to 'cpu' with a warning rather than hard-failing.
+
+        When device is 'auto', performs explicit CUDA availability detection
+        rather than delegating to sentence-transformers' auto-detect, which
+        can hit meta-tensor errors on CUDA-built torch without a GPU.
+
+        Returns:
+            Device string for SentenceTransformer — always explicit, never None.
+        """
+        try:
+            import torch
+            cuda_available = torch.cuda.is_available()
+        except ImportError:
+            cuda_available = False
+
+        if self.device == "auto":
+            if cuda_available:
+                self._logger.info("Auto-detected CUDA device.")
+                return "cuda"
+            return "cpu"
+        if self.device == "cuda":
+            if cuda_available:
+                return "cuda"
+            self._logger.warning(
+                "CUDA requested but not available (torch.cuda.is_available()=False). "
+                "Falling back to CPU."
+            )
+            return "cpu"
+        return self.device  # "cpu" or any explicit device string
+
+    @staticmethod
+    def _suppress_provider_warnings() -> None:
+        """Suppress API key warnings from HuggingFace inference providers.
+
+        sentence-transformers v5+ and transformers v5+ added inference provider
+        backends (OpenAI, Google, Voyage, etc.) that emit noisy warnings when
+        their API keys aren't set — even when we only use local torch models.
+        NeuroGraph uses ONLY local torch-based embeddings; TID controls all
+        external API calls.  No provider API keys are needed or used.
+
+        This sets environment variables and warning filters BEFORE import to
+        prevent those warnings from reaching the user.
+
+        Grok review v0.7.1: Broadened filters to catch all warning categories
+        (not just UserWarning) and plural "KEYS" patterns that were escaping.
+        """
+        import os
+        import warnings
+
+        # Tell transformers to only log errors, not provider-related warnings
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+        # Disable HuggingFace Hub telemetry and inference provider checks
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_EXPERIMENTAL_WARNING", "1")
+        # Prevent tokenizers parallelism warning
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+        # Filter out API key warnings that slip through from provider packages
+        # (openai, google-generativeai, voyageai) if they happen to be installed.
+        # Use no category restriction to catch UserWarning, FutureWarning,
+        # DeprecationWarning, RuntimeWarning — providers use various types.
+        # Use re.IGNORECASE-equivalent patterns for case-insensitive matching.
+        for pattern in [
+            r"(?i).*api.?keys?.*",
+            r"(?i).*set up your.*api.*",
+            r"(?i).*openai.*",
+            r"(?i).*google.*api.*",
+            r"(?i).*voyage.*",
+            r"(?i).*inference.?provider.*",
+            r"(?i).*provider.*backend.*",
+            r"(?i).*api.?key.*not.?set.*",
+        ]:
+            warnings.filterwarnings("ignore", message=pattern)
+
+    def _try_load_model(self) -> None:
+        """Load the embedding backend (ng_embed ONNX singleton).
+
+        ng_embed.py is the ecosystem-wide embedding engine — ONNX Runtime,
+        Snowflake arctic-embed-m-v1.5, 768-dim, no external service required.
+        Logs the outcome so silent failures are visible to operators.
+        """
+        if self._try_load_ng_embed():
+            return
+        self._model_available = False
+        self._fallback_reason = "ng_embed not available or failed to load"
+        self._logger.warning(
+            "No embedding backend available. "
+            "Using deterministic hash-based fallback embeddings."
+        )
+
+    def _try_load_ng_embed(self) -> bool:
+        """Load via ng_embed (NGEmbed ONNX singleton, 768-dim). Returns True on success."""
+        try:
+            from ng_embed import NGEmbed
+            self._ng_embed = NGEmbed.get_instance()
+            # Dimension is always 768 — ng_embed produces 768-dim in both ONNX and hash-fallback paths
+            self.dimension = 768
+            self.model_name = "Snowflake/snowflake-arctic-embed-m-v1.5"
+            self._model_available = True
+            self._active_device = "cpu/onnx"
+            self._logger.info(
+                "Loaded embedding engine via ng_embed (ONNX Runtime, dim=768)"
+            )
+            return True
+        except ImportError:
+            return False
+        except Exception as exc:
+            self._logger.info("ng_embed failed: %s", exc)
+            return False
+
+    # _try_load_fastembed removed 2026-04-13 — replaced by _try_load_ng_embed.
+    # fastembed (BAAI/bge-base-en-v1.5, 768-dim) was not installed on all instances
+    # and was always an intermediate solution after sentence-transformers was removed
+    # 2026-03-19. ng_embed.py is the canonical ecosystem embedding engine.
+    # _try_load_sentence_transformers removed 2026-03-19.
+    # sentence-transformers (torch) broke and degraded ecosystem to hash
+    # fallbacks, then deposited 384-dim vectors (all-MiniLM-L6-v2) into the
+    # 768-dim substrate.
+    # ng_embed (ONNX Runtime, Snowflake arctic-embed-m-v1.5) is now the sole
+    # embedding backend — see _try_load_ng_embed above.
+
+    def embed(self, chunks: List[Chunk]) -> List[EmbeddedChunk]:
+        """Embed a list of chunks, using cache where possible.
+
+        Returns list of EmbeddedChunk with normalized vectors.
+        Individual chunk failures fall back to hash embedding rather than
+        failing the entire batch (Grok review: batch resilience).
+        """
+        results: List[EmbeddedChunk] = []
+        uncached: List[Tuple[int, Chunk]] = []
+
+        # Check cache first
+        for i, chunk in enumerate(chunks):
+            cache_key = self._cache_key(chunk.text)
+            if cache_key in self._cache:
+                vec = self._cache[cache_key]
+                # Move to end for LRU
+                self._cache.move_to_end(cache_key)
+                results.append(EmbeddedChunk(
+                    chunk=chunk,
+                    vector=vec,
+                    model_name=self.model_name if self._model_available else "hash_fallback",
+                ))
+            else:
+                results.append(None)  # type: ignore[arg-type]
+                uncached.append((i, chunk))
+
+        if uncached:
+            texts = [c.text for _, c in uncached]
+            vectors = self._encode_batch(texts)
+            for (idx, chunk), vec in zip(uncached, vectors):
+                # Normalize
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec = vec / norm
+                cache_key = self._cache_key(chunk.text)
+                self._update_cache(cache_key, vec)
+                results[idx] = EmbeddedChunk(
+                    chunk=chunk,
+                    vector=vec,
+                    model_name=self.model_name if self._model_available else "hash_fallback",
+                )
+
+        return results
+
+    def embed_text(self, text: str) -> np.ndarray:
+        """Embed a single text string. Returns normalized vector."""
+        cache_key = self._cache_key(text)
+        if cache_key in self._cache:
+            self._cache.move_to_end(cache_key)
+            return self._cache[cache_key]
+
+        vectors = self._encode_batch([text])
+        vec = vectors[0]
+        norm = np.linalg.norm(vec)
+        if norm > 0:
+            vec = vec / norm
+        self._update_cache(cache_key, vec)
+        return vec
+
+    def _encode_batch(self, texts: List[str]) -> List[np.ndarray]:
+        if self._model_available and self._ng_embed is not None:
+            return self._ng_embed.embed_batch(texts)
+        from ng_embed import EmbeddingUnavailableError
+        raise EmbeddingUnavailableError("No embedding backend available")
+
+    def _cache_key(self, text: str) -> str:
+        """Create cache key from text content."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _update_cache(self, key: str, vec: np.ndarray) -> None:
+        """Add to cache with LRU eviction."""
+        self._cache[key] = vec
+        if len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
+
+    @property
+    def cache_hits(self) -> int:
+        """Number of entries currently in cache."""
+        return len(self._cache)
+
+    @property
+    def status(self) -> Dict[str, Any]:
+        """Return embedding engine status for diagnostics.
+
+        Useful for OpenClaw and CLI tools to verify the embedding backend
+        without running a full ingestion cycle.
+        """
+        return {
+            "model_available": self._model_available,
+            "model_name": self.model_name if self._model_available else "hash_fallback",
+            "device_requested": self.device,
+            "device_active": self._active_device,
+            "dimension": self.dimension,
+            "cache_entries": len(self._cache),
+            "fallback_reason": self._fallback_reason,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: Node Registrar with Novelty Dampening (PRD Addendum §4.2-4.3)
+# ---------------------------------------------------------------------------
+
+class NodeRegistrar:
+    """Registers chunks as SNN nodes with novelty dampening.
+
+    New nodes start at reduced synaptic weight and higher threshold
+    (novelty dampening) to prevent destabilizing existing STDP-learned
+    pathways.  During a probation period, dampening fades and the node
+    graduates to full integration.
+
+    Args:
+        graph: The NeuroGraph to register nodes into.
+        vector_db: SimpleVectorDB for embedding storage.
+        config: Registration configuration with keys:
+            - novelty_dampening: Initial weight reduction factor (default 0.3)
+            - probation_period: Steps before full integration (default 10)
+            - dampening_curve: DampeningCurve (default LINEAR)
+            - initial_threshold_boost: Extra threshold for new nodes (default 0.2)
+    """
+
+    def __init__(
+        self,
+        graph: Graph,
+        vector_db: SimpleVectorDB,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.graph = graph
+        self.vector_db = vector_db
+        self.config = config or {}
+        self.novelty_dampening = self.config.get("novelty_dampening", 0.3)
+        self.probation_period = self.config.get("probation_period", 10)
+        self.dampening_curve = self.config.get(
+            "dampening_curve", DampeningCurve.LINEAR
+        )
+        self.initial_threshold_boost = self.config.get(
+            "initial_threshold_boost", 0.2
+        )
+
+    # ---- Changelog ----
+    # [2026-09-11] Codex — #423 pair document graph/vector writes with capture.
+    # What: registration, document probation and pure association share _step_lock.
+    # Why: these direct metadata/vector mutations must participate in coherent capture.
+    # How: guard only post-embedding application; extraction and embeddings stay outside.
+    # -------------------
+    def register(
+        self,
+        embedded_chunks: List[EmbeddedChunk],
+        source_metadata: Optional[Dict[str, Any]] = None,
+        index_in_recall: bool = True,
+    ) -> List[str]:
+        """Register embedded chunks as nodes in the graph and vector DB.
+
+        Args:
+            embedded_chunks: Chunks with their vector representations.
+            source_metadata: Optional metadata about the source.
+            index_in_recall: If True (default), also inserts into the vector DB
+                (Syl's recall store). Pass False for machine telemetry and
+                peer-tract signals that should become substrate nodes but must
+                NOT pollute Syl's episodic recall store (#295, Decision 1).
+
+        Returns list of created node IDs.
+        """
+        with self.graph._step_lock:
+            created_ids: List[str] = []
+            src_meta = source_metadata or {}
+
+            for ec in embedded_chunks:
+                node_id = ec.chunk.chunk_id
+
+                # Create node with novelty dampening
+                node_meta = {
+                    **ec.chunk.metadata,
+                    **src_meta,
+                    "chunk_text_preview": ec.chunk.text[:200],
+                    "token_count": ec.chunk.token_count,
+                    "position": ec.chunk.position,
+                    "creation_mode": "ingested",
+                    "probation_remaining": self.probation_period,
+                    "novelty_dampening": self.novelty_dampening,
+                    "dampening_curve": self.dampening_curve.name,
+                }
+                if ec.chunk.parent_chunk_id:
+                    node_meta["parent_chunk_id"] = ec.chunk.parent_chunk_id
+
+                node = self.graph.create_node(node_id=node_id, metadata=node_meta)
+
+                # Apply novelty dampening: higher threshold for new nodes
+                base_threshold = self.graph.config.get("default_threshold", 1.0)
+                node.threshold = base_threshold + self.initial_threshold_boost
+
+                # Reduce intrinsic excitability by dampening factor
+                # dampening=0.3 means node starts at 30% effectiveness
+                node.intrinsic_excitability = self.novelty_dampening
+
+                # Store in vector DB — ONLY for lived experience (recall store).
+                # Telemetry (index_in_recall=False) still becomes a substrate node
+                # above, but must NOT enter Syl's recall store (#295, Decision 1).
+                if index_in_recall:
+                    self.vector_db.insert(
+                        id=node_id,
+                        embedding=ec.vector,
+                        content=ec.chunk.text,
+                        metadata=node_meta,
+                    )
+
+                created_ids.append(node_id)
+
+            return created_ids
+
+    def get_dampening_factor(self, node: Node) -> float:
+        """Compute current dampening factor for a node based on probation progress.
+
+        Returns a value in [novelty_dampening, 1.0] that increases as the
+        node progresses through its probation period.
+        """
+        prob_remaining = node.metadata.get("probation_remaining", 0)
+        prob_total = node.metadata.get("probation_remaining", 0)
+
+        # If no probation tracking, node is fully integrated
+        initial_dampening = node.metadata.get("novelty_dampening", 1.0)
+        if prob_remaining <= 0:
+            return 1.0
+
+        # Total probation = probation_period from config
+        total = self.probation_period
+        if total <= 0:
+            return 1.0
+
+        elapsed = total - prob_remaining
+        progress = elapsed / total  # 0.0 to 1.0
+
+        curve_name = node.metadata.get("dampening_curve", "LINEAR")
+        curve = DampeningCurve[curve_name] if isinstance(curve_name, str) else self.dampening_curve
+
+        if curve == DampeningCurve.LINEAR:
+            factor = initial_dampening + (1.0 - initial_dampening) * progress
+        elif curve == DampeningCurve.EXPONENTIAL:
+            # Fast early growth
+            factor = initial_dampening + (1.0 - initial_dampening) * (
+                1.0 - math.exp(-3.0 * progress)
+            )
+        elif curve == DampeningCurve.LOGARITHMIC:
+            # Slow early, fast late
+            factor = initial_dampening + (1.0 - initial_dampening) * (
+                math.log1p(progress * (math.e - 1)) / 1.0
+            )
+        else:
+            factor = initial_dampening + (1.0 - initial_dampening) * progress
+
+        return min(1.0, max(initial_dampening, factor))
+
+    def update_probation(self, node_ids: Optional[List[str]] = None) -> List[str]:
+        """Advance probation for nodes, graduating those that complete it.
+
+        Call this each simulation step (or periodically) to fade dampening.
+        Returns list of node IDs that graduated this call.
+        """
+        with self.graph._step_lock:
+            graduated: List[str] = []
+            if node_ids is None:
+                # #111 -- sweep only what THIS registrar stamped. An unscoped
+                # whole-graph sweep also decrements and graduates CONVERSATIONAL
+                # nodes, with no firing gate, which silently defeats #93 on any
+                # host that routes turns through on_message. CC does exactly that
+                # (cc_ng_host.py:393 _deposit -> ng.on_message), and its per-prompt
+                # cadence beats the 60s pulse that runs the #93-gated sweep, so the
+                # ungated stamp usually won the race. Syl is unaffected either way:
+                # on_message has no callers in neurograph_rpc.py.
+                #
+                # Documents and conversation are separate probation domains by
+                # design; the callosum topology sync is the only join between them.
+                # Do not "fix" this by unifying the two pipelines.
+                #
+                # NOTE: an explicit empty list now means "sweep nothing" rather
+                # than "sweep everything" -- `node_ids or ...` treated [] as falsy.
+                # Sweeping the whole graph on an empty request was never intended.
+                ids = [
+                    nid for nid, n in self.graph.nodes.items()
+                    if (n.metadata or {}).get("creation_mode") == "ingested"
+                ]
+            else:
+                ids = node_ids
+
+            for nid in ids:
+                node = self.graph.nodes.get(nid)
+                if node is None:
+                    continue
+
+                prob = node.metadata.get("probation_remaining")
+                if prob is None or prob <= 0:
+                    continue
+
+                # Decrement probation
+                node.metadata["probation_remaining"] = prob - 1
+
+                if node.metadata["probation_remaining"] <= 0:
+                    # Graduate: restore full excitability and threshold
+                    node.intrinsic_excitability = 1.0
+                    node.threshold = self.graph.config.get("default_threshold", 1.0)
+                    node.metadata["graduated"] = True
+                    graduated.append(nid)
+                else:
+                    # Update excitability based on dampening curve
+                    factor = self.get_dampening_factor(node)
+                    node.intrinsic_excitability = factor
+
+            return graduated
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: Hypergraph Associator (PRD Addendum §2, Stage 5)
+# ---------------------------------------------------------------------------
+
+class HypergraphAssociator:
+    """Creates initial relationships via similarity and structural cues.
+
+    Three association strategies:
+        1. Similarity-based: Vector similarity → synapses (if sim > threshold)
+        2. Structural: Sequential chunks, parent-child, code def→usage
+        3. Hypergraph clustering: Group related chunks into hyperedges
+
+    Args:
+        graph: The NeuroGraph to create associations in.
+        config: Association configuration with keys:
+            - similarity_threshold: Min cosine similarity for synapse (default 0.7)
+            - similarity_weight_scale: Scale similarity to synapse weight (default 1.0)
+            - sequential_weight: Weight for sequential chunk links (default 0.3)
+            - parent_child_weight: Weight for parent-child links (default 0.5)
+            - min_cluster_size: Min nodes for hyperedge cluster (default 3)
+            - cluster_similarity_threshold: Min avg similarity for cluster (default 0.6)
+            - code_def_weight: Base synapse weight for code def→usage links (default 0.4)
+    """
+
+    def __init__(
+        self,
+        graph: Graph,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.graph = graph
+        self.config = config or {}
+        self.similarity_threshold = self.config.get("similarity_threshold", 0.7)
+        self.similarity_weight_scale = self.config.get("similarity_weight_scale", 1.0)
+        self.sequential_weight = self.config.get("sequential_weight", 0.3)
+        self.parent_child_weight = self.config.get("parent_child_weight", 0.5)
+        self.min_cluster_size = self.config.get("min_cluster_size", 3)
+        self.cluster_sim_threshold = self.config.get(
+            "cluster_similarity_threshold", 0.6
+        )
+        self.code_def_weight = self.config.get("code_def_weight", 0.4)
+
+    def associate(
+        self,
+        embedded_chunks: List[EmbeddedChunk],
+        node_ids: List[str],
+        vector_db: SimpleVectorDB,
+    ) -> Tuple[List[str], List[str]]:
+        """Create associations from embedded chunks.
+
+        Returns:
+            Tuple of (synapse_ids, hyperedge_ids) created.
+        """
+        with self.graph._step_lock:
+            synapse_ids: List[str] = []
+            hyperedge_ids: List[str] = []
+
+            # 1. Similarity-based synapses
+            sim_synapses = self._create_similarity_synapses(embedded_chunks, node_ids)
+            synapse_ids.extend(sim_synapses)
+
+            # 2. Structural synapses
+            struct_synapses = self._create_structural_synapses(embedded_chunks, node_ids)
+            synapse_ids.extend(struct_synapses)
+
+            # 3. Hypergraph clustering
+            he_ids = self._create_clusters(embedded_chunks, node_ids)
+            hyperedge_ids.extend(he_ids)
+
+            return synapse_ids, hyperedge_ids
+
+    def _create_similarity_synapses(
+        self,
+        embedded_chunks: List[EmbeddedChunk],
+        node_ids: List[str],
+    ) -> List[str]:
+        """Create synapses between chunks with high cosine similarity."""
+        created: List[str] = []
+        n = len(embedded_chunks)
+        if n < 2:
+            return created
+
+        # Compute pairwise similarities
+        for i in range(n):
+            for j in range(i + 1, n):
+                vec_i = embedded_chunks[i].vector
+                vec_j = embedded_chunks[j].vector
+                sim = float(np.dot(vec_i, vec_j))
+
+                if sim >= self.similarity_threshold:
+                    weight = sim * self.similarity_weight_scale
+                    weight = min(weight, self.graph.config.get("max_weight", 5.0))
+
+                    # Apply novelty dampening to initial weight
+                    nid_i = node_ids[i]
+                    nid_j = node_ids[j]
+                    dampening_i = self._get_node_dampening(nid_i)
+                    dampening_j = self._get_node_dampening(nid_j)
+                    dampened_weight = weight * min(dampening_i, dampening_j)
+
+                    # Bidirectional: create synapse in both directions
+                    syn1 = self.graph.create_synapse(
+                        nid_i, nid_j,
+                        weight=dampened_weight,
+                    )
+                    syn1.metadata["creation_mode"] = "similarity"
+                    syn1.metadata["similarity"] = sim
+                    created.append(syn1.synapse_id)
+
+                    syn2 = self.graph.create_synapse(
+                        nid_j, nid_i,
+                        weight=dampened_weight,
+                    )
+                    syn2.metadata["creation_mode"] = "similarity"
+                    syn2.metadata["similarity"] = sim
+                    created.append(syn2.synapse_id)
+
+        return created
+
+    def _create_structural_synapses(
+        self,
+        embedded_chunks: List[EmbeddedChunk],
+        node_ids: List[str],
+    ) -> List[str]:
+        """Create synapses from structural relationships.
+
+        - Sequential: adjacent chunks in original document
+        - Parent-child: hierarchical chunk relationships
+        - Code: definition → usage links
+        """
+        created: List[str] = []
+
+        # Sort by position for sequential linking
+        sorted_pairs = sorted(
+            zip(embedded_chunks, node_ids),
+            key=lambda x: x[0].chunk.position,
+        )
+
+        # Sequential links
+        for i in range(len(sorted_pairs) - 1):
+            ec_a, nid_a = sorted_pairs[i]
+            ec_b, nid_b = sorted_pairs[i + 1]
+
+            dampening = min(
+                self._get_node_dampening(nid_a),
+                self._get_node_dampening(nid_b),
+            )
+            weight = self.sequential_weight * dampening
+
+            syn = self.graph.create_synapse(nid_a, nid_b, weight=weight)
+            syn.metadata["creation_mode"] = "sequential"
+            created.append(syn.synapse_id)
+
+        # Parent-child links
+        for ec, nid in zip(embedded_chunks, node_ids):
+            parent_id = ec.chunk.parent_chunk_id
+            if parent_id and parent_id in self.graph.nodes:
+                dampening = min(
+                    self._get_node_dampening(nid),
+                    self._get_node_dampening(parent_id),
+                )
+                weight = self.parent_child_weight * dampening
+
+                # Parent → child
+                syn = self.graph.create_synapse(parent_id, nid, weight=weight)
+                syn.metadata["creation_mode"] = "parent_child"
+                created.append(syn.synapse_id)
+
+        # Code definition → usage links
+        created.extend(self._create_code_links(embedded_chunks, node_ids))
+
+        return created
+
+    def _create_code_links(
+        self,
+        embedded_chunks: List[EmbeddedChunk],
+        node_ids: List[str],
+    ) -> List[str]:
+        """Link code definitions to chunks that reference them."""
+        created: List[str] = []
+
+        # Collect definition names
+        definitions: Dict[str, str] = {}  # name → node_id
+        for ec, nid in zip(embedded_chunks, node_ids):
+            meta = ec.chunk.metadata
+            if meta.get("strategy") == "code_aware" and meta.get("name"):
+                name = meta["name"]
+                definitions[name] = nid
+
+        if not definitions:
+            return created
+
+        # Find usage references
+        for ec, nid in zip(embedded_chunks, node_ids):
+            for def_name, def_nid in definitions.items():
+                if def_nid == nid:
+                    continue  # Skip self-reference
+                # Check if this chunk references the definition
+                if def_name in ec.chunk.text:
+                    dampening = min(
+                        self._get_node_dampening(def_nid),
+                        self._get_node_dampening(nid),
+                    )
+                    weight = self.code_def_weight * dampening
+
+                    syn = self.graph.create_synapse(def_nid, nid, weight=weight)
+                    syn.metadata["creation_mode"] = "code_def_usage"
+                    syn.metadata["definition"] = def_name
+                    created.append(syn.synapse_id)
+
+        return created
+
+    def _create_clusters(
+        self,
+        embedded_chunks: List[EmbeddedChunk],
+        node_ids: List[str],
+    ) -> List[str]:
+        """Create hyperedge clusters from highly similar groups.
+
+        Uses a simple greedy clustering: for each node, find all nodes
+        above the cluster similarity threshold and form a hyperedge if
+        the group meets minimum size.
+        """
+        created: List[str] = []
+        n = len(embedded_chunks)
+        if n < self.min_cluster_size:
+            return created
+
+        # Build similarity matrix
+        used_in_cluster: Set[int] = set()
+        clusters: List[Set[int]] = []
+
+        for i in range(n):
+            if i in used_in_cluster:
+                continue
+            cluster = {i}
+            for j in range(i + 1, n):
+                if j in used_in_cluster:
+                    continue
+                sim = float(np.dot(
+                    embedded_chunks[i].vector,
+                    embedded_chunks[j].vector,
+                ))
+                if sim >= self.cluster_sim_threshold:
+                    cluster.add(j)
+
+            if len(cluster) >= self.min_cluster_size:
+                clusters.append(cluster)
+                used_in_cluster.update(cluster)
+
+        # Create hyperedges for clusters
+        for cluster_indices in clusters:
+            member_ids = {node_ids[i] for i in cluster_indices}
+            member_weights = {nid: 1.0 for nid in member_ids}
+
+            he = self.graph.create_hyperedge(
+                member_node_ids=member_ids,
+                member_weights=member_weights,
+                activation_threshold=0.6,
+                activation_mode=ActivationMode.WEIGHTED_THRESHOLD,
+                metadata={
+                    "creation_mode": "ingestion_cluster",
+                    "cluster_size": len(member_ids),
+                },
+            )
+            created.append(he.hyperedge_id)
+
+        return created
+
+    def _get_node_dampening(self, node_id: str) -> float:
+        """Get current novelty dampening factor for a node."""
+        node = self.graph.nodes.get(node_id)
+        if node is None:
+            return 1.0
+        return node.intrinsic_excitability
+
+
+# ---------------------------------------------------------------------------
+# Project Configurations (PRD Addendum §3)
+# ---------------------------------------------------------------------------
+
+OPENCLAW_INGESTOR_CONFIG = {
+    "extraction": {},
+    "chunking": {
+        "strategy": ChunkStrategy.CODE_AWARE,
+        "min_chunk_tokens": 100,
+        "max_chunk_tokens": 500,
+    },
+    "embedding": {
+        "model_name": "BAAI/bge-base-en-v1.5",
+        "use_model": True,
+        "device": "auto",
+    },
+    "registration": {
+        "novelty_dampening": 0.3,
+        "probation_period": 10,
+        "dampening_curve": DampeningCurve.LINEAR,
+        "initial_threshold_boost": 0.15,
+    },
+    "association": {
+        "similarity_threshold": 0.7,
+        "similarity_weight_scale": 1.0,
+        "sequential_weight": 0.3,
+        "parent_child_weight": 0.5,
+        "min_cluster_size": 3,
+        "cluster_similarity_threshold": 0.65,
+    },
+}
+
+DSM_INGESTOR_CONFIG = {
+    "extraction": {},
+    "chunking": {
+        "strategy": ChunkStrategy.HIERARCHICAL,
+        "min_chunk_tokens": 200,
+        "max_chunk_tokens": 500,
+    },
+    "embedding": {
+        "model_name": "BAAI/bge-base-en-v1.5",
+        "use_model": True,
+    },
+    "registration": {
+        "novelty_dampening": 0.05,
+        "probation_period": 100,
+        "dampening_curve": DampeningCurve.LOGARITHMIC,
+        "initial_threshold_boost": 0.3,
+    },
+    "association": {
+        "similarity_threshold": 0.8,
+        "similarity_weight_scale": 0.8,
+        "sequential_weight": 0.2,
+        "parent_child_weight": 0.6,
+        "min_cluster_size": 3,
+        "cluster_similarity_threshold": 0.75,
+    },
+}
+
+CONSCIOUSNESS_INGESTOR_CONFIG = {
+    "extraction": {},
+    "chunking": {
+        "strategy": ChunkStrategy.SEMANTIC,
+        "min_chunk_tokens": 200,
+        "max_chunk_tokens": 500,
+    },
+    "embedding": {
+        "model_name": "BAAI/bge-base-en-v1.5",
+        "use_model": True,
+    },
+    "registration": {
+        "novelty_dampening": 0.01,
+        "probation_period": 500,
+        "dampening_curve": DampeningCurve.EXPONENTIAL,
+        "initial_threshold_boost": 0.4,
+    },
+    "association": {
+        "similarity_threshold": 0.65,
+        "similarity_weight_scale": 1.2,
+        "sequential_weight": 0.25,
+        "parent_child_weight": 0.4,
+        "min_cluster_size": 3,
+        "cluster_similarity_threshold": 0.55,
+    },
+}
+
+
+def get_ingestor_config(project: str) -> Dict[str, Any]:
+    """Get ingestor configuration for a named project.
+
+    Args:
+        project: One of "openclaw", "dsm", "consciousness".
+
+    Returns:
+        Configuration dictionary suitable for UniversalIngestor.
+    """
+    configs = {
+        "openclaw": OPENCLAW_INGESTOR_CONFIG,
+        "dsm": DSM_INGESTOR_CONFIG,
+        "consciousness": CONSCIOUSNESS_INGESTOR_CONFIG,
+    }
+    name = project.lower().strip()
+    if name not in configs:
+        raise ValueError(
+            f"Unknown project '{project}'. Choose from: {list(configs.keys())}"
+        )
+    return configs[name]
+
+
+# ---------------------------------------------------------------------------
+# Universal Ingestor Coordinator (PRD Addendum §4.1)
+# ---------------------------------------------------------------------------
+
+class IngestorConfig:
+    """Configuration container for the Universal Ingestor.
+
+    Wraps a nested dictionary with attribute access for pipeline stage configs.
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
+        self._config = config or {}
+
+    @property
+    def extraction(self) -> Dict[str, Any]:
+        return self._config.get("extraction", {})
+
+    @property
+    def chunking(self) -> Dict[str, Any]:
+        return self._config.get("chunking", {})
+
+    @property
+    def embedding(self) -> Dict[str, Any]:
+        return self._config.get("embedding", {})
+
+    @property
+    def registration(self) -> Dict[str, Any]:
+        return self._config.get("registration", {})
+
+    @property
+    def association(self) -> Dict[str, Any]:
+        return self._config.get("association", {})
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._config.get(key, default)
+
+
+class UniversalIngestor:
+    """Main coordinator that orchestrates the five-stage ingestion pipeline
+    (PRD Addendum §4.1).
+
+    Pipeline: Extract → Chunk → Embed → Register → Associate
+
+    Example::
+
+        graph = Graph()
+        vector_db = SimpleVectorDB()
+        ingestor = UniversalIngestor(graph, vector_db)
+        result = ingestor.ingest("# Hello\\n\\nSome markdown content")
+
+    Args:
+        neuro_graph: The NeuroGraph Graph instance.
+        vector_db: SimpleVectorDB instance for embedding storage.
+        config: Configuration dict or IngestorConfig (see project configs).
+    """
+
+    def __init__(
+        self,
+        neuro_graph: Graph,
+        vector_db: SimpleVectorDB,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.neuro_graph = neuro_graph
+        self.vector_db = vector_db
+
+        if isinstance(config, IngestorConfig):
+            self.config = config
+        else:
+            self.config = IngestorConfig(config)
+
+        # Pipeline stages
+        self.extractor = ExtractorRouter(self.config.extraction)
+        self.chunker = AdaptiveChunker(self.config.chunking)
+        self.embedder = EmbeddingEngine(self.config.embedding)
+        self.registrar = NodeRegistrar(
+            neuro_graph, vector_db, self.config.registration
+        )
+        self.associator = HypergraphAssociator(neuro_graph, self.config.association)
+
+        # State tracking
+        self.ingestion_log: List[IngestionResult] = []
+
+    def ingest(
+        self,
+        source: str,
+        source_type: Optional[SourceType] = None,
+        **kwargs: Any,
+    ) -> IngestionResult:
+        """Main ingestion entry point. Executes all 5 pipeline stages.
+
+        Args:
+            source: Input data — text content, file path, or URL.
+            source_type: Explicit source type (auto-detected if None).
+            **kwargs: Additional arguments passed to the extractor.
+
+        Returns:
+            IngestionResult with details of created nodes, synapses, and hyperedges.
+        """
+        # Stage 1: Extract
+        extracted = self.extractor.extract(source, source_type=source_type, **kwargs)
+
+        # Stage 2: Chunk
+        chunks = self.chunker.chunk(extracted)
+
+        if not chunks:
+            result = IngestionResult(
+                source=source[:200],
+                source_type=extracted.source_type,
+                chunks_created=0,
+            )
+            self.ingestion_log.append(result)
+            return result
+
+        # Stage 3: Embed
+        cache_before = self.embedder.cache_hits
+        embedded_chunks = self.embedder.embed(chunks)
+        cache_hits = max(0, self.embedder.cache_hits - cache_before - len(chunks))
+
+        # Stage 4: Register
+        source_meta = {
+            "source": source[:200],
+            "source_type": extracted.source_type.name,
+        }
+        node_ids = self.registrar.register(embedded_chunks, source_meta)
+
+        # Stage 5: Associate
+        synapse_ids, hyperedge_ids = self.associator.associate(
+            embedded_chunks, node_ids, self.vector_db
+        )
+
+        result = IngestionResult(
+            source=source[:200],
+            source_type=extracted.source_type,
+            chunks_created=len(chunks),
+            nodes_created=node_ids,
+            synapses_created=synapse_ids,
+            hyperedges_created=hyperedge_ids,
+            embeddings_cached=cache_hits,
+            metadata={
+                "extraction_metadata": extracted.metadata,
+                "structure_count": len(extracted.structure),
+            },
+        )
+        self.ingestion_log.append(result)
+        return result
+
+    def ingest_batch(
+        self,
+        sources: List[Tuple[str, Optional[SourceType]]],
+    ) -> List[IngestionResult]:
+        """Ingest multiple sources sequentially.
+
+        Args:
+            sources: List of (source, source_type) tuples.
+
+        Returns:
+            List of IngestionResult objects.
+        """
+        results = []
+        for source, stype in sources:
+            result = self.ingest(source, source_type=stype)
+            results.append(result)
+        return results
+
+    def update_probation(self) -> List[str]:
+        """Advance probation for all ingested nodes.
+
+        Should be called after each Graph.step() to fade novelty dampening.
+
+        Returns:
+            List of node IDs that graduated this call.
+        """
+        return self.registrar.update_probation()
+
+    def query_similar(
+        self,
+        text: str,
+        k: int = 5,
+        threshold: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """Query the vector DB for chunks similar to the given text.
+
+        Args:
+            text: Query text.
+            k: Number of results to return.
+            threshold: Minimum similarity threshold.
+
+        Returns:
+            List of result dicts with id, similarity, content, metadata.
+        """
+        query_vec = self.embedder.embed_text(text)
+        results = self.vector_db.search(query_vec, k=k, threshold=threshold)
+
+        output = []
+        for id, similarity in results:
+            entry = self.vector_db.get(id)
+            if entry:
+                output.append({
+                    "id": id,
+                    "similarity": similarity,
+                    "content": entry["content"],
+                    "metadata": entry["metadata"],
+                })
+        return output
