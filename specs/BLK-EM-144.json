@@ -1,0 +1,117 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-EM-144",
+    "name": "ecosystem_monitor: remove dead ces_monitor endpoint + create systemd service file",
+    "agent": "codemine",
+    "scope": "local_vps",
+    "acceptance_criteria": [
+      "ces_monitor entry removed from SERVICES dict in /home/josh/ecosystem-monitor/monitor.py",
+      "Changelog entry added to monitor.py",
+      "ecosystem-monitor.service written to /home/josh/ecosystem-monitor/"
+    ],
+    "depends_on": []
+  },
+  "constraints": {
+    "never": [
+      "Do not edit any vendored file (ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, ng_autonomic.py, openclaw_adapter.py, ng_embed.py)",
+      "Do not run sudo — service installation is done manually by Josh after spec completes",
+      "Do not restart any running service"
+    ],
+    "anti_drift": [],
+    "tool_allowlist": ["shell_execute", "read_file"],
+    "shell_allowlist": ["python3", "grep", "echo", "cat"],
+    "max_iterations": 20,
+    "timeout": 300
+  },
+  "steps": [
+    {
+      "id": "verify_ces_monitor_still_present",
+      "type": "action",
+      "description": "Check that ces_monitor entry exists in monitor.py (idempotency check — skip patch if already removed)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c '\"ces_monitor\":' /home/josh/ecosystem-monitor/monitor.py || echo 0"
+      },
+      "validation": {
+        "checks": []
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_monitor_py",
+      "type": "action",
+      "description": "Remove ces_monitor from SERVICES dict and add changelog entry to monitor.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"\nimport re, sys\n\npath = '/home/josh/ecosystem-monitor/monitor.py'\ncontent = open(path).read()\n\n# Remove ces_monitor block — port 8847 is dead since Apr 5 ecosystem restructure\npattern = r'    \\\"ces_monitor\\\":\\s*\\{[^}]+\\},\\n'\nif re.search(pattern, content):\n    content = re.sub(pattern, '', content)\n    changed_services = True\nelse:\n    changed_services = False\n\n# Add changelog entry before closing sentinel\ncl_sentinel = '# -------------------\\n'\ncl_entry = '# [2026-04-18] Codemine (BLK-EM-144) -- Remove defunct ces_monitor endpoint\\n#   What: Removed ces_monitor (port 8847) from SERVICES dict\\n#   Why:  Port 8847 dead since Apr 5 ecosystem restructure; spurious down-count in logs\\n# -------------------\\n'\nif cl_entry not in content:\n    content = content.replace(cl_sentinel, cl_entry)\n    changed_cl = True\nelse:\n    changed_cl = False\n\nopen(path, 'w').write(content)\nprint('PATCHED services=%s changelog=%s' % (changed_services, changed_cl))\n\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "contains", "value": "PATCHED"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_ces_monitor_removed",
+      "type": "action",
+      "description": "Verify ces_monitor dict entry is gone from monitor.py (check absence of URL 8847 in SERVICES context)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c '\"ces_monitor\":' /home/josh/ecosystem-monitor/monitor.py || echo 0"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "contains", "value": "0"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "write_service_file",
+      "type": "action",
+      "description": "Write systemd service unit file to /home/josh/ecosystem-monitor/ for Josh to copy to /etc/systemd/system/",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"\ncontent = '''[Unit]\nDescription=Ecosystem Service Monitor -- Host Symbiosis Architecture v0.1\nDocumentation=https://github.com/greatnorthernfishguy-hub/\nAfter=network.target\nWants=network.target\n\n[Service]\nType=simple\nUser=josh\nWorkingDirectory=/home/josh/ecosystem-monitor\nExecStart=/usr/bin/python3 /home/josh/ecosystem-monitor/monitor.py\nRestart=on-failure\nRestartSec=30\nStandardOutput=append:/home/josh/ecosystem-monitor/monitor.log\nStandardError=append:/home/josh/ecosystem-monitor/monitor.log\nEnvironment=PYTHONUNBUFFERED=1\n\n[Install]\nWantedBy=multi-user.target\n'''\nopen('/home/josh/ecosystem-monitor/ecosystem-monitor.service', 'w').write(content)\nprint('SERVICE_FILE_WRITTEN')\n\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "contains", "value": "SERVICE_FILE_WRITTEN"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_service_file_exists",
+      "type": "action",
+      "description": "Verify service file was written and contains expected content",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'ExecStart=/usr/bin/python3' /home/josh/ecosystem-monitor/ecosystem-monitor.service"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "contains", "value": "1"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "final_summary",
+      "type": "action",
+      "description": "Print summary of what was done and what Josh needs to run manually",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo 'BLK-EM-144 COMPLETE. monitor.py patched (ces_monitor removed). Service file at /home/josh/ecosystem-monitor/ecosystem-monitor.service. Josh: run these two commands to activate: sudo cp /home/josh/ecosystem-monitor/ecosystem-monitor.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now ecosystem-monitor'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "contains", "value": "BLK-EM-144 COMPLETE"}
+        ]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}

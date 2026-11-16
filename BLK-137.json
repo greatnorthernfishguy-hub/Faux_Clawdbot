@@ -1,0 +1,296 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-137",
+    "name": "Fix bridge.drain() no-op in Praxis and Elmer pulse loops",
+    "agent": "qwen3-coder",
+    "scope": "Praxis, Elmer",
+    "acceptance_criteria": [
+      "Praxis/core/praxis_hook.py calls bridge.sync_state() — no bridge.drain() call remains",
+      "Elmer/elmer_service.py calls bridge.sync_state() — no bridge.drain() or bridge.read_tract() call remains",
+      "Both files pass python3 -m py_compile with no errors",
+      "Both repos committed and pushed to GitHub"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [],
+    "outputs": []
+  },
+  "constraints": {
+    "never": [
+      "Modify vendored files (ng_tract_bridge.py, ng_lite.py, ng_ecosystem.py, ng_peer_bridge.py, ng_autonomic.py, ng_embed.py, openclaw_adapter.py)",
+      "Add _extract_text_from_delta or any text-extraction step — that is a Law 7 violation deferred to punchlist #154",
+      "Add _route_pulse_event iteration — deferred to punchlist #154",
+      "Access bridge._peer_events for event iteration"
+    ],
+    "anti_drift": [
+      "Do not refactor beyond the two targeted drain call fixes",
+      "The fix is a call to sync_state() only — no event iteration replaces the old loop"
+    ],
+    "tool_allowlist": ["shell_execute", "edit_file", "read_file"],
+    "shell_allowlist": ["echo", "rm"],
+    "max_iterations": 25,
+    "timeout_seconds": 600
+  },
+  "steps": [
+    {
+      "id": "check_gh_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo \"GITHUB_TOKEN length: ${#GITHUB_TOKEN}\""
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "GITHUB_TOKEN length: " },
+          { "operator": "not_contains", "value": "length: 0" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone directories from any previous runs",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf praxis elmer && echo \"CLEANED\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLEANED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_praxis",
+      "type": "action",
+      "description": "Clone Praxis repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/Praxis.git praxis"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "file_exists", "value": "praxis/core/praxis_hook.py" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_praxis_sentinel",
+      "type": "condition",
+      "description": "Skip Praxis patch if already applied",
+      "check": {
+        "operator": "file_contains",
+        "target": "praxis/core/praxis_hook.py",
+        "value": "bridge.sync_state"
+      },
+      "if_true": [
+        {
+          "id": "praxis_skip",
+          "type": "action",
+          "description": "Praxis already patched — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo \"Praxis already patched, skipping\"" },
+          "validation": { "checks": [{ "operator": "contains", "value": "skipping" }] },
+          "on_failure": "continue"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "patch_praxis_changelog",
+          "type": "action",
+          "description": "Add changelog entry to praxis_hook.py",
+          "tool": "edit_file",
+          "params": {
+            "path": "praxis/core/praxis_hook.py",
+            "old_text": "#         resets turn tracking.\n# -------------------",
+            "new_text": "#         resets turn tracking.\n# [2026-04-15] Claude Code (Sonnet 4.6) — Punchlist #137: Fix bridge.drain() no-op\n#   What: Replace bridge.drain() with bridge.sync_state() in _pulse_cycle().\n#   Why:  NGTractBridge has no public drain() method. hasattr guard silently\n#         skipped the entire tract drain — pulse loop was a no-op for River.\n#   How:  sync_state(local_state={}, module_id=MODULE_ID) calls _drain_all()\n#         internally, clearing incoming tracts and updating bridge state.\n#         Event routing removed — Law 7 violation deferred to punchlist #154.\n# -------------------"
+          },
+          "validation": {
+            "checks": [{ "operator": "result_is_not_error" }]
+          },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_praxis_drain",
+          "type": "action",
+          "description": "Replace bridge.drain() block with bridge.sync_state() in Praxis pulse cycle",
+          "tool": "edit_file",
+          "params": {
+            "path": "praxis/core/praxis_hook.py",
+            "old_text": "            if bridge and hasattr(bridge, 'drain'):\n                events = bridge.drain()\n                if events:\n                    for event in events:\n                        self._route_pulse_event(event)",
+            "new_text": "            if bridge and hasattr(bridge, 'sync_state'):\n                bridge.sync_state(local_state={}, module_id=self.MODULE_ID)"
+          },
+          "validation": {
+            "checks": [{ "operator": "result_is_not_error" }]
+          },
+          "on_failure": "abort"
+        }
+      ]
+    },
+    {
+      "id": "verify_praxis",
+      "type": "action",
+      "description": "Verify bridge.drain() is gone from praxis_hook.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"hasattr(bridge, 'drain')\" praxis/core/praxis_hook.py"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "contains", "value": "0" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_praxis",
+      "type": "action",
+      "description": "Syntax check praxis_hook.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile praxis/core/praxis_hook.py && echo \"SYNTAX_OK\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_elmer",
+      "type": "action",
+      "description": "Clone Elmer repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/Elmer.git elmer"
+      },
+      "validation": {
+        "checks": [
+          { "operator": "file_exists", "value": "elmer/elmer_service.py" }
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "check_elmer_sentinel",
+      "type": "condition",
+      "description": "Skip Elmer patch if already applied",
+      "check": {
+        "operator": "file_contains",
+        "target": "elmer/elmer_service.py",
+        "value": "bridge.sync_state"
+      },
+      "if_true": [
+        {
+          "id": "elmer_skip",
+          "type": "action",
+          "description": "Elmer already patched — skip",
+          "tool": "shell_execute",
+          "params": { "command": "echo \"Elmer already patched, skipping\"" },
+          "validation": { "checks": [{ "operator": "contains", "value": "skipping" }] },
+          "on_failure": "continue"
+        }
+      ],
+      "if_false": [
+        {
+          "id": "patch_elmer_changelog",
+          "type": "action",
+          "description": "Add changelog entry to elmer_service.py",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/elmer_service.py",
+            "old_text": "#         buffer from engine. Health/status/process endpoints.\n# -------------------",
+            "new_text": "#         buffer from engine. Health/status/process endpoints.\n# [2026-04-15] Claude Code (Sonnet 4.6) — Punchlist #137: Fix bridge.drain() no-op\n#   What: Replace bridge.drain() / bridge.read_tract() branches with\n#         bridge.sync_state() in the tract drain loop.\n#   Why:  NGTractBridge has no public drain() method. hasattr guard silently\n#         skipped the entire tract drain — drain loop was a no-op for River.\n#   How:  sync_state(local_state={}, module_id=\"elmer\") calls _drain_all()\n#         internally, clearing tracts and updating bridge state. Text extraction\n#         loop removed — Law 7 violation deferred to punchlist #154.\n# -------------------"
+          },
+          "validation": {
+            "checks": [{ "operator": "result_is_not_error" }]
+          },
+          "on_failure": "abort"
+        },
+        {
+          "id": "patch_elmer_drain",
+          "type": "action",
+          "description": "Replace bridge.drain()/read_tract() branches with bridge.sync_state() in Elmer drain loop",
+          "tool": "edit_file",
+          "params": {
+            "path": "elmer/elmer_service.py",
+            "old_text": "                if bridge and hasattr(bridge, 'drain'):\n                    events = bridge.drain()\n                    if events:\n                        for event in events:\n                            # Extract text content from topology delta\n                            text = _extract_text_from_delta(event)\n                            if text:\n                                try:\n                                    _engine.process_text(text)\n                                except Exception as exc:\n                                    logger.warning(\"Drain process error: %s\", exc)\n                        logger.debug(\"Drained %d events from tract\", len(events))\n                elif bridge and hasattr(bridge, 'read_tract'):\n                    # Try alternate drain method\n                    for peer_id in _get_peer_ids(bridge):\n                        events = bridge.read_tract(peer_id)\n                        if events:\n                            for event in events:\n                                text = _extract_text_from_delta(event)\n                                if text:\n                                    try:\n                                        _engine.process_text(text)\n                                    except Exception as exc:\n                                        logger.warning(\"Drain process error: %s\", exc)",
+            "new_text": "                if bridge and hasattr(bridge, 'sync_state'):\n                    bridge.sync_state(local_state={}, module_id=\"elmer\")"
+          },
+          "validation": {
+            "checks": [{ "operator": "result_is_not_error" }]
+          },
+          "on_failure": "abort"
+        }
+      ]
+    },
+    {
+      "id": "verify_elmer_drain",
+      "type": "action",
+      "description": "Verify bridge.drain() is gone from elmer_service.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"hasattr(bridge, 'drain')\" elmer/elmer_service.py"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_elmer_read_tract",
+      "type": "action",
+      "description": "Verify bridge.read_tract() fallback is gone from elmer_service.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c \"hasattr(bridge, 'read_tract')\" elmer/elmer_service.py"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "syntax_elmer",
+      "type": "action",
+      "description": "Syntax check elmer_service.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile elmer/elmer_service.py && echo \"SYNTAX_OK\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_push_praxis",
+      "type": "action",
+      "description": "Commit and push Praxis",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C praxis config user.email \"codemine@hf.space\" && git -C praxis config user.name \"Codemine Worker\" && git -C praxis add core/praxis_hook.py && git -C praxis commit -m \"Punchlist #137: Fix bridge.drain() no-op in pulse loop\" && git -C praxis push && echo \"PRAXIS_PUSHED\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "PRAXIS_PUSHED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_push_elmer",
+      "type": "action",
+      "description": "Commit and push Elmer",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C elmer config user.email \"codemine@hf.space\" && git -C elmer config user.name \"Codemine Worker\" && git -C elmer add elmer_service.py && git -C elmer commit -m \"Punchlist #137: Fix bridge.drain() no-op in drain loop\" && git -C elmer push && echo \"ELMER_PUSHED\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "ELMER_PUSHED" }]
+      },
+      "on_failure": "abort"
+    }
+  ]
+}

@@ -1,0 +1,258 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-TG-208",
+    "name": "Fix TrollGuard scan_count permanently 0 — wire real scanner and ingest sidecar",
+    "agent": "QB",
+    "scope": "TrollGuard + NeuroGraph — three independent failures keep scan_count permanently 0. Fix all three: (1) _init_scanner() imports SentinelClassifier but never instantiates TrollGuardPipeline — wire real pipeline. (2) _module_on_message() has hardcoded stub dict instead of calling scan_text(). (3) handle_ingest() in neurograph_rpc.py has no caller for _module_on_message() since fan-out removed 2026-04-05 — add non-blocking daemon-thread sidecar call.",
+    "acceptance_criteria": [
+      "trollguard_hook.py _init_scanner() instantiates TrollGuardPipeline (not just imports SentinelClassifier)",
+      "sentinel_core.vector_sentry pre-imported during _init_scanner() so lazy import in scan_text() survives _bootstrap_modules sys.path cleanup",
+      "trollguard_hook.py _module_on_message() calls self._scanner.scan_text(text, source='openclaw') — hardcoded stub dict gone",
+      "neurograph_rpc.py handle_ingest() spawns a non-blocking daemon thread calling _hook._module_on_message() when _module_instances.get('trollguard') is not None",
+      "python3 -c \"c=open('TrollGuard/trollguard_hook.py').read(); print(c.count('Replace with actual TrollGuard scan call'))\" outputs 0",
+      "python3 -c \"c=open('NeuroGraph/neurograph_rpc.py').read(); print(c.count('_module_instances.get(\\\"trollguard\\\")'))\" outputs 1",
+      "python3 -m py_compile TrollGuard/trollguard_hook.py passes",
+      "python3 -m py_compile NeuroGraph/neurograph_rpc.py passes",
+      "Both repos committed and pushed"
+    ]
+  },
+  "snap_interface": {
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "trollguard_hook.py",
+        "type": "file",
+        "path": "TrollGuard/trollguard_hook.py",
+        "contract": "_init_scanner() wires real TrollGuardPipeline; _module_on_message() calls scan_text(); changelog entry added"
+      },
+      {
+        "name": "neurograph_rpc.py",
+        "type": "file",
+        "path": "NeuroGraph/neurograph_rpc.py",
+        "contract": "handle_ingest() spawns TrollGuard sidecar daemon thread; inline changelog comment present"
+      }
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do not modify any vendored file: ng_lite.py, ng_peer_bridge.py, ng_tract_bridge.py, ng_ecosystem.py, openclaw_adapter.py, ng_autonomic.py, ng_embed.py",
+      "Do not modify the 4-layer Fail Fast pipeline layer order in main.py",
+      "Do not add a broadcast fan-out to handle_ingest() — the sidecar is a targeted single call to TrollGuard only, not a replacement for the removed ecosystem fan-out",
+      "Do not use sed or awk on source files — use edit_file only",
+      "Do not restart any service"
+    ],
+    "anti_drift": [
+      "scan_text() is Layer 4 VectorSentry (real-time live I/O) — correct for chat text. Do not use scan_file() (Layers 0-3, code/AST focused, 10-45s swarm audit)",
+      "The sidecar thread in handle_ingest() must be daemon=True and error-isolated (try/except logging to logger.debug only)",
+      "Pre-import sentinel_core.vector_sentry during _init_scanner() while ~/TrollGuard/ is still on sys.path — this caches it in sys.modules before _bootstrap_modules finally block restores sys.path",
+      "scan_text() returns SentryResult.to_dict() with keys: verdict (SAFE/SUSPICIOUS/MALICIOUS), max_score, chunks_scanned, flagged_chunks, sanitized_text, scan_time_ms, source",
+      "Changelog entry format: # [DATE] AUTHOR — DESCRIPTION with What/Why/How lines"
+    ],
+    "tool_allowlist": [
+      "write_file",
+      "edit_file",
+      "shell_execute",
+      "read_file"
+    ],
+    "shell_allowlist": [
+      "rm",
+      "echo",
+      "curl",
+      "python3",
+      "git"
+    ]
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is set",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "TOKEN_OK"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone directories from any previous runs",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf TrollGuard NeuroGraph && echo CLEANED"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "CLEANED"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_trollguard",
+      "type": "action",
+      "description": "Clone TrollGuard repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/TrollGuard.git TrollGuard && echo TG_CLONED"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "TG_CLONED"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_neurograph",
+      "type": "action",
+      "description": "Clone NeuroGraph repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/NeuroGraph.git NeuroGraph && echo NG_CLONED"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "NG_CLONED"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "patch_tg_init_scanner",
+      "type": "action",
+      "description": "Fix _init_scanner() to instantiate TrollGuardPipeline. Pre-import sentinel_core.vector_sentry so scan_text() lazy import survives sys.path cleanup.",
+      "tool": "edit_file",
+      "params": {
+        "path": "TrollGuard/trollguard_hook.py",
+        "old_text": "    def _init_scanner(self) -> None:\n        \"\"\"Initialize the TrollGuard scan pipeline.\"\"\"\n        try:\n            from sentinel_core.ml_classifier import SentinelClassifier\n            # ... real initialization ...\n            logger.info(\"TrollGuard scanner initialized\")\n        except Exception as exc:\n            logger.warning(\"TrollGuard scanner unavailable: %s\", exc)",
+        "new_text": "    def _init_scanner(self) -> None:\n        \"\"\"Initialize the TrollGuard scan pipeline.\"\"\"\n        try:\n            import sys as _sys, os as _os\n            _tg_dir = _os.path.expanduser(\"~/TrollGuard\")\n            if _tg_dir not in _sys.path:\n                _sys.path.insert(0, _tg_dir)\n            # Pre-import sentinel_core so the lazy import inside scan_text()\n            # survives _bootstrap_modules' sys.path cleanup (finally block).\n            import sentinel_core.vector_sentry  # noqa: F401\n            import main as _tg_main\n            _config = _tg_main.load_config(_os.path.join(_tg_dir, \"config.yaml\"))\n            self._scanner = _tg_main.TrollGuardPipeline(_config)\n            logger.info(\"TrollGuard scanner initialized\")\n        except Exception as exc:\n            logger.warning(\"TrollGuard scanner unavailable: %s\", exc)"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "patch_tg_scan_stub",
+      "type": "action",
+      "description": "Replace hardcoded stub scan_result with real scan_text() call (Layer 4 VectorSentry, designed for real-time live I/O)",
+      "tool": "edit_file",
+      "params": {
+        "path": "TrollGuard/trollguard_hook.py",
+        "old_text": "            # Replace with actual TrollGuard scan call\n            # scan_result = self._scanner.scan(text)\n            scan_result = {\"threat\": False, \"confidence\": 0.0, \"label\": \"clean\"}",
+        "new_text": "            raw = self._scanner.scan_text(text, source=\"openclaw\")\n            verdict = raw.get(\"verdict\", \"SAFE\")\n            scan_result = {\n                \"threat\": verdict == \"MALICIOUS\",\n                \"confidence\": raw.get(\"max_score\", 0.0),\n                \"label\": verdict.lower(),\n            }"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "patch_tg_changelog",
+      "type": "action",
+      "description": "Add changelog entry to trollguard_hook.py. Idempotency-safe: old anchor (Changelog header + 2026-04-19 line adjacent) disappears after patch.",
+      "tool": "edit_file",
+      "params": {
+        "path": "TrollGuard/trollguard_hook.py",
+        "old_text": "# ---- Changelog ----\n# [2026-04-19] CC (punchlist #5) -- Add pulse loop + River drain (first ever)",
+        "new_text": "# ---- Changelog ----\n# [2026-04-23] Claude Code (Sonnet 4.6) — Wire real TrollGuardPipeline, fix scan stub (#208)\n#   What: _init_scanner() now instantiates TrollGuardPipeline (was only importing\n#         SentinelClassifier without ever instantiating). Pre-imports\n#         sentinel_core.vector_sentry so lazy import in scan_text() works after\n#         _bootstrap_modules restores sys.path. _module_on_message() now calls\n#         self._scanner.scan_text(text, source=\"openclaw\") instead of a\n#         hardcoded stub dict. scan_count and threat_count now increment.\n#   Why:  _scan_count was permanently 0. Two failures: no scanner object and\n#         stub that bypassed all real scanning logic.\n#   How:  sys.path injection safe during __init__ (inside bootstrap try block).\n#         scan_text() = Layer 4 VectorSentry, the layer designed for live I/O.\n# [2026-04-19] CC (punchlist #5) -- Add pulse loop + River drain (first ever)"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "patch_ng_ingest_sidecar",
+      "type": "action",
+      "description": "Add non-blocking TrollGuard sidecar scan in handle_ingest(). Includes inline changelog comment. Daemon thread, error-isolated, fire-and-forget.",
+      "tool": "edit_file",
+      "params": {
+        "path": "NeuroGraph/neurograph_rpc.py",
+        "old_text": "        _ingest_embedding = embed(text)\n    except Exception:\n        _ingest_embedding = None\n\n    return {\"ingested\": True}",
+        "new_text": "        _ingest_embedding = embed(text)\n    except Exception:\n        _ingest_embedding = None\n\n    # [2026-04-23] CC (#208) — TrollGuard sidecar: perimeter defense sees every ingest.\n    # scan_text() = Layer 4 VectorSentry (real-time live I/O protection). Targeted\n    # single call for the security layer — not a fan-out broadcast. Daemon thread,\n    # error-isolated. scan_count/_threat_count in TrollGuardHook now increment.\n    _tg = _module_instances.get(\"trollguard\")\n    if _tg is not None:\n        _tg_text = text\n        _tg_emb = _ingest_embedding\n        def _tg_scan(_hook=_tg, _t=_tg_text, _e=_tg_emb):\n            try:\n                import numpy as _np\n                _e = _e if _e is not None else _np.zeros(768)\n                _hook._module_on_message(_t, _e)\n            except Exception as _exc:\n                logger.debug(\"TrollGuard sidecar error: %s\", _exc)\n        threading.Thread(target=_tg_scan, daemon=True).start()\n\n    return {\"ingested\": True}"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "verify_tg_stub_gone",
+      "type": "action",
+      "description": "Verify hardcoded stub comment is absent from trollguard_hook.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"c=open('TrollGuard/trollguard_hook.py').read(); print(c.count('Replace with actual TrollGuard scan call'))\""
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "0"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_ng_sidecar_added",
+      "type": "action",
+      "description": "Verify TrollGuard sidecar lookup was added to neurograph_rpc.py handle_ingest()",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"c=open('NeuroGraph/neurograph_rpc.py').read(); print(c.count('_module_instances.get(\\\"trollguard\\\")'))\""
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "1"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "pycompile_tg",
+      "type": "action",
+      "description": "Verify trollguard_hook.py parses without syntax errors",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile TrollGuard/trollguard_hook.py && echo PY_COMPILE_TG_OK"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "PY_COMPILE_TG_OK"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "pycompile_ng",
+      "type": "action",
+      "description": "Verify neurograph_rpc.py parses without syntax errors",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile NeuroGraph/neurograph_rpc.py && echo PY_COMPILE_NG_OK"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "PY_COMPILE_NG_OK"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_push_tg",
+      "type": "action",
+      "description": "Commit and push TrollGuard changes",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C TrollGuard config user.email 'codemine@et-systems.ai' && git -C TrollGuard config user.name 'Codemine (QB)' && git -C TrollGuard add trollguard_hook.py && git -C TrollGuard diff --cached --quiet && echo TG_ALREADY_COMMITTED || (git -C TrollGuard commit -m 'trollguard_hook: wire real TrollGuardPipeline, fix scan stub (#208)' && git -C TrollGuard push && echo TG_COMMITTED)"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "COMMIT"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_push_ng",
+      "type": "action",
+      "description": "Commit and push NeuroGraph changes",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C NeuroGraph config user.email 'codemine@et-systems.ai' && git -C NeuroGraph config user.name 'Codemine (QB)' && git -C NeuroGraph add neurograph_rpc.py && git -C NeuroGraph diff --cached --quiet && echo NG_ALREADY_COMMITTED || (git -C NeuroGraph commit -m 'neurograph_rpc: add TrollGuard sidecar scan in handle_ingest (#208)' && git -C NeuroGraph push && echo NG_COMMITTED)"
+      },
+      "validation": {
+        "checks": [{"operator": "contains", "value": "COMMIT"}]
+      },
+      "on_failure": "abort"
+    }
+  ]
+}

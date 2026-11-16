@@ -1,0 +1,446 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-TID-133",
+    "name": "TID #133: Anthropic tool pass-through \u2014 _normalize_tools + _call_anthropic",
+    "agent": "codemine",
+    "scope": "Two files, targeted edits only. (1) responses_endpoint.py: add Anthropic format branch in _normalize_tools so tools are converted from OpenAI-nested to Anthropic Messages API format (name/description/input_schema) when model_id starts with 'anthropic/'. (2) model_client.py: add extra_params param to _call_anthropic, inject tools+tool_choice into request body, extract tool_use response blocks into tool_calls, map stop_reason 'tool_use' -> finish_reason 'tool_calls', thread extra_params through call_stream()/_fake_stream_from_blocking(). Law 4: single shim, fix at source.",
+    "acceptance_criteria": [
+      "_normalize_tools returns Anthropic-format tool list (name/description/input_schema) when model_id starts with 'anthropic/'",
+      "ShimObserver records operation 'anthropic_tool_format'",
+      "_call_anthropic accepts extra_params and injects tools+tool_choice into Anthropic request body",
+      "tool_use blocks in Anthropic response are extracted into ModelResponse.tool_calls",
+      "stop_reason 'tool_use' is translated to finish_reason 'tool_calls'",
+      "call_stream() passes extra_params to _fake_stream_from_blocking",
+      "_fake_stream_from_blocking passes extra_params to self.call()",
+      "Changelog entries added to both files (2026-04-15)"
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Modify vendored files: ng_lite.py, ng_peer_bridge.py, ng_ecosystem.py, ng_bridge.py, ng_autonomic.py",
+      "Create a second translation shim \u2014 extend the existing _normalize_tools only",
+      "Change the proxy pipeline order in app.py",
+      "Delete any file or directory (except the tid/ clone from a previous run)",
+      "Expose or echo GITHUB_TOKEN, API keys, or any credential in output"
+    ],
+    "anti_drift": [
+      "This is a targeted bug fix \u2014 do not refactor surrounding code",
+      "Do not add error handling for scenarios that cannot happen in this path",
+      "No new files \u2014 targeted edits to tid/inference_difference/responses_endpoint.py and tid/inference_difference/model_client.py only",
+      "Anthropic format conversion belongs ONLY in _normalize_tools \u2014 do NOT re-convert or duplicate in _call_anthropic"
+    ],
+    "tool_allowlist": [
+      "shell_execute",
+      "edit_file",
+      "read_file",
+      "notebook_add",
+      "notebook_read"
+    ],
+    "shell_allowlist": [
+      "rm",
+      "test",
+      "cd"
+    ],
+    "max_iterations": 45,
+    "timeout_seconds": 600
+  },
+  "steps": [
+    {
+      "id": "check_gh_token",
+      "type": "action",
+      "description": "Fail fast if GITHUB_TOKEN is not set \u2014 needed for authenticated push",
+      "tool": "shell_execute",
+      "params": {
+        "command": "test -n \"${GITHUB_TOKEN}\" && echo GITHUB_TOKEN_OK || echo GITHUB_TOKEN_MISSING"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "GITHUB_TOKEN_OK",
+            "description": "GITHUB_TOKEN must be set as a HF Space secret before this spec runs"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    },
+    {
+      "id": "clone_tid",
+      "type": "action",
+      "description": "Remove any previous clone, then clone TID fresh with authenticated URL",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf tid && git clone https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/The-Inference-Difference.git tid 2>&1 && echo CLONE_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "CLONE_OK",
+            "description": "TID repo must clone successfully"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    },
+    {
+      "id": "check_re_sentinel",
+      "type": "action",
+      "description": "Check if responses_endpoint.py already has the Anthropic tool format branch (idempotency gate)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -q 'anthropic_tool_format' tid/inference_difference/responses_endpoint.py && echo ALREADY_DONE || echo NEEDS_PATCH"
+      },
+      "bind_result": "$re_status",
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_not_error"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    },
+    {
+      "id": "patch_responses_endpoint",
+      "type": "condition",
+      "description": "Apply responses_endpoint.py patches only if sentinel not found",
+      "check": {
+        "operator": "contains",
+        "target": "$re_status",
+        "value": "NEEDS_PATCH"
+      },
+      "if_true": [
+        {
+          "id": "edit_re_changelog",
+          "type": "action",
+          "description": "Prepend changelog entry for #133 to responses_endpoint.py",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/responses_endpoint.py",
+            "old_text": "# [2026-04-12] Claude Code (Opus 4.6) \u2014 Tool call translation shim",
+            "new_text": "# [2026-04-15] Claude Code (Sonnet 4.6) \u2014 Punchlist #133: Anthropic tool format in _normalize_tools\n#   What: _normalize_tools now converts OpenAI-nested tools to Anthropic Messages API format\n#         when model_id starts with 'anthropic/'. Unwraps function wrapper, renames\n#         parameters -> input_schema. ShimObserver records 'anthropic_tool_format'.\n#   Why:  _normalize_tools was OpenAI-only; Anthropic models received unconverted tools\n#         causing 400 Bad Request. Law 4: fix at source in the single shim.\n#   How:  Added Anthropic branch before final return in _normalize_tools. No new files.\n# [2026-04-12] Claude Code (Opus 4.6) \u2014 Tool call translation shim"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/responses_endpoint.py::Punchlist #133"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_normalize_tools",
+          "type": "action",
+          "description": "Add Anthropic format branch in _normalize_tools before return normalized",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/responses_endpoint.py",
+            "old_text": "    return normalized\n\n\nlogger = logging.getLogger(\"inference_difference.responses_endpoint\")",
+            "new_text": "    # Anthropic Messages API format: convert from OpenAI-nested format.\n    # This is the single shim (Law 4) \u2014 conversion belongs here only.\n    if model_id.startswith(\"anthropic/\"):\n        anthropic_tools = []\n        for t in (normalized or []):\n            fn = t.get(\"function\", t)\n            anthropic_tools.append({\n                \"name\": fn.get(\"name\", \"\"),\n                \"description\": fn.get(\"description\", \"\"),\n                \"input_schema\": fn.get(\n                    \"parameters\",\n                    fn.get(\"input_schema\", {\"type\": \"object\", \"properties\": {}}),\n                ),\n            })\n        if _shim_observer is not None:\n            _shim_observer.observe(\n                model_id=model_id,\n                operation=\"anthropic_tool_format\",\n                did_apply=True,\n                raw_context=f\"{len(anthropic_tools)} tools converted to Anthropic Messages API format\",\n            )\n        return anthropic_tools\n\n    return normalized\n\n\nlogger = logging.getLogger(\"inference_difference.responses_endpoint\")"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/responses_endpoint.py::anthropic_tool_format"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        }
+      ],
+      "if_false": []
+    },
+    {
+      "id": "verify_responses_endpoint",
+      "type": "action",
+      "description": "Verify responses_endpoint.py has exactly 2 lines with anthropic_tool_format (changelog + code)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -c 'anthropic_tool_format' tid/inference_difference/responses_endpoint.py"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "2",
+            "description": "Exactly 2 lines: one in changelog comment, one in observe() call"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    },
+    {
+      "id": "check_mc_sentinel",
+      "type": "action",
+      "description": "Check if model_client.py already has the tools pass-through (idempotency gate)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -q 'Punchlist #133' tid/inference_difference/model_client.py && echo ALREADY_DONE || echo NEEDS_PATCH"
+      },
+      "bind_result": "$mc_status",
+      "validation": {
+        "checks": [
+          {
+            "operator": "result_is_not_error"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    },
+    {
+      "id": "patch_model_client",
+      "type": "condition",
+      "description": "Apply model_client.py patches only if sentinel not found",
+      "check": {
+        "operator": "contains",
+        "target": "$mc_status",
+        "value": "NEEDS_PATCH"
+      },
+      "if_true": [
+        {
+          "id": "edit_mc_changelog",
+          "type": "action",
+          "description": "Prepend changelog entry for #133 to model_client.py",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "    [2026-04-11] Claude Code (Sonnet 4.6) \u2014 Tool call pass-through",
+            "new_text": "    [2026-04-15] Claude Code (Sonnet 4.6) \u2014 Punchlist #133: Anthropic tools pass-through\n        What: _call_anthropic now accepts extra_params (tools, tool_choice) and injects\n            them into the Anthropic request body. tool_use response blocks are extracted\n            into ModelResponse.tool_calls. stop_reason 'tool_use' maps to 'tool_calls'.\n            call_stream()/_fake_stream_from_blocking() thread extra_params through.\n        Why:  extra_params was merged in call() and call_stream() but never forwarded\n            to _call_anthropic. Anthropic models silently dropped all tool definitions.\n            _fake_stream_from_blocking also bypassed extra_params to self.call().\n        How:  Six targeted edits: _call_anthropic signature, body injection, response\n            extraction, ModelResponse return, call() dispatch, call_stream() dispatch,\n            _fake_stream_from_blocking signature+body. No new files.\n    [2026-04-11] Claude Code (Sonnet 4.6) \u2014 Tool call pass-through"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::Punchlist #133"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_call_anthropic_sig",
+          "type": "action",
+          "description": "Add extra_params param to _call_anthropic signature (after start: float)",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "    def _call_anthropic(\n        self,\n        base_url: str,\n        api_key: str,\n        model_name: str,\n        messages: List[Dict[str, str]],\n        temperature: float,\n        max_tokens: Optional[int],\n        start: float,\n    ) -> ModelResponse:",
+            "new_text": "    def _call_anthropic(\n        self,\n        base_url: str,\n        api_key: str,\n        model_name: str,\n        messages: List[Dict[str, str]],\n        temperature: float,\n        max_tokens: Optional[int],\n        start: float,\n        extra_params: Optional[Dict[str, Any]] = None,\n    ) -> ModelResponse:"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::extra_params: Optional[Dict[str, Any]] = None,"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_tool_injection",
+          "type": "action",
+          "description": "Inject tools+tool_choice from extra_params into Anthropic body (after system_text block)",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "        if system_text:\n            body[\"system\"] = system_text\n\n        data = json.dumps(body).encode(\"utf-8\")",
+            "new_text": "        if system_text:\n            body[\"system\"] = system_text\n\n        # Thread tools/tool_choice from extra_params into Anthropic body.\n        # Tools are already in Anthropic format from _normalize_tools upstream.\n        # Do NOT re-convert here \u2014 that is _normalize_tools' job (Law 4).\n        if extra_params:\n            tools_list = extra_params.get(\"tools\")\n            if tools_list:\n                body[\"tools\"] = tools_list\n            tool_choice = extra_params.get(\"tool_choice\")\n            if tool_choice:\n                if isinstance(tool_choice, str):\n                    if tool_choice == \"auto\":\n                        body[\"tool_choice\"] = {\"type\": \"auto\"}\n                    # \"none\" -> omit (Anthropic default: tool use optional)\n                elif isinstance(tool_choice, dict):\n                    fn_name = tool_choice.get(\"function\", {}).get(\"name\", \"\")\n                    if fn_name:\n                        body[\"tool_choice\"] = {\"type\": \"tool\", \"name\": fn_name}\n\n        data = json.dumps(body).encode(\"utf-8\")"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::Thread tools/tool_choice from extra_params"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_content_extraction",
+          "type": "action",
+          "description": "Extract tool_use blocks alongside text blocks in _call_anthropic response parsing",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "            # Extract content from Anthropic response\n            content_blocks = resp_body.get(\"content\", [])\n            content = \"\"\n            for block in content_blocks:\n                if block.get(\"type\") == \"text\":\n                    content += block.get(\"text\", \"\")",
+            "new_text": "            # Extract text content and tool_use blocks from Anthropic response\n            content_blocks = resp_body.get(\"content\", [])\n            content = \"\"\n            tool_calls = []\n            for block in content_blocks:\n                if block.get(\"type\") == \"text\":\n                    content += block.get(\"text\", \"\")\n                elif block.get(\"type\") == \"tool_use\":\n                    tool_calls.append({\n                        \"id\": block.get(\"id\", \"\"),\n                        \"type\": \"function\",\n                        \"function\": {\n                            \"name\": block.get(\"name\", \"\"),\n                            \"arguments\": json.dumps(block.get(\"input\", {})),\n                        },\n                    })"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::elif block.get(\"type\") == \"tool_use\":"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_model_response_return",
+          "type": "action",
+          "description": "Add tool_calls to ModelResponse and map stop_reason 'tool_use' -> finish_reason 'tool_calls'",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "            return ModelResponse(\n                id=resp_body.get(\"id\", \"\"),\n                model=resp_body.get(\"model\", model_name),\n                content=content,\n                finish_reason=resp_body.get(\"stop_reason\", \"stop\"),",
+            "new_text": "            # Map Anthropic stop_reason \"tool_use\" -> OpenAI finish_reason \"tool_calls\"\n            _stop_reason = resp_body.get(\"stop_reason\", \"stop\")\n            _finish_reason = \"tool_calls\" if _stop_reason == \"tool_use\" else _stop_reason\n            return ModelResponse(\n                id=resp_body.get(\"id\", \"\"),\n                model=resp_body.get(\"model\", model_name),\n                content=content,\n                tool_calls=tool_calls if tool_calls else None,\n                finish_reason=_finish_reason,"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::_stop_reason = resp_body.get(\"stop_reason\", \"stop\")"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_call_dispatch",
+          "type": "action",
+          "description": "Pass extra_params to _call_anthropic in call() dispatch",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "            resp = self._call_anthropic(\n                base_url, api_key, model_name, messages,\n                temperature, max_tokens, start,\n            )",
+            "new_text": "            resp = self._call_anthropic(\n                base_url, api_key, model_name, messages,\n                temperature, max_tokens, start, extra_params,\n            )"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::temperature, max_tokens, start, extra_params,"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_call_stream_dispatch",
+          "type": "action",
+          "description": "Pass extra_params to _fake_stream_from_blocking in call_stream() Anthropic dispatch",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "        if model_id.startswith(\"anthropic/\") and \"anthropic.com\" in base_url:\n            return self._fake_stream_from_blocking(\n                model_id, messages, temperature, max_tokens,\n            )",
+            "new_text": "        if model_id.startswith(\"anthropic/\") and \"anthropic.com\" in base_url:\n            return self._fake_stream_from_blocking(\n                model_id, messages, temperature, max_tokens, extra_params,\n            )"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::model_id, messages, temperature, max_tokens, extra_params,"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_fake_stream_sig",
+          "type": "action",
+          "description": "Add extra_params param to _fake_stream_from_blocking signature",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "    def _fake_stream_from_blocking(\n        self,\n        model_id: str,\n        messages: List[Dict[str, str]],\n        temperature: float,\n        max_tokens: Optional[int],\n    ) -> tuple[Iterator[str], StreamResult]:",
+            "new_text": "    def _fake_stream_from_blocking(\n        self,\n        model_id: str,\n        messages: List[Dict[str, str]],\n        temperature: float,\n        max_tokens: Optional[int],\n        extra_params: Optional[Dict[str, Any]] = None,\n    ) -> tuple[Iterator[str], StreamResult]:"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::def _fake_stream_from_blocking"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        },
+        {
+          "id": "edit_fake_stream_body",
+          "type": "action",
+          "description": "Pass extra_params to self.call() inside _fake_stream_from_blocking",
+          "tool": "edit_file",
+          "params": {
+            "path": "tid/inference_difference/model_client.py",
+            "old_text": "        response = self.call(\n            model_id=model_id,\n            messages=messages,\n            temperature=temperature,\n            max_tokens=max_tokens,\n        )",
+            "new_text": "        response = self.call(\n            model_id=model_id,\n            messages=messages,\n            temperature=temperature,\n            max_tokens=max_tokens,\n            extra_params=extra_params,\n        )"
+          },
+          "validation": {
+            "checks": [
+              {
+                "operator": "file_contains",
+                "value": "tid/inference_difference/model_client.py::extra_params=extra_params,"
+              }
+            ]
+          },
+          "on_failure": "abort_block"
+        }
+      ],
+      "if_false": []
+    },
+    {
+      "id": "verify_model_client",
+      "type": "action",
+      "description": "Verify model_client.py has all three key markers: changelog, tool_use extraction, finish_reason mapping",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -q 'Punchlist #133' tid/inference_difference/model_client.py && grep -q '\"tool_use\"' tid/inference_difference/model_client.py && grep -q '_stop_reason' tid/inference_difference/model_client.py && echo VERIFY_OK || echo VERIFY_FAIL"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "VERIFY_OK",
+            "description": "All three key markers must be present in model_client.py"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Check Python syntax on both modified files",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd tid && python3 -c \"import ast; ast.parse(open('inference_difference/responses_endpoint.py').read()); ast.parse(open('inference_difference/model_client.py').read()); print('SYNTAX_OK')\""
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "SYNTAX_OK",
+            "description": "Both files must parse cleanly \u2014 no syntax errors"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit all changes to TID and push to GitHub",
+      "tool": "shell_execute",
+      "params": {
+        "command": "cd tid && git config user.email \"codemine@et-systems.local\" && git config user.name \"Codemine\" && git add inference_difference/responses_endpoint.py inference_difference/model_client.py && git commit -m \"fix(#133): Anthropic tool pass-through via _normalize_tools + _call_anthropic\\n\\nExtend _normalize_tools with Anthropic branch (OpenAI-nested -> name/description/input_schema).\\nAdd extra_params to _call_anthropic, inject tools+tool_choice into request body.\\nExtract tool_use blocks into ModelResponse.tool_calls.\\nMap stop_reason 'tool_use' -> finish_reason 'tool_calls'.\\nThread extra_params through call_stream()/_fake_stream_from_blocking().\\nLaw 4: fix at source in the single shim.\" && git push && echo PUSH_OK"
+      },
+      "validation": {
+        "checks": [
+          {
+            "operator": "contains",
+            "value": "PUSH_OK",
+            "description": "Commit and push must complete successfully"
+          }
+        ]
+      },
+      "on_failure": "abort_block"
+    }
+  ]
+}

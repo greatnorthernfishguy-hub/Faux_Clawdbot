@@ -1,0 +1,195 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-UNIAI-156",
+    "name": "UniAI splat_poc: fix generate_comparison() — restore original weights before baseline generation",
+    "agent": "codemine",
+    "scope": "github_repo",
+    "acceptance_criteria": [
+      "_restore_original_weights() function exists in splat_poc/hf_space/app.py, placed immediately after _patch_splats_into_model()",
+      "generate_comparison() calls _restore_original_weights() before generating the baseline",
+      "Old misleading comments ('the model may already be patched', 'Reload original weights for baseline', 'Actually we need to reload') are absent from non-comment lines",
+      "Changelog entry added to app.py",
+      "python3 -m py_compile uniai_work/splat_poc/hf_space/app.py succeeds",
+      "Change committed and pushed to greatnorthernfishguy-hub/UniAI"
+    ],
+    "depends_on": []
+  },
+  "constraints": {
+    "never": [
+      "Do not modify any file other than splat_poc/hf_space/app.py",
+      "Do not change any logic in _patch_splats_into_model()",
+      "Do not change STATE structure or any other function",
+      "Do not run sudo",
+      "Do not import new dependencies"
+    ],
+    "anti_drift": [
+      "Two targeted changes only: (1) add _restore_original_weights() after _patch_splats_into_model(), (2) call it at the top of the baseline generation block in generate_comparison(). Nothing else."
+    ],
+    "tool_allowlist": [
+      "shell_execute",
+      "read_file",
+      "edit_file"
+    ],
+    "shell_allowlist": [
+      "git",
+      "grep",
+      "echo",
+      "cat",
+      "python3",
+      "rm"
+    ],
+    "max_iterations": 25
+  },
+  "steps": [
+    {
+      "id": "check_token",
+      "type": "action",
+      "description": "Verify GITHUB_TOKEN is available",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import os; t=os.environ.get('GITHUB_TOKEN',''); print('TOKEN_OK' if t else 'TOKEN_MISSING')\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "TOKEN_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "cleanup_workspace",
+      "type": "action",
+      "description": "Remove stale partial clone directories from any previous runs",
+      "tool": "shell_execute",
+      "params": {
+        "command": "rm -rf uniai_work && echo CLEANED"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLEANED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "clone_repo",
+      "type": "action",
+      "description": "Clone UniAI repo",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git clone --depth=1 https://${GITHUB_TOKEN}@github.com/greatnorthernfishguy-hub/UniAI.git uniai_work && echo CLONED"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "CLONED" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_issue_exists",
+      "type": "action",
+      "description": "Confirm the misleading comment is still present — abort if already fixed (idempotency check)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"content=open('uniai_work/splat_poc/hf_space/app.py').read(); print(content.count('the model may already be patched'))\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "1" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_restore_function",
+      "type": "action",
+      "description": "Insert _restore_original_weights() immediately after _patch_splats_into_model() returns",
+      "tool": "edit_file",
+      "params": {
+        "path": "uniai_work/splat_poc/hf_space/app.py",
+        "old_text": "    model.load_state_dict(sd, strict=False)\n    logger.info(f\"Patched {len(STATE['layer_names'])} splat layers into model\")\n    return True\n\n\ndef generate_text(",
+        "new_text": "    model.load_state_dict(sd, strict=False)\n    logger.info(f\"Patched {len(STATE['layer_names'])} splat layers into model\")\n    return True\n\n\ndef _restore_original_weights():\n    \"\"\"Restore live model to original (unpatched) weights.\n\n    Used by generate_comparison() to ensure the 'before' baseline is\n    generated from genuinely unpatched weights, not whatever the model\n    was left in after prior generate_text() calls.\n    \"\"\"\n    model = STATE['live_model']\n    if model is None:\n        return False\n    if not STATE['original_weight_crops']:\n        return False\n\n    sd = model.state_dict()\n    for name, original_crop in STATE['original_weight_crops'].items():\n        if name not in sd:\n            continue\n        rows, cols = original_crop.shape\n        full_weight = sd[name].float()\n        full_weight[:rows, :cols] = original_crop\n        sd[name] = full_weight\n\n    model.load_state_dict(sd, strict=False)\n    logger.info(\"Restored original weights for baseline comparison\")\n    return True\n\n\ndef generate_text("
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "fix_generate_comparison",
+      "type": "action",
+      "description": "Update generate_comparison() to call _restore_original_weights() before baseline and remove misleading comments",
+      "tool": "edit_file",
+      "params": {
+        "path": "uniai_work/splat_poc/hf_space/app.py",
+        "old_text": "    yield \"**Generating with original weights...**\"\n\n    # Generate with original (unpatched) weights\n    try:\n        chat_prompt = tokenizer.apply_chat_template(\n            [{\"role\": \"user\", \"content\": prompt}],\n            tokenize=False, add_generation_prompt=True,\n        )\n    except Exception:\n        chat_prompt = prompt\n\n    inputs = tokenizer(chat_prompt, return_tensors=\"pt\", truncation=True,\n                       max_length=256)\n    max_tokens = int(max_tokens)\n\n    # Reload original weights for baseline\n    from transformers import AutoModelForCausalLM\n    # Use the already-loaded model but DON'T patch splats\n    # Actually we need to reload since we may have patched already\n    # Just generate — the model may already be patched, that's OK for a first pass\n    # The key comparison is: does it produce coherent text at all?\n\n    with torch.no_grad():",
+        "new_text": "    yield \"**Generating with original weights...**\"\n\n    # Restore to unpatched weights for a valid baseline\n    _restore_original_weights()\n\n    # Generate with original (unpatched) weights\n    try:\n        chat_prompt = tokenizer.apply_chat_template(\n            [{\"role\": \"user\", \"content\": prompt}],\n            tokenize=False, add_generation_prompt=True,\n        )\n    except Exception:\n        chat_prompt = prompt\n\n    inputs = tokenizer(chat_prompt, return_tensors=\"pt\", truncation=True,\n                       max_length=256)\n    max_tokens = int(max_tokens)\n\n    with torch.no_grad():"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "verify_old_comment_absent",
+      "type": "action",
+      "description": "Verify the misleading comment is gone from non-comment lines (Rule 11)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"lines=[l for l in open('uniai_work/splat_poc/hf_space/app.py') if not l.lstrip().startswith('#')]; print(sum(1 for l in lines if 'the model may already be patched' in l))\""
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "0" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "add_changelog",
+      "type": "action",
+      "description": "Add changelog entry to app.py header",
+      "tool": "edit_file",
+      "params": {
+        "path": "uniai_work/splat_poc/hf_space/app.py",
+        "old_text": "# ---- Changelog ----",
+        "new_text": "# ---- Changelog ----\n# [2026-04-24] Codemine (BLK-UNIAI-156) — Fix generate_comparison() baseline: add _restore_original_weights(), call before baseline generation\n# What: baseline was generated from already-patched model; _restore_original_weights() writes original_weight_crops back before comparison\n# Why: invalid 'before' made the comparison meaningless\n# How: inverse of _patch_splats_into_model() — writes stored original_weight_crops back to param.data slices"
+      },
+      "validation": {
+        "checks": [{ "operator": "result_is_string" }]
+      },
+      "on_failure": "continue"
+    },
+    {
+      "id": "syntax_check",
+      "type": "action",
+      "description": "Verify file compiles cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile uniai_work/splat_poc/hf_space/app.py && echo SYNTAX_OK"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "SYNTAX_OK" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "commit_and_push",
+      "type": "action",
+      "description": "Commit and push — handles 'nothing to commit' cleanly",
+      "tool": "shell_execute",
+      "params": {
+        "command": "git -C uniai_work config user.email \"codemine@et-systems.ai\" && git -C uniai_work config user.name \"Codemine\" && git -C uniai_work add splat_poc/hf_space/app.py && git -C uniai_work diff --cached --quiet && echo ALREADY_COMMITTED || (git -C uniai_work commit -m 'fix(splat_poc): restore original weights before comparison baseline (#156)' && git -C uniai_work push && echo COMMITTED)"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "COMMIT" }]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "id": "final_summary",
+      "type": "action",
+      "description": "Print completion confirmation",
+      "tool": "shell_execute",
+      "params": {
+        "command": "echo 'BLK-UNIAI-156 COMPLETE. _restore_original_weights() added. generate_comparison() baseline is now valid.'"
+      },
+      "validation": {
+        "checks": [{ "operator": "contains", "value": "BLK-UNIAI-156 COMPLETE" }]
+      },
+      "on_failure": "continue"
+    }
+  ]
+}

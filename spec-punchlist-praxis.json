@@ -1,0 +1,234 @@
+{
+  "spec_version": "1.0.0",
+  "block": {
+    "id": "BLK-PUNCH-PRAXIS-CLUSTER",
+    "name": "Praxis punchlist cluster — #198 #199 #200 #201",
+    "agent": "codemine",
+    "scope": "core/pipeline_bridge.py, tests/test_pipeline_bridge.py, SKILL.md",
+    "acceptance_criteria": [
+      "#201: OrganismPipeline.__init__ raises ValueError when len(stages) != len(names)",
+      "#200: module-level _make_grow_result() removed from test_pipeline_bridge.py (instance method retained)",
+      "#198: test_load_pipeline_cleans_up_temp_files_on_error added — verifies temp cleanup when instantiate_morpho raises",
+      "#199: SKILL.md description and capabilities updated to mention grow and grow_pipeline",
+      "py_compile passes on core/pipeline_bridge.py",
+      "pytest tests/test_pipeline_bridge.py passes (all existing tests green)"
+    ],
+    "depends_on": []
+  },
+  "snap_interface": {
+    "inputs": [
+      {"name": "pipeline_bridge", "type": "file", "source_block": "none", "path": "core/pipeline_bridge.py"},
+      {"name": "test_pipeline_bridge", "type": "file", "source_block": "none", "path": "tests/test_pipeline_bridge.py"},
+      {"name": "skill_md", "type": "file", "source_block": "none", "path": "SKILL.md"}
+    ],
+    "outputs": [
+      {"name": "pipeline_bridge_updated", "type": "file", "path": "core/pipeline_bridge.py"},
+      {"name": "tests_updated", "type": "file", "path": "tests/test_pipeline_bridge.py"},
+      {"name": "skill_md_updated", "type": "file", "path": "SKILL.md"}
+    ]
+  },
+  "constraints": {
+    "never": [
+      "Do NOT touch morphogenesis/ — Morphogenesis project is self-contained and NOT connected to this repo",
+      "Do NOT modify the instance method _make_grow_result inside TestPipelineBridgeGrow — only remove the module-level one at the top of the file",
+      "Do NOT change any existing test logic",
+      "Do NOT import from /home/josh/Morphogenesis or /home/josh/QuantumGraph"
+    ],
+    "anti_drift": [
+      "Four targeted changes only — one per punchlist item",
+      "The new test in #198 must mirror the pattern of test_load_pipeline_cleans_up_temp_files exactly, adding only the raise path"
+    ],
+    "tool_allowlist": ["read_file", "edit_file", "shell_execute"],
+    "max_iterations": 30
+  },
+  "steps": [
+    {
+      "type": "action",
+      "id": "read-init",
+      "description": "Read OrganismPipeline.__init__ to find exact insertion point for #201",
+      "tool": "read_file",
+      "params": {"path": "core/pipeline_bridge.py", "offset": 70, "limit": 20},
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "OrganismPipeline requires at least one stage"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "add-parity-check",
+      "description": "#201 — Add len(stages) != len(names) guard in OrganismPipeline.__init__ after the existing empty-stages check",
+      "tool": "edit_file",
+      "params": {
+        "path": "core/pipeline_bridge.py",
+        "old_text": "        if not stages:\n            raise ValueError(\"OrganismPipeline requires at least one stage\")\n        self._stages = stages",
+        "new_text": "        if not stages:\n            raise ValueError(\"OrganismPipeline requires at least one stage\")\n        if len(stages) != len(names):\n            raise ValueError(\n                f\"stages and names must have equal length, got {len(stages)} and {len(names)}\"\n            )\n        self._stages = stages"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "read-module-level-helper",
+      "description": "Read the module-level _make_grow_result to confirm its exact span before removing",
+      "tool": "read_file",
+      "params": {"path": "tests/test_pipeline_bridge.py", "offset": 23, "limit": 18},
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "def _make_grow_result"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "remove-dead-helper",
+      "description": "#200 — Remove the module-level _make_grow_result function (lines ~24-40). The identical instance method inside TestPipelineBridgeGrow must be kept.",
+      "tool": "edit_file",
+      "params": {
+        "path": "tests/test_pipeline_bridge.py",
+        "old_text": "def _make_grow_result(name: str, morpho_path: str, calibrated: bool = False):\n    \"\"\"Return a GrowResult-like mock for CreationBridge.grow().\"\"\"\n    r = MagicMock()\n    r.name = name\n    r.morpho_path = morpho_path\n    r.behaviors = [\"filter\"]\n    r.fitness = 0.85\n    r.alive = True\n    r.fingerprint = \"abc123\"\n    r.zone_graduations = 0.9\n    r.calibrated = calibrated\n    return r\n\n\n# ---------------------------------------------------------------------------",
+        "new_text": "# ---------------------------------------------------------------------------"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "read-cleanup-test",
+      "description": "Read test_load_pipeline_cleans_up_temp_files to understand the pattern for the new error-path test (#198)",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -n 'def test_load_pipeline_cleans_up_temp_files' tests/test_pipeline_bridge.py"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "test_load_pipeline_cleans_up_temp_files"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "read-cleanup-test-body",
+      "description": "Read the full body of test_load_pipeline_cleans_up_temp_files to use as the pattern for the new test",
+      "tool": "shell_execute",
+      "params": {
+        "command": "grep -n 'def test_load_pipeline_cleans_up_temp_files\\|def test_grow_then_load' tests/test_pipeline_bridge.py"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "add-error-cleanup-test",
+      "description": "#198 — Add test_load_pipeline_cleans_up_temp_files_on_error immediately after test_load_pipeline_cleans_up_temp_files. The new test patches instantiate_morpho to raise RuntimeError and asserts temp files are still cleaned up.",
+      "tool": "edit_file",
+      "params": {
+        "path": "tests/test_pipeline_bridge.py",
+        "old_text": "        # After load, temp files should be gone\n        for tmp_file in created_temps:\n            assert not tmp_file.exists(), f\"Temp file not cleaned up: {tmp_file}\"\n\n\n# ---------------------------------------------------------------------------\n# TestPipelineIntegration",
+        "new_text": "        # After load, temp files should be gone\n        for tmp_file in created_temps:\n            assert not tmp_file.exists(), f\"Temp file not cleaned up: {tmp_file}\"\n\n    def test_load_pipeline_cleans_up_temp_files_on_error(self, tmp_path):\n        \"\"\"Temp .morpho files must be deleted even when instantiate_morpho() raises.\"\"\"\n        import core.pipeline_bridge as pb\n\n        pipeline_path = self._write_fake_pipeline(tmp_path, n_stages=1)\n        created_temps = []\n\n        original_load_morpho = MagicMock(return_value=MagicMock())\n\n        def tracking_and_raising_instantiate(boundary):\n            temps = list(Path(tempfile.gettempdir()).glob(\"*.morpho\"))\n            created_temps.extend(temps)\n            raise RuntimeError(\"instantiate_morpho failed\")\n\n        with patch.object(pb, \"_MORPHOGENESIS_AVAILABLE\", True), \\\n             patch.object(pb, \"load_morpho\", original_load_morpho), \\\n             patch.object(pb, \"instantiate_morpho\", side_effect=tracking_and_raising_instantiate):\n            from core.pipeline_bridge import PipelineBridge\n            bridge = PipelineBridge()\n            with pytest.raises(RuntimeError, match=\"instantiate_morpho failed\"):\n                bridge.load_pipeline(pipeline_path)\n\n        # Temp files must be cleaned up even after the error\n        for tmp_file in created_temps:\n            assert not tmp_file.exists(), f\"Temp file not cleaned up on error: {tmp_file}\"\n\n\n# ---------------------------------------------------------------------------\n# TestPipelineIntegration"
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "update-skill-md",
+      "description": "#199 — Update SKILL.md to expose grow and grow_pipeline. Add both to the description frontmatter and add a Capabilities section listing what Praxis can do, including organism growth.",
+      "tool": "edit_file",
+      "params": {
+        "path": "SKILL.md",
+        "old_text": "description: Context intelligence substrate — captures conversation, artifacts, and outcomes for session continuity",
+        "new_text": "description: Context intelligence substrate — captures conversation, artifacts, and outcomes for session continuity. Can grow new organism pipelines from natural language descriptions (grow, grow_pipeline) and load existing .pipeline files for execution (load_pipeline)."
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "add-skill-capabilities",
+      "description": "Add a Capabilities section to SKILL.md body listing grow, grow_pipeline, and load_pipeline",
+      "tool": "edit_file",
+      "params": {
+        "path": "SKILL.md",
+        "old_text": "Praxis does not generate code. It provides the context intelligence that\nmakes vibe coding reliable, repeatable, and self-improving.",
+        "new_text": "Praxis does not generate code. It provides the context intelligence that\nmakes vibe coding reliable, repeatable, and self-improving.\n\n## Capabilities\n- **grow(description, seed)** — Grow a single organism from a natural language description. Returns a .morpho file path and fitness score.\n- **grow_pipeline(descriptions, seeds)** — Grow a multi-stage organism pipeline from a list of natural language stage descriptions. Returns a .pipeline file (gzip JSON with base64-encoded .morpho per stage).\n- **load_pipeline(pipeline_path)** — Load a .pipeline file and instantiate all stages into a runnable OrganismPipeline.\n- **Substrate recording** — Captures conversation, artifacts, and outcomes into the NG-Lite learning substrate for session continuity."
+      },
+      "validation": {
+        "checks": [{"operator": "result_is_string"}]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "syntax-check",
+      "description": "py_compile pipeline_bridge.py",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m py_compile core/pipeline_bridge.py && echo 'SYNTAX OK'"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "SYNTAX OK"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "verify-no-module-level-helper",
+      "description": "Confirm the module-level _make_grow_result is gone and the instance method remains",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -c \"import ast; src=open('tests/test_pipeline_bridge.py').read(); tree=ast.parse(src); module_fns=[n.name for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.col_offset==0]; print('module_fns:',module_fns); assert '_make_grow_result' not in module_fns, 'module-level helper still present'; print('OK')\""
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "contains", "value": "OK"},
+          {"operator": "not_contains", "value": "still present"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "action",
+      "id": "run-tests",
+      "description": "Run the Praxis test suite — all tests must pass",
+      "tool": "shell_execute",
+      "params": {
+        "command": "python3 -m pytest tests/test_pipeline_bridge.py -x -q 2>&1 | tail -15"
+      },
+      "validation": {
+        "checks": [
+          {"operator": "result_is_string"},
+          {"operator": "not_contains", "value": "FAILED"},
+          {"operator": "not_contains", "value": "ERROR"}
+        ]
+      },
+      "on_failure": "abort"
+    },
+    {
+      "type": "gate",
+      "id": "checkpoint",
+      "gate_type": "qb_checkpoint",
+      "description": "Confirm: #201 parity check present, #200 module-level helper gone (instance method kept), #198 error-path cleanup test added and passing, #199 SKILL.md description updated with grow/grow_pipeline/load_pipeline. All tests green."
+    }
+  ]
+}
